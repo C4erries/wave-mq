@@ -1,7 +1,5 @@
-# Контекст
-
-%%{init: {'theme':'default'}}%%
 ```mermaid
+%%{init: {'theme':'default'}}%%
 flowchart LR
   classDef person fill:#fdf5e6,stroke:#333;
   classDef ext fill:#eee,stroke:#555,stroke-dasharray:3 3;
@@ -13,14 +11,14 @@ flowchart LR
   Producer([Producer]):::person -->|Publish/Subscribe| MQTT
   Consumer([Consumer]):::person -->|Fetch/Subscribe| MQTT
   Producer -->|Produce| TCPAPI
-  Consumer -->|Fetch|  TCPAPI
+  Consumer -->|Fetch| TCPAPI
   MATLAB[[MATLAB]]:::ext -->|MQTT| MQTT
   Operator([Operator]):::person -->|Admin| AdminAPI
   Obs[[Prometheus/Grafana]]:::ext -->|scrape /metrics| Metrics
 
   subgraph Broker["Go Message Broker"]
     MQTT[MQTT Frontend]:::adapter
-    TCPAPI[TCP API (binary)]:::adapter
+    TCPAPI["TCP API (binary)"]:::adapter
     AdminAPI[Admin API]:::adapter
     App[Application Layer]:::app
     Domain[Domain Layer]:::domain

@@ -1,4 +1,5 @@
 ```mermaid
+%%{init: {'theme':'default'}}%%
 flowchart LR
   classDef node fill:#e6f7ff,stroke:#4a4a4a;
   classDef client fill:#fdf5e6,stroke:#333;
@@ -11,7 +12,7 @@ flowchart LR
   end
 
   subgraph SingleNode["Single-node (MVP)"]
-    A[Broker Node A Adapters + App + Domain + WAL/Index(zap, prometheus, pprof)]:::node
+    A["Broker Node A Adapters + App + Domain + WAL/Index(zap, prometheus, pprof)"]:::node
   end
 
   P -->|MQTT/TCP| A

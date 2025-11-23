@@ -1,6 +1,5 @@
 # Последовательность: Produce (acks=1)
 
-%%{init: {'theme':'default'}}%%
 ```mermaid
 sequenceDiagram
   autonumber
