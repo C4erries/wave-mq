@@ -3,7 +3,11 @@ package mqtt
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"net"
+	"sort"
+	"sync"
+	"time"
 
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -12,6 +16,8 @@ import (
 type BrokerAPI interface {
 	Produce(ctx context.Context, topic string, partition int, records []api.Record) (api.Offset, error)
 	Fetch(ctx context.Context, topic string, partition int, offset api.Offset, maxBytes int32) ([]api.Record, error)
+	ListOffsets(ctx context.Context, topic string, partition int) (api.Offset, api.Offset, error)
+	Metadata(ctx context.Context, topics []string) ([]api.PartitionMetadata, error)
 }
 
 // Server hosts the MQTT TCP listener and packet loop.
@@ -68,35 +74,207 @@ func (s *Server) Close() error {
 
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
-	// TODO: parse MQTT packets and dispatch to handlers.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	state := &clientState{
+		conn:   conn,
+		ctx:    ctx,
+		cancel: cancel,
+		subs:   make(map[string]subscriptionState),
+		broker: s.broker,
+	}
+	for {
+		pkt, err := readPacket(conn)
+		if err != nil {
+			return
+		}
+		switch v := pkt.(type) {
+		case *ConnectPacket:
+			if err := s.handleConnect(state, v); err != nil {
+				return
+			}
+		case *SubscribePacket:
+			if err := s.handleSubscribe(state, v); err != nil {
+				return
+			}
+		case *PublishPacket:
+			if err := s.handlePublish(state, v); err != nil {
+				return
+			}
+		case *PingreqPacket:
+			state.writeMu.Lock()
+			_ = writePingresp(conn, &PingrespPacket{})
+			state.writeMu.Unlock()
+		case *DisconnectPacket:
+			s.handleDisconnect(state)
+			return
+		default:
+			return
+		}
+	}
 }
 
-// handleConnect processes an MQTT CONNECT packet.
-func (s *Server) handleConnect(pkt ConnectPacket) (*ConnackPacket, error) {
-	_ = pkt
-	panic("not implemented")
+type clientState struct {
+	conn   net.Conn
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	clientID   string
+	cleanStart bool
+	keepAlive  time.Duration
+
+	broker BrokerAPI
+
+	mu   sync.Mutex
+	subs map[string]subscriptionState // mqtt topic -> state
+
+	writeMu sync.Mutex
 }
 
-// handleSubscribe processes SUBSCRIBE packets.
-func (s *Server) handleSubscribe(pkt SubscribePacket) (*SubackPacket, error) {
-	_ = pkt
-	panic("not implemented")
+type subscriptionState struct {
+	topic     string
+	partition int
+	qos       byte
+	offset    api.Offset
+	stop      context.CancelFunc
 }
 
-// handlePublish processes PUBLISH packets (QoS0/1).
-func (s *Server) handlePublish(pkt PublishPacket) (*PubackPacket, error) {
-	_ = pkt
-	panic("not implemented")
+func (s *Server) handleConnect(state *clientState, pkt *ConnectPacket) error {
+	if pkt.ClientID == "" {
+		return fmt.Errorf("client id required")
+	}
+	state.clientID = pkt.ClientID
+	state.cleanStart = pkt.CleanStart
+	state.keepAlive = time.Duration(pkt.KeepAliveSec) * time.Second
+	resp := &ConnackPacket{SessionPresent: false, ReturnCode: 0}
+	state.writeMu.Lock()
+	defer state.writeMu.Unlock()
+	return writeConnack(state.conn, resp)
 }
 
-// handlePingReq processes PINGREQ packets.
-func (s *Server) handlePingReq(pkt PingreqPacket) (*PingrespPacket, error) {
-	_ = pkt
-	panic("not implemented")
+func (s *Server) handleSubscribe(state *clientState, pkt *SubscribePacket) error {
+	ack := &SubackPacket{PacketID: pkt.PacketID}
+	granted := make([]byte, len(pkt.Topics))
+	for i, sub := range pkt.Topics {
+		internalTopic, partition, err := s.mapTopic(state.ctx, sub.Filter, state.clientID)
+		if err != nil {
+			granted[i] = 0x80 // failure
+			continue
+		}
+		if sub.QoS > qos1 {
+			granted[i] = 0x80
+			continue
+		}
+		granted[i] = sub.QoS
+		state.trackSubscription(sub.Filter, internalTopic, partition, sub.QoS)
+	}
+	ack.Granted = granted
+	state.writeMu.Lock()
+	defer state.writeMu.Unlock()
+	if err := writeSuback(state.conn, ack); err != nil {
+		return err
+	}
+	return nil
 }
 
-// handleDisconnect processes DISCONNECT packets.
-func (s *Server) handleDisconnect(pkt DisconnectPacket) error {
-	_ = pkt
-	panic("not implemented")
+func (state *clientState) trackSubscription(mqttTopic, topic string, partition int, qos byte) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if old, ok := state.subs[mqttTopic]; ok && old.stop != nil {
+		old.stop()
+	}
+	ctx, cancel := context.WithCancel(state.ctx)
+	sub := subscriptionState{
+		topic:     topic,
+		partition: partition,
+		qos:       qos,
+		offset:    -1,
+		stop:      cancel,
+	}
+	state.subs[mqttTopic] = sub
+	go state.consumeLoop(ctx, mqttTopic, sub)
+}
+
+func (state *clientState) consumeLoop(ctx context.Context, mqttTopic string, sub subscriptionState) {
+	// Find latest offset to tail new messages.
+	_, latest, err := state.broker.ListOffsets(ctx, sub.topic, sub.partition)
+	if err != nil {
+		return
+	}
+	offset := latest + 1
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		recs, err := state.broker.Fetch(ctx, sub.topic, sub.partition, offset, 64<<10)
+		if err != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if len(recs) == 0 {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		for _, r := range recs {
+			pkt := &PublishPacket{
+				Topic:   mqttTopic,
+				QoS:     sub.qos,
+				Payload: r.Value,
+			}
+			state.writeMu.Lock()
+			_ = writePublish(state.conn, pkt)
+			state.writeMu.Unlock()
+			offset = r.Offset + 1
+		}
+	}
+}
+
+func (s *Server) handlePublish(state *clientState, pkt *PublishPacket) error {
+	internalTopic, partition, err := s.mapTopic(state.ctx, pkt.Topic, state.clientID)
+	if err != nil {
+		return err
+	}
+	record := api.Record{Value: pkt.Payload}
+	if _, err := s.broker.Produce(state.ctx, internalTopic, partition, []api.Record{record}); err != nil {
+		return err
+	}
+	if pkt.QoS == qos1 {
+		state.writeMu.Lock()
+		defer state.writeMu.Unlock()
+		return writePuback(state.conn, &PubackPacket{PacketID: pkt.PacketID})
+	}
+	return nil
+}
+
+func (s *Server) handleDisconnect(state *clientState) {
+	state.cancel()
+	for _, sub := range state.subs {
+		if sub.stop != nil {
+			sub.stop()
+		}
+	}
+}
+
+func (s *Server) mapTopic(ctx context.Context, mqttTopic, clientID string) (string, int, error) {
+	meta, err := s.broker.Metadata(ctx, []string{mqttTopic})
+	if err != nil {
+		return "", 0, err
+	}
+	var partitions []int
+	for _, m := range meta {
+		if m.Replica.Topic == mqttTopic {
+			partitions = append(partitions, m.Replica.Partition)
+		}
+	}
+	if len(partitions) == 0 {
+		return "", 0, fmt.Errorf("topic not found")
+	}
+	sort.Ints(partitions)
+	hash := fnv.New32a()
+	hash.Write([]byte(mqttTopic))
+	hash.Write([]byte(clientID))
+	pid := int(hash.Sum32()) % len(partitions)
+	return mqttTopic, partitions[pid], nil
 }
