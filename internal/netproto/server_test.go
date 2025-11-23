@@ -12,11 +12,15 @@ import (
 )
 
 type fakeBroker struct {
-	topics map[string]map[int][]api.Record
+	topics    map[string]map[int][]api.Record
+	committed map[string]api.Offset
 }
 
 func newFakeBroker() *fakeBroker {
-	return &fakeBroker{topics: make(map[string]map[int][]api.Record)}
+	return &fakeBroker{
+		topics:    make(map[string]map[int][]api.Record),
+		committed: make(map[string]api.Offset),
+	}
 }
 
 func (b *fakeBroker) CreateTopic(ctx context.Context, name string, cfg api.TopicConfig) error {
@@ -79,19 +83,23 @@ func (b *fakeBroker) ListOffsets(ctx context.Context, topic string, partition in
 
 func (b *fakeBroker) CommitOffset(ctx context.Context, group string, topic string, partition int, offset api.Offset) error {
 	_ = ctx
-	_ = group
-	_ = topic
-	_ = partition
-	_ = offset
+	key := fmt.Sprintf("%s:%s:%d", group, topic, partition)
+	current, ok := b.committed[key]
+	if ok && offset < current {
+		return fmt.Errorf("regression")
+	}
+	b.committed[key] = offset
 	return nil
 }
 
 func (b *fakeBroker) FetchCommitted(ctx context.Context, group string, topic string, partition int) (api.Offset, error) {
 	_ = ctx
-	_ = group
-	_ = topic
-	_ = partition
-	return 0, nil
+	key := fmt.Sprintf("%s:%s:%d", group, topic, partition)
+	off, ok := b.committed[key]
+	if !ok {
+		return -1, errPartitionNotFound
+	}
+	return off, nil
 }
 
 func (b *fakeBroker) Metadata(ctx context.Context, topics []string) ([]api.PartitionMetadata, error) {
@@ -180,5 +188,29 @@ func TestServerHandlers(t *testing.T) {
 	fResp, err := decodeFetchResponse(fRespPayload)
 	if err != nil || fResp.Error != api.ErrNone || len(fResp.Records) != 1 || !bytes.Equal(fResp.Records[0].Value, []byte("v1")) {
 		t.Fatalf("fetch resp: %+v err=%v", fResp, err)
+	}
+
+	// CommitOffset
+	coReq := &CommitOffsetRequest{Group: "g1", Topic: "a", Partition: 0, Offset: 1}
+	coPayload, _ := encodeCommitOffsetRequest(coReq)
+	coRespPayload, err := send(api.APIKeyCommitOffset, 4, coPayload)
+	if err != nil {
+		t.Fatalf("commit send: %v", err)
+	}
+	coResp, err := decodeCommitOffsetResponse(coRespPayload)
+	if err != nil || coResp.Error != api.ErrNone {
+		t.Fatalf("commit resp: %+v err=%v", coResp, err)
+	}
+
+	// FetchCommitted
+	fcReq := &FetchCommittedRequest{Group: "g1", Topic: "a", Partition: 0}
+	fcPayload, _ := encodeFetchCommittedRequest(fcReq)
+	fcRespPayload, err := send(api.APIKeyFetchCommitted, 5, fcPayload)
+	if err != nil {
+		t.Fatalf("fetch committed send: %v", err)
+	}
+	fcResp, err := decodeFetchCommittedResponse(fcRespPayload)
+	if err != nil || fcResp.Error != api.ErrNone || fcResp.Offset != 1 {
+		t.Fatalf("fetch committed resp: %+v err=%v", fcResp, err)
 	}
 }

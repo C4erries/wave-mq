@@ -620,7 +620,127 @@ func decodePingResponse(payload []byte) (*PingResponse, error) {
 	return &PingResponse{Error: api.ErrorCode(ec)}, nil
 }
 
-// TODO: commit offset and fetch committed codecs when the broker supports them on the wire.
+func encodeCommitOffsetRequest(req *CommitOffsetRequest) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	if err := putString(buf, req.Group); err != nil {
+		return nil, err
+	}
+	if err := putString(buf, req.Topic); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.BigEndian, int64(req.Offset)); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func decodeCommitOffsetRequest(payload []byte) (*CommitOffsetRequest, error) {
+	buf := bytes.NewBuffer(payload)
+	group, err := readString(buf)
+	if err != nil {
+		return nil, err
+	}
+	topic, err := readString(buf)
+	if err != nil {
+		return nil, err
+	}
+	var partition int32
+	if err := binary.Read(buf, binary.BigEndian, &partition); err != nil {
+		return nil, err
+	}
+	var offset int64
+	if err := binary.Read(buf, binary.BigEndian, &offset); err != nil {
+		return nil, err
+	}
+	return &CommitOffsetRequest{
+		Group:     group,
+		Topic:     topic,
+		Partition: int(partition),
+		Offset:    api.Offset(offset),
+	}, nil
+}
+
+func encodeCommitOffsetResponse(resp *CommitOffsetResponse) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	if err := binary.Write(buf, binary.BigEndian, int16(resp.Error)); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func decodeCommitOffsetResponse(payload []byte) (*CommitOffsetResponse, error) {
+	buf := bytes.NewBuffer(payload)
+	var ec int16
+	if err := binary.Read(buf, binary.BigEndian, &ec); err != nil {
+		return nil, err
+	}
+	return &CommitOffsetResponse{Error: api.ErrorCode(ec)}, nil
+}
+
+func encodeFetchCommittedRequest(req *FetchCommittedRequest) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	if err := putString(buf, req.Group); err != nil {
+		return nil, err
+	}
+	if err := putString(buf, req.Topic); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func decodeFetchCommittedRequest(payload []byte) (*FetchCommittedRequest, error) {
+	buf := bytes.NewBuffer(payload)
+	group, err := readString(buf)
+	if err != nil {
+		return nil, err
+	}
+	topic, err := readString(buf)
+	if err != nil {
+		return nil, err
+	}
+	var partition int32
+	if err := binary.Read(buf, binary.BigEndian, &partition); err != nil {
+		return nil, err
+	}
+	return &FetchCommittedRequest{
+		Group:     group,
+		Topic:     topic,
+		Partition: int(partition),
+	}, nil
+}
+
+func encodeFetchCommittedResponse(resp *FetchCommittedResponse) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	if err := binary.Write(buf, binary.BigEndian, int64(resp.Offset)); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.BigEndian, int16(resp.Error)); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func decodeFetchCommittedResponse(payload []byte) (*FetchCommittedResponse, error) {
+	buf := bytes.NewBuffer(payload)
+	var offset int64
+	if err := binary.Read(buf, binary.BigEndian, &offset); err != nil {
+		return nil, err
+	}
+	var ec int16
+	if err := binary.Read(buf, binary.BigEndian, &ec); err != nil {
+		return nil, err
+	}
+	return &FetchCommittedResponse{
+		Offset: api.Offset(offset),
+		Error:  api.ErrorCode(ec),
+	}, nil
+}
 
 // Exported helpers for external packages (mbctl).
 func EncodeRequestFrame(apiKey api.APIKey, corr int32, payload []byte) ([]byte, error) {
@@ -655,3 +775,29 @@ func DecodeMetadataResponse(p []byte) (*MetadataResponse, error) { return decode
 func EncodePingRequest(req *PingRequest) ([]byte, error)    { return encodePingRequest(req) }
 func EncodePingResponse(resp *PingResponse) ([]byte, error) { return encodePingResponse(resp) }
 func DecodePingResponse(p []byte) (*PingResponse, error)    { return decodePingResponse(p) }
+
+func EncodeCommitOffsetRequest(req *CommitOffsetRequest) ([]byte, error) {
+	return encodeCommitOffsetRequest(req)
+}
+func DecodeCommitOffsetRequest(p []byte) (*CommitOffsetRequest, error) {
+	return decodeCommitOffsetRequest(p)
+}
+func EncodeCommitOffsetResponse(resp *CommitOffsetResponse) ([]byte, error) {
+	return encodeCommitOffsetResponse(resp)
+}
+func DecodeCommitOffsetResponse(p []byte) (*CommitOffsetResponse, error) {
+	return decodeCommitOffsetResponse(p)
+}
+
+func EncodeFetchCommittedRequest(req *FetchCommittedRequest) ([]byte, error) {
+	return encodeFetchCommittedRequest(req)
+}
+func DecodeFetchCommittedRequest(p []byte) (*FetchCommittedRequest, error) {
+	return decodeFetchCommittedRequest(p)
+}
+func EncodeFetchCommittedResponse(resp *FetchCommittedResponse) ([]byte, error) {
+	return encodeFetchCommittedResponse(resp)
+}
+func DecodeFetchCommittedResponse(p []byte) (*FetchCommittedResponse, error) {
+	return decodeFetchCommittedResponse(p)
+}

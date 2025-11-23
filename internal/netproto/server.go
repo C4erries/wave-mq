@@ -165,6 +165,27 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 		}
 		_ = req
 		return encodePingResponse(&PingResponse{Error: api.ErrNone})
+	case api.APIKeyCommitOffset:
+		req, err := decodeCommitOffsetRequest(payload)
+		if err != nil {
+			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
+		}
+		resp := &CommitOffsetResponse{}
+		if err := s.broker.CommitOffset(ctx, req.Group, req.Topic, req.Partition, req.Offset); err != nil {
+			resp.Error = mapError(err)
+		}
+		return encodeCommitOffsetResponse(resp)
+	case api.APIKeyFetchCommitted:
+		req, err := decodeFetchCommittedRequest(payload)
+		if err != nil {
+			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
+		}
+		offset, err := s.broker.FetchCommitted(ctx, req.Group, req.Topic, req.Partition)
+		resp := &FetchCommittedResponse{Offset: offset}
+		if err != nil {
+			resp.Error = mapError(err)
+		}
+		return encodeFetchCommittedResponse(resp)
 	default:
 		return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
 	}
@@ -182,6 +203,10 @@ func (s *Server) errorResponseForKey(apiKey api.APIKey, code api.ErrorCode) ([]b
 		return encodeMetadataResponse(&MetadataResponse{Error: code})
 	case api.APIKeyPing:
 		return encodePingResponse(&PingResponse{Error: code})
+	case api.APIKeyCommitOffset:
+		return encodeCommitOffsetResponse(&CommitOffsetResponse{Error: code})
+	case api.APIKeyFetchCommitted:
+		return encodeFetchCommittedResponse(&FetchCommittedResponse{Error: code})
 	default:
 		return encodePingResponse(&PingResponse{Error: code})
 	}

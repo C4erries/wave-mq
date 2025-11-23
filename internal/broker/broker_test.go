@@ -127,3 +127,89 @@ func TestMetadata(t *testing.T) {
 		t.Fatalf("unexpected topic in filtered metadata: %s", filtered[0].Replica.Topic)
 	}
 }
+
+func TestCommitOffsetMonotonic(t *testing.T) {
+	b, cleanup := newTestBroker(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "t", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	if err := b.CommitOffset(ctx, "g1", "t", 0, 2); err != nil {
+		t.Fatalf("commit 2: %v", err)
+	}
+	if err := b.CommitOffset(ctx, "g1", "t", 0, 5); err != nil {
+		t.Fatalf("commit 5: %v", err)
+	}
+	off, err := b.FetchCommitted(ctx, "g1", "t", 0)
+	if err != nil {
+		t.Fatalf("fetch committed: %v", err)
+	}
+	if off != 5 {
+		t.Fatalf("expected offset 5, got %d", off)
+	}
+	if err := b.CommitOffset(ctx, "g1", "t", 0, 4); err == nil {
+		t.Fatalf("expected regression error, got nil")
+	}
+	off, _ = b.FetchCommitted(ctx, "g1", "t", 0)
+	if off != 5 {
+		t.Fatalf("offset regressed to %d", off)
+	}
+}
+
+func TestJoinGroupAssignments(t *testing.T) {
+	b, cleanup := newTestBroker(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "t", api.TopicConfig{Partitions: 4}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	assign1, err := b.JoinGroup(ctx, "g1", "m1", []string{"t"})
+	if err != nil {
+		t.Fatalf("join m1: %v", err)
+	}
+	assign2, err := b.JoinGroup(ctx, "g1", "m2", []string{"t"})
+	if err != nil {
+		t.Fatalf("join m2: %v", err)
+	}
+	cover := make(map[int]string)
+	for _, p := range assign1["t"] {
+		cover[p] = "m1"
+	}
+	for _, p := range assign2["t"] {
+		if owner, ok := cover[p]; ok {
+			t.Fatalf("partition %d assigned to both %s and m2", p, owner)
+		}
+		cover[p] = "m2"
+	}
+	if len(cover) != 4 {
+		t.Fatalf("not all partitions assigned: %v", cover)
+	}
+}
+
+func TestLeaveGroupReassignment(t *testing.T) {
+	b, cleanup := newTestBroker(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "t", api.TopicConfig{Partitions: 3}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	_, err := b.JoinGroup(ctx, "g", "m1", []string{"t"})
+	if err != nil {
+		t.Fatalf("join m1: %v", err)
+	}
+	_, err = b.JoinGroup(ctx, "g", "m2", []string{"t"})
+	if err != nil {
+		t.Fatalf("join m2: %v", err)
+	}
+	if err := b.LeaveGroup(ctx, "g", "m1"); err != nil {
+		t.Fatalf("leave m1: %v", err)
+	}
+	assignments, err := b.JoinGroup(ctx, "g", "m2", []string{"t"})
+	if err != nil {
+		t.Fatalf("rejoin m2: %v", err)
+	}
+	if len(assignments["t"]) != 3 {
+		t.Fatalf("expected m2 to own all partitions after m1 left, got %v", assignments["t"])
+	}
+}

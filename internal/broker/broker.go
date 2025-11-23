@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/c4erries/wave-mq/internal/storage"
@@ -44,12 +45,17 @@ type ConsumerGroup struct {
 	Name    string
 	Members map[string]*GroupMember
 	Offsets map[string]map[int]api.Offset
+
+	assignments map[string]map[string][]int // topic -> memberID -> partitions
+	mu          sync.RWMutex
 }
 
 // GroupMember describes a single consumer in a group.
 type GroupMember struct {
 	ClientID string
 	Topics   []string
+	// Assigned partitions per topic for this member.
+	Assignments map[string][]int
 }
 
 // NewBroker wires together configuration and the storage backend.
@@ -212,20 +218,52 @@ func (b *Broker) ListOffsets(ctx context.Context, topic string, partition int) (
 // CommitOffset stores a consumer group's committed offset.
 func (b *Broker) CommitOffset(ctx context.Context, group string, topic string, partition int, offset api.Offset) error {
 	_ = ctx
-	_ = group
-	_ = topic
-	_ = partition
-	_ = offset
-	panic("not implemented")
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	g, ok := b.groups[group]
+	if !ok {
+		g = &ConsumerGroup{
+			Name:        group,
+			Members:     make(map[string]*GroupMember),
+			Offsets:     make(map[string]map[int]api.Offset),
+			assignments: make(map[string]map[string][]int),
+		}
+		b.groups[group] = g
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.Offsets[topic]; !ok {
+		g.Offsets[topic] = make(map[int]api.Offset)
+	}
+	current, ok := g.Offsets[topic][partition]
+	if ok && offset < current {
+		return fmt.Errorf("offset regression: current=%d new=%d", current, offset)
+	}
+	g.Offsets[topic][partition] = offset
+	// TODO: persist offsets to durable storage.
+	return nil
 }
 
 // FetchCommitted returns the last committed offset for a consumer group.
 func (b *Broker) FetchCommitted(ctx context.Context, group string, topic string, partition int) (api.Offset, error) {
 	_ = ctx
-	_ = group
-	_ = topic
-	_ = partition
-	panic("not implemented")
+	b.mu.RLock()
+	g, ok := b.groups[group]
+	b.mu.RUnlock()
+	if !ok {
+		return -1, fmt.Errorf("group not found")
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	topicOffsets, ok := g.Offsets[topic]
+	if !ok {
+		return -1, fmt.Errorf("topic not found")
+	}
+	off, ok := topicOffsets[partition]
+	if !ok {
+		return -1, fmt.Errorf("partition not found")
+	}
+	return off, nil
 }
 
 // Metadata exposes the current topic/partition layout.
@@ -266,4 +304,122 @@ func (b *Broker) Close() error {
 	defer b.mu.Unlock()
 	b.closed = true
 	return nil
+}
+
+// JoinGroup registers a member in a consumer group and returns its assignments.
+// Assignments are calculated per topic using simple round-robin over partitions.
+func (b *Broker) JoinGroup(ctx context.Context, group, memberID string, topics []string) (map[string][]int, error) {
+	_ = ctx
+	if memberID == "" {
+		return nil, fmt.Errorf("memberID required")
+	}
+	if len(topics) == 0 {
+		return nil, fmt.Errorf("at least one topic required")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	g, ok := b.groups[group]
+	if !ok {
+		g = &ConsumerGroup{
+			Name:        group,
+			Members:     make(map[string]*GroupMember),
+			Offsets:     make(map[string]map[int]api.Offset),
+			assignments: make(map[string]map[string][]int),
+		}
+		b.groups[group] = g
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	member, ok := g.Members[memberID]
+	if !ok {
+		member = &GroupMember{ClientID: memberID, Topics: topics, Assignments: make(map[string][]int)}
+		g.Members[memberID] = member
+	} else {
+		member.Topics = topics
+	}
+	for _, topic := range topics {
+		t, exists := b.topics[topic]
+		if !exists {
+			return nil, fmt.Errorf("topic not found")
+		}
+		assignment := rebalanceTopic(t, g)
+		g.assignments[topic] = assignment
+		updateMemberAssignments(g, topic)
+	}
+	return member.Assignments, nil
+}
+
+// LeaveGroup removes a member and rebalances assignments.
+func (b *Broker) LeaveGroup(ctx context.Context, group, memberID string) error {
+	_ = ctx
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	g, ok := b.groups[group]
+	if !ok {
+		return fmt.Errorf("group not found")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.Members, memberID)
+	for topic, members := range g.assignments {
+		delete(members, memberID)
+		topicMeta, ok := b.topics[topic]
+		if !ok {
+			continue
+		}
+		g.assignments[topic] = rebalanceTopic(topicMeta, g)
+		updateMemberAssignments(g, topic)
+	}
+	// If no members remain, clean up group assignments (group kept for offsets).
+	if len(g.Members) == 0 {
+		g.assignments = make(map[string]map[string][]int)
+	}
+	return nil
+}
+
+func rebalanceTopic(topic *Topic, g *ConsumerGroup) map[string][]int {
+	memberIDs := sortedMembers(g)
+	assign := make(map[string][]int)
+	if len(memberIDs) == 0 {
+		return assign
+	}
+	parts := sortedPartitions(topic)
+	i := 0
+	for _, pid := range parts {
+		member := memberIDs[i%len(memberIDs)]
+		assign[member] = append(assign[member], pid)
+		i++
+	}
+	return assign
+}
+
+func updateMemberAssignments(g *ConsumerGroup, topic string) {
+	for id, m := range g.Members {
+		if m.Assignments == nil {
+			m.Assignments = make(map[string][]int)
+		}
+		if ass, ok := g.assignments[topic]; ok {
+			m.Assignments[topic] = ass[id]
+		} else {
+			delete(m.Assignments, topic)
+		}
+	}
+}
+
+func sortedMembers(g *ConsumerGroup) []string {
+	res := make([]string, 0, len(g.Members))
+	for id := range g.Members {
+		res = append(res, id)
+	}
+	sort.Strings(res)
+	return res
+}
+
+func sortedPartitions(t *Topic) []int {
+	res := make([]int, 0, len(t.Partitions))
+	for p := range t.Partitions {
+		res = append(res, p)
+	}
+	sort.Ints(res)
+	return res
 }

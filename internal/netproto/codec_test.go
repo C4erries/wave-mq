@@ -184,3 +184,57 @@ func TestPingCodec(t *testing.T) {
 		t.Fatalf("resp mismatch")
 	}
 }
+
+func TestCommitOffsetCodec(t *testing.T) {
+	req := &CommitOffsetRequest{Group: "g", Topic: "t", Partition: 1, Offset: 10}
+	p, err := encodeCommitOffsetRequest(req)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := decodeCommitOffsetRequest(p)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Group != req.Group || got.Offset != req.Offset {
+		t.Fatalf("roundtrip mismatch: %#v", got)
+	}
+	resp := &CommitOffsetResponse{Error: api.ErrNone}
+	rp, err := encodeCommitOffsetResponse(resp)
+	if err != nil {
+		t.Fatalf("encode resp: %v", err)
+	}
+	dr, err := decodeCommitOffsetResponse(rp)
+	if err != nil {
+		t.Fatalf("decode resp: %v", err)
+	}
+	if dr.Error != resp.Error {
+		t.Fatalf("resp mismatch")
+	}
+}
+
+func TestFetchCommittedCodec(t *testing.T) {
+	req := &FetchCommittedRequest{Group: "g", Topic: "t", Partition: 0}
+	p, err := encodeFetchCommittedRequest(req)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := decodeFetchCommittedRequest(p)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Group != req.Group || got.Partition != req.Partition {
+		t.Fatalf("roundtrip mismatch")
+	}
+	resp := &FetchCommittedResponse{Offset: 12, Error: api.ErrNone}
+	rp, err := encodeFetchCommittedResponse(resp)
+	if err != nil {
+		t.Fatalf("encode resp: %v", err)
+	}
+	dr, err := decodeFetchCommittedResponse(rp)
+	if err != nil {
+		t.Fatalf("decode resp: %v", err)
+	}
+	if dr.Offset != resp.Offset || dr.Error != resp.Error {
+		t.Fatalf("resp mismatch")
+	}
+}
