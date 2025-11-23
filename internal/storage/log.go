@@ -124,6 +124,12 @@ func (m *Manager) OpenLog(opts LogOptions) (Log, error) {
 
 // Recover scans on-disk logs and repairs truncated tails if needed.
 func (m *Manager) Recover(ctx context.Context) error {
+	if _, err := os.Stat(m.cfg.DataDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
 	return filepath.Walk(m.cfg.DataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err

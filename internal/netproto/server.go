@@ -3,7 +3,10 @@ package netproto
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
+	"strings"
+	"sync/atomic"
 
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -25,6 +28,7 @@ type Server struct {
 	broker  BrokerAPI
 	ln      net.Listener
 	started bool
+	corrID  int32
 }
 
 // NewServer constructs a TCP server bound to addr.
@@ -85,54 +89,121 @@ type frame struct {
 
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
-	// TODO: parse length-prefixed frames and route to handlers.
+	for {
+		apiKey, corr, payload, err := decodeRequestFrame(conn)
+		if err != nil {
+			if err == io.EOF {
+				return
+			}
+			return
+		}
+		respPayload, err := s.dispatch(conn, apiKey, payload)
+		if err != nil {
+			return
+		}
+		frame, err := encodeResponseFrame(apiKey, corr, respPayload)
+		if err != nil {
+			return
+		}
+		if _, err := conn.Write(frame); err != nil {
+			return
+		}
+	}
 }
 
-// handleCreateTopic dispatches CreateTopic requests.
-func (s *Server) handleCreateTopic(ctx context.Context, req CreateTopicRequest) (*CreateTopicResponse, error) {
-	_ = ctx
-	_ = req
-	panic("not implemented")
+func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]byte, error) {
+	ctx := context.Background()
+	switch apiKey {
+	case api.APIKeyCreateTopic:
+		req, err := decodeCreateTopicRequest(payload)
+		if err != nil {
+			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
+		}
+		err = s.broker.CreateTopic(ctx, req.Topic, api.TopicConfig{Partitions: req.Partitions, ReplicationFactor: req.ReplicationFactor})
+		resp := &CreateTopicResponse{}
+		if err != nil {
+			resp.Error = mapError(err)
+		}
+		return encodeCreateTopicResponse(resp)
+	case api.APIKeyProduce:
+		req, err := decodeProduceRequest(payload)
+		if err != nil {
+			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
+		}
+		base, err := s.broker.Produce(ctx, req.Topic, req.Partition, req.Records)
+		resp := &ProduceResponse{BaseOffset: base}
+		if err != nil {
+			resp.Error = mapError(err)
+		}
+		return encodeProduceResponse(resp)
+	case api.APIKeyFetch:
+		req, err := decodeFetchRequest(payload)
+		if err != nil {
+			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
+		}
+		recs, err := s.broker.Fetch(ctx, req.Topic, req.Partition, req.Offset, req.MaxBytes)
+		resp := &FetchResponse{Records: recs}
+		if err != nil {
+			resp.Error = mapError(err)
+		}
+		return encodeFetchResponse(resp)
+	case api.APIKeyMetadata:
+		req, err := decodeMetadataRequest(payload)
+		if err != nil {
+			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
+		}
+		md, err := s.broker.Metadata(ctx, req.Topics)
+		resp := &MetadataResponse{Partitions: md}
+		if err != nil {
+			resp.Error = mapError(err)
+		}
+		return encodeMetadataResponse(resp)
+	case api.APIKeyPing:
+		req, err := decodePingRequest(payload)
+		if err != nil {
+			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
+		}
+		_ = req
+		return encodePingResponse(&PingResponse{Error: api.ErrNone})
+	default:
+		return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
+	}
 }
 
-// handleProduce dispatches Produce requests.
-func (s *Server) handleProduce(ctx context.Context, req ProduceRequest) (*ProduceResponse, error) {
-	_ = ctx
-	_ = req
-	panic("not implemented")
+func (s *Server) errorResponseForKey(apiKey api.APIKey, code api.ErrorCode) ([]byte, error) {
+	switch apiKey {
+	case api.APIKeyCreateTopic:
+		return encodeCreateTopicResponse(&CreateTopicResponse{Error: code})
+	case api.APIKeyProduce:
+		return encodeProduceResponse(&ProduceResponse{BaseOffset: -1, Error: code})
+	case api.APIKeyFetch:
+		return encodeFetchResponse(&FetchResponse{Records: nil, Error: code})
+	case api.APIKeyMetadata:
+		return encodeMetadataResponse(&MetadataResponse{Error: code})
+	case api.APIKeyPing:
+		return encodePingResponse(&PingResponse{Error: code})
+	default:
+		return encodePingResponse(&PingResponse{Error: code})
+	}
 }
 
-// handleFetch dispatches Fetch requests.
-func (s *Server) handleFetch(ctx context.Context, req FetchRequest) (*FetchResponse, error) {
-	_ = ctx
-	_ = req
-	panic("not implemented")
+func (s *Server) nextCorrID() int32 {
+	return atomic.AddInt32(&s.corrID, 1)
 }
 
-// handleMetadata dispatches Metadata requests.
-func (s *Server) handleMetadata(ctx context.Context, req MetadataRequest) (*MetadataResponse, error) {
-	_ = ctx
-	_ = req
-	panic("not implemented")
-}
-
-// handleCommitOffset dispatches CommitOffset requests.
-func (s *Server) handleCommitOffset(ctx context.Context, req CommitOffsetRequest) (*CommitOffsetResponse, error) {
-	_ = ctx
-	_ = req
-	panic("not implemented")
-}
-
-// handleFetchCommitted dispatches FetchCommitted requests.
-func (s *Server) handleFetchCommitted(ctx context.Context, req FetchCommittedRequest) (*FetchCommittedResponse, error) {
-	_ = ctx
-	_ = req
-	panic("not implemented")
-}
-
-// handlePing handles ping health checks.
-func (s *Server) handlePing(ctx context.Context, req PingRequest) (*PingResponse, error) {
-	_ = ctx
-	_ = req
-	panic("not implemented")
+func mapError(err error) api.ErrorCode {
+	if err == nil {
+		return api.ErrNone
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "topic not found"):
+		return api.ErrTopicNotFound
+	case strings.Contains(msg, "partition not found"):
+		return api.ErrPartitionNotFound
+	case strings.Contains(msg, "broker closed"):
+		return api.ErrInternal
+	default:
+		return api.ErrInternal
+	}
 }

@@ -41,6 +41,19 @@ type FetchResponse struct {
 	Error   api.ErrorCode
 }
 
+// ListOffsetsRequest placeholder (not yet used on the wire).
+type ListOffsetsRequest struct {
+	Topic     string
+	Partition int
+}
+
+// ListOffsetsResponse placeholder (not yet used on the wire).
+type ListOffsetsResponse struct {
+	Earliest api.Offset
+	Latest   api.Offset
+	Error    api.ErrorCode
+}
+
 // MetadataRequest enumerates topics to fetch metadata for.
 type MetadataRequest struct {
 	Topics []string
