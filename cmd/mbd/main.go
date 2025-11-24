@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -19,6 +19,8 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger)
 	var readyFlag atomic.Bool
 	var (
 		dataDir           = flag.String("data-dir", "data", "path to broker data directory")
@@ -56,30 +58,36 @@ func main() {
 		// TODO: load index interval/segment age from config or flags.
 	})
 	if err != nil {
-		log.Fatalf("storage init: %v", err)
+		logger.Error("storage init failed", "err", err)
+		os.Exit(1)
 	}
 
 	if err := store.Recover(context.Background()); err != nil {
-		log.Fatalf("storage recover: %v", err)
+		logger.Error("storage recover failed", "err", err)
+		os.Exit(1)
 	}
 
 	offsetStore, err := broker.NewOffsetStore(cfg.DataDir)
 	if err != nil {
-		log.Fatalf("offset store init: %v", err)
+		logger.Error("offset store init failed", "err", err)
+		os.Exit(1)
 	}
 
 	b, err := broker.NewBroker(cfg, store, offsetStore)
 	if err != nil {
-		log.Fatalf("broker init: %v", err)
+		logger.Error("broker init failed", "err", err)
+		os.Exit(1)
 	}
 
 	netServer, err := netproto.NewServer(cfg.BinaryAddr, b)
 	if err != nil {
-		log.Fatalf("netproto init: %v", err)
+		logger.Error("netproto init failed", "err", err)
+		os.Exit(1)
 	}
 	mqttServer, err := mqtt.NewServer(cfg.MQTTAddr, b)
 	if err != nil {
-		log.Fatalf("mqtt init: %v", err)
+		logger.Error("mqtt init failed", "err", err)
+		os.Exit(1)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -88,27 +96,29 @@ func main() {
 	ready := func() bool { return readyFlag.Load() }
 	go func() {
 		if err := observability.StartHTTPServer(ctx, cfg.HTTPAddr, ready); err != nil {
-			log.Printf("http server stopped: %v", err)
+			readyFlag.Store(false)
+			logger.Error("http server stopped", "err", err)
 			cancel()
 		}
 	}()
 
-	// Mark ready after init success.
-	readyFlag.Store(true)
-
 	// Start servers.
 	go func() {
 		if err := netServer.ListenAndServe(ctx); err != nil {
-			log.Printf("binary server stopped: %v", err)
+			readyFlag.Store(false)
+			logger.Error("binary server stopped", "err", err)
 			cancel()
 		}
 	}()
 	go func() {
 		if err := mqttServer.ListenAndServe(ctx); err != nil {
-			log.Printf("mqtt server stopped: %v", err)
+			readyFlag.Store(false)
+			logger.Error("mqtt server stopped", "err", err)
 			cancel()
 		}
 	}()
+
+	readyFlag.Store(true)
 
 	waitForSignal()
 	cancel()

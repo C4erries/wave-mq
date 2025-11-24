@@ -49,6 +49,28 @@ go run ./cmd/mbbench -broker 127.0.0.1:7912 -topic bench -messages 20000 -value-
 ```
 Outputs produced count, avg/max latency, total time, and RPS.
 
+## Docker
+
+Build image:
+```sh
+docker build -t wavemq:latest .
+```
+
+Run broker (single node):
+```sh
+docker run --rm \
+  -p 7912:7912 -p 1883:1883 -p 8090:8090 \
+  -v /path/on/host/data:/data \
+  wavemq:latest
+```
+
+Defaults: `-data-dir=/data -bind=:7912 -mqtt=:1883 -http=:8090`. Override flags via `docker run wavemq:latest <flags>...`.
+
+Access:
+- Binary protocol: localhost:7912 (use `mbctl` on host)
+- MQTT: localhost:1883
+- Observability: http://localhost:8090/metrics and /healthz
+
 ## Notes / Limits
 - Single node; replication/cluster controller not implemented yet.
 - Consumer group coordination is local; offsets persisted via offset WAL.

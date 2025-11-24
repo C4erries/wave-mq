@@ -27,6 +27,8 @@ type Broker struct {
 	topics map[string]*Topic
 	groups map[string]*ConsumerGroup
 	closed bool
+
+	commitCount int
 }
 
 // Topic represents a logical stream of ordered partitions.
@@ -301,6 +303,11 @@ func (b *Broker) CommitOffset(ctx context.Context, group string, topic string, p
 		return err
 	}
 	g.Offsets[topic][partition] = offset
+	b.commitCount++
+	if b.commitCount%1000 == 0 {
+		snapshot := b.snapshotOffsetsLocked()
+		go b.offsets.Compact(context.Background(), snapshot)
+	}
 	return nil
 }
 
@@ -365,6 +372,24 @@ func (b *Broker) Close() error {
 		_ = b.offsets.Close()
 	}
 	return nil
+}
+
+func (b *Broker) snapshotOffsetsLocked() map[string]map[string]map[int]api.Offset {
+	out := make(map[string]map[string]map[int]api.Offset)
+	for group, g := range b.groups {
+		g.mu.RLock()
+		topics := make(map[string]map[int]api.Offset)
+		for topic, parts := range g.Offsets {
+			cp := make(map[int]api.Offset, len(parts))
+			for pid, off := range parts {
+				cp[pid] = off
+			}
+			topics[topic] = cp
+		}
+		g.mu.RUnlock()
+		out[group] = topics
+	}
+	return out
 }
 
 // JoinGroup registers a member in a consumer group and returns its assignments.

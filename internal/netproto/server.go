@@ -217,7 +217,7 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 		}
 		return encodeListOffsetsResponse(resp)
 	default:
-		return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
+		return nil, fmt.Errorf("unknown api key %d", apiKey)
 	}
 }
 

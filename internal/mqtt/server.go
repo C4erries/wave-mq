@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"log/slog"
+
 	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -266,7 +268,10 @@ func (state *clientState) consumeLoop(ctx context.Context, mqttTopic string, sub
 			_ = writePublish(state.conn, pkt)
 			state.writeMu.Unlock()
 			// Commit offset after sending to client.
-			_ = state.broker.CommitOffset(ctx, state.group, sub.topic, sub.partition, r.Offset)
+			if err := state.broker.CommitOffset(ctx, state.group, sub.topic, sub.partition, r.Offset); err != nil {
+				observability.RequestErrors.WithLabelValues("mqtt", "commit").Inc()
+				slog.Error("mqtt commit failed", "topic", sub.topic, "partition", sub.partition, "offset", r.Offset, "err", err)
+			}
 			offset = r.Offset + 1
 		}
 	}
