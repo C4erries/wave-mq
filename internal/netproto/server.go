@@ -186,6 +186,17 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 			resp.Error = mapError(err)
 		}
 		return encodeFetchCommittedResponse(resp)
+	case api.APIKeyListOffsets:
+		req, err := decodeListOffsetsRequest(payload)
+		if err != nil {
+			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
+		}
+		earliest, latest, err := s.broker.ListOffsets(ctx, req.Topic, req.Partition)
+		resp := &ListOffsetsResponse{Earliest: earliest, Latest: latest}
+		if err != nil {
+			resp.Error = mapError(err)
+		}
+		return encodeListOffsetsResponse(resp)
 	default:
 		return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
 	}
@@ -207,6 +218,8 @@ func (s *Server) errorResponseForKey(apiKey api.APIKey, code api.ErrorCode) ([]b
 		return encodeCommitOffsetResponse(&CommitOffsetResponse{Error: code})
 	case api.APIKeyFetchCommitted:
 		return encodeFetchCommittedResponse(&FetchCommittedResponse{Error: code})
+	case api.APIKeyListOffsets:
+		return encodeListOffsetsResponse(&ListOffsetsResponse{Error: code})
 	default:
 		return encodePingResponse(&PingResponse{Error: code})
 	}

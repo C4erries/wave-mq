@@ -238,3 +238,30 @@ func TestFetchCommittedCodec(t *testing.T) {
 		t.Fatalf("resp mismatch")
 	}
 }
+
+func TestListOffsetsCodec(t *testing.T) {
+	req := &ListOffsetsRequest{Topic: "t", Partition: 2}
+	p, err := encodeListOffsetsRequest(req)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := decodeListOffsetsRequest(p)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Topic != req.Topic || got.Partition != req.Partition {
+		t.Fatalf("roundtrip mismatch")
+	}
+	resp := &ListOffsetsResponse{Earliest: 1, Latest: 10, Error: api.ErrNone}
+	rp, err := encodeListOffsetsResponse(resp)
+	if err != nil {
+		t.Fatalf("encode resp: %v", err)
+	}
+	dr, err := decodeListOffsetsResponse(rp)
+	if err != nil {
+		t.Fatalf("decode resp: %v", err)
+	}
+	if dr.Earliest != resp.Earliest || dr.Latest != resp.Latest || dr.Error != resp.Error {
+		t.Fatalf("resp mismatch")
+	}
+}

@@ -3,6 +3,7 @@ package mqtt
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -11,13 +12,17 @@ import (
 )
 
 type fakeBroker struct {
-	records  map[string]map[int][]api.Record
-	fetches  int
-	produced int
+	records   map[string]map[int][]api.Record
+	fetches   int
+	produced  int
+	committed map[string]map[string]map[int]api.Offset
 }
 
 func newFakeBroker() *fakeBroker {
-	return &fakeBroker{records: make(map[string]map[int][]api.Record)}
+	return &fakeBroker{
+		records:   make(map[string]map[int][]api.Record),
+		committed: make(map[string]map[string]map[int]api.Offset),
+	}
 }
 
 func (b *fakeBroker) Produce(ctx context.Context, topic string, partition int, records []api.Record) (api.Offset, error) {
@@ -77,6 +82,43 @@ func (b *fakeBroker) Metadata(ctx context.Context, topics []string) ([]api.Parti
 		}
 	}
 	return res, nil
+}
+
+func (b *fakeBroker) JoinGroup(ctx context.Context, group, memberID string, topics []string) (map[string][]int, error) {
+	_ = ctx
+	_ = memberID
+	assign := make(map[string][]int)
+	for _, t := range topics {
+		assign[t] = []int{0}
+	}
+	return assign, nil
+}
+
+func (b *fakeBroker) LeaveGroup(ctx context.Context, group, memberID string) error {
+	_ = ctx
+	_ = group
+	_ = memberID
+	return nil
+}
+
+func (b *fakeBroker) CommitOffset(ctx context.Context, group, topic string, partition int, offset api.Offset) error {
+	_ = ctx
+	if _, ok := b.committed[group]; !ok {
+		b.committed[group] = make(map[string]map[int]api.Offset)
+	}
+	if _, ok := b.committed[group][topic]; !ok {
+		b.committed[group][topic] = make(map[int]api.Offset)
+	}
+	b.committed[group][topic][partition] = offset
+	return nil
+}
+
+func (b *fakeBroker) FetchCommitted(ctx context.Context, group, topic string, partition int) (api.Offset, error) {
+	_ = ctx
+	if off, ok := b.committed[group][topic][partition]; ok {
+		return off, nil
+	}
+	return -1, fmt.Errorf("not found")
 }
 
 func TestMQTTServerBasicFlow(t *testing.T) {
@@ -201,12 +243,15 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 		t.Fatalf("expected PINGRESP got %d", tp)
 	}
 
-	// Give some time for broker produce to be called
+	// Give some time for broker produce/commit to be called
 	time.Sleep(50 * time.Millisecond)
 	if len(b.records["t/1"][0]) < 2 {
 		t.Fatalf("expected broker to store produced record")
 	}
 	if b.fetches == 0 {
 		t.Fatalf("fetch loop did not run")
+	}
+	if b.committed["client-1"]["t/1"][0] != 0 {
+		t.Fatalf("expected committed offset 0, got %d", b.committed["client-1"]["t/1"][0])
 	}
 }

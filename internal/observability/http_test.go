@@ -51,3 +51,27 @@ func TestHTTPServerHealthAndMetrics(t *testing.T) {
 		t.Fatalf("server error: %v", err)
 	}
 }
+
+func TestHealthzNotReady(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addr := "127.0.0.1:18081"
+	ready := func() bool { return false }
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- StartHTTPServer(ctx, addr, ready)
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	resp, err := http.Get("http://" + addr + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz request: %v", err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", resp.StatusCode)
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("server error: %v", err)
+	}
+}

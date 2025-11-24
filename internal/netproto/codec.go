@@ -742,6 +742,68 @@ func decodeFetchCommittedResponse(payload []byte) (*FetchCommittedResponse, erro
 	}, nil
 }
 
+func encodeListOffsetsRequest(req *ListOffsetsRequest) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	if err := putString(buf, req.Topic); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func decodeListOffsetsRequest(payload []byte) (*ListOffsetsRequest, error) {
+	buf := bytes.NewBuffer(payload)
+	topic, err := readString(buf)
+	if err != nil {
+		return nil, err
+	}
+	var partition int32
+	if err := binary.Read(buf, binary.BigEndian, &partition); err != nil {
+		return nil, err
+	}
+	return &ListOffsetsRequest{
+		Topic:     topic,
+		Partition: int(partition),
+	}, nil
+}
+
+func encodeListOffsetsResponse(resp *ListOffsetsResponse) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	if err := binary.Write(buf, binary.BigEndian, int16(resp.Error)); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.BigEndian, int64(resp.Earliest)); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.BigEndian, int64(resp.Latest)); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func decodeListOffsetsResponse(payload []byte) (*ListOffsetsResponse, error) {
+	buf := bytes.NewBuffer(payload)
+	var ec int16
+	if err := binary.Read(buf, binary.BigEndian, &ec); err != nil {
+		return nil, err
+	}
+	var earliest int64
+	if err := binary.Read(buf, binary.BigEndian, &earliest); err != nil {
+		return nil, err
+	}
+	var latest int64
+	if err := binary.Read(buf, binary.BigEndian, &latest); err != nil {
+		return nil, err
+	}
+	return &ListOffsetsResponse{
+		Error:    api.ErrorCode(ec),
+		Earliest: api.Offset(earliest),
+		Latest:   api.Offset(latest),
+	}, nil
+}
+
 // Exported helpers for external packages (mbctl).
 func EncodeRequestFrame(apiKey api.APIKey, corr int32, payload []byte) ([]byte, error) {
 	return encodeRequestFrame(apiKey, corr, payload)
@@ -800,4 +862,11 @@ func EncodeFetchCommittedResponse(resp *FetchCommittedResponse) ([]byte, error) 
 }
 func DecodeFetchCommittedResponse(p []byte) (*FetchCommittedResponse, error) {
 	return decodeFetchCommittedResponse(p)
+}
+
+func EncodeListOffsetsRequest(req *ListOffsetsRequest) ([]byte, error) {
+	return encodeListOffsetsRequest(req)
+}
+func DecodeListOffsetsResponse(p []byte) (*ListOffsetsResponse, error) {
+	return decodeListOffsetsResponse(p)
 }

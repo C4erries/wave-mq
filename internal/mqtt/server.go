@@ -18,6 +18,10 @@ type BrokerAPI interface {
 	Fetch(ctx context.Context, topic string, partition int, offset api.Offset, maxBytes int32) ([]api.Record, error)
 	ListOffsets(ctx context.Context, topic string, partition int) (api.Offset, api.Offset, error)
 	Metadata(ctx context.Context, topics []string) ([]api.PartitionMetadata, error)
+	JoinGroup(ctx context.Context, group, memberID string, topics []string) (map[string][]int, error)
+	LeaveGroup(ctx context.Context, group, memberID string) error
+	CommitOffset(ctx context.Context, group, topic string, partition int, offset api.Offset) error
+	FetchCommitted(ctx context.Context, group, topic string, partition int) (api.Offset, error)
 }
 
 // Server hosts the MQTT TCP listener and packet loop.
@@ -122,6 +126,7 @@ type clientState struct {
 	clientID   string
 	cleanStart bool
 	keepAlive  time.Duration
+	group      string
 
 	broker BrokerAPI
 
@@ -144,6 +149,7 @@ func (s *Server) handleConnect(state *clientState, pkt *ConnectPacket) error {
 		return fmt.Errorf("client id required")
 	}
 	state.clientID = pkt.ClientID
+	state.group = pkt.ClientID // group == clientID for MQTT clients
 	state.cleanStart = pkt.CleanStart
 	state.keepAlive = time.Duration(pkt.KeepAliveSec) * time.Second
 	resp := &ConnackPacket{SessionPresent: false, ReturnCode: 0}
@@ -156,17 +162,24 @@ func (s *Server) handleSubscribe(state *clientState, pkt *SubscribePacket) error
 	ack := &SubackPacket{PacketID: pkt.PacketID}
 	granted := make([]byte, len(pkt.Topics))
 	for i, sub := range pkt.Topics {
-		internalTopic, partition, err := s.mapTopic(state.ctx, sub.Filter, state.clientID)
-		if err != nil {
-			granted[i] = 0x80 // failure
-			continue
-		}
 		if sub.QoS > qos1 {
 			granted[i] = 0x80
 			continue
 		}
+		assignments, err := s.broker.JoinGroup(state.ctx, state.group, state.clientID, []string{sub.Filter})
+		if err != nil {
+			granted[i] = 0x80
+			continue
+		}
+		partitions := assignments[sub.Filter]
+		if len(partitions) == 0 {
+			granted[i] = 0x80
+			continue
+		}
 		granted[i] = sub.QoS
-		state.trackSubscription(sub.Filter, internalTopic, partition, sub.QoS)
+		for _, p := range partitions {
+			state.trackSubscription(sub.Filter, sub.Filter, p, sub.QoS)
+		}
 	}
 	ack.Granted = granted
 	state.writeMu.Lock()
@@ -188,20 +201,25 @@ func (state *clientState) trackSubscription(mqttTopic, topic string, partition i
 		topic:     topic,
 		partition: partition,
 		qos:       qos,
-		offset:    -1,
 		stop:      cancel,
 	}
+	// Determine starting offset using committed offsets (last processed) and earliest.
+	earliest, _, errEarliest := state.broker.ListOffsets(ctx, topic, partition)
+	committed, errCommitted := state.broker.FetchCommitted(ctx, state.group, topic, partition)
+	start := earliest
+	if errCommitted == nil && committed+1 > start {
+		start = committed + 1
+	}
+	if errEarliest != nil {
+		start = 0
+	}
+	sub.offset = start
 	state.subs[mqttTopic] = sub
 	go state.consumeLoop(ctx, mqttTopic, sub)
 }
 
 func (state *clientState) consumeLoop(ctx context.Context, mqttTopic string, sub subscriptionState) {
-	// Find latest offset to tail new messages.
-	_, latest, err := state.broker.ListOffsets(ctx, sub.topic, sub.partition)
-	if err != nil {
-		return
-	}
-	offset := latest + 1
+	offset := sub.offset
 	for {
 		select {
 		case <-ctx.Done():
@@ -226,6 +244,8 @@ func (state *clientState) consumeLoop(ctx context.Context, mqttTopic string, sub
 			state.writeMu.Lock()
 			_ = writePublish(state.conn, pkt)
 			state.writeMu.Unlock()
+			// Commit offset after sending to client.
+			_ = state.broker.CommitOffset(ctx, state.group, sub.topic, sub.partition, r.Offset)
 			offset = r.Offset + 1
 		}
 	}
@@ -249,6 +269,9 @@ func (s *Server) handlePublish(state *clientState, pkt *PublishPacket) error {
 }
 
 func (s *Server) handleDisconnect(state *clientState) {
+	if state.group != "" && state.clientID != "" {
+		_ = s.broker.LeaveGroup(context.Background(), state.group, state.clientID)
+	}
 	state.cancel()
 	for _, sub := range state.subs {
 		if sub.stop != nil {

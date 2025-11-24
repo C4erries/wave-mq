@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 )
 
 func main() {
+	var readyFlag atomic.Bool
 	var (
 		dataDir           = flag.String("data-dir", "data", "path to broker data directory")
 		binaryAddr        = flag.String("bind", ":7912", "address for binary protocol listener")
@@ -83,13 +85,16 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ready := func() bool { return true }
+	ready := func() bool { return readyFlag.Load() }
 	go func() {
 		if err := observability.StartHTTPServer(ctx, cfg.HTTPAddr, ready); err != nil {
 			log.Printf("http server stopped: %v", err)
 			cancel()
 		}
 	}()
+
+	// Mark ready after init success.
+	readyFlag.Store(true)
 
 	// Start servers.
 	go func() {

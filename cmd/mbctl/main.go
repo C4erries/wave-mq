@@ -24,6 +24,16 @@ func main() {
 		handleProduce(os.Args[2:])
 	case "fetch":
 		handleFetch(os.Args[2:])
+	case "metadata":
+		handleMetadata(os.Args[2:])
+	case "list-offsets":
+		handleListOffsets(os.Args[2:])
+	case "commit-offset":
+		handleCommitOffset(os.Args[2:])
+	case "fetch-committed":
+		handleFetchCommitted(os.Args[2:])
+	case "ping":
+		handlePing(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -39,6 +49,11 @@ Commands:
   create-topic   Create a topic with partitions/replication
   produce        Produce one or more messages
   fetch          Fetch messages from a partition
+  metadata       Get metadata for topics
+  list-offsets   Get earliest/latest offsets for a partition
+  commit-offset  Commit offset for a consumer group
+  fetch-committed Fetch committed offset for a consumer group
+  ping           Ping broker
 `)
 }
 
@@ -138,60 +153,217 @@ func handleFetch(args []string) {
 	}
 }
 
+func handleMetadata(args []string) {
+	fs := flag.NewFlagSet("metadata", flag.ExitOnError)
+	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
+	topic := fs.String("topic", "", "topic name (optional)")
+	_ = fs.Parse(args)
+
+	req := &netproto.MetadataRequest{}
+	if *topic != "" {
+		req.Topics = []string{*topic}
+	}
+	resp, err := sendMetadata(*brokerAddr, req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "metadata error: %v\n", err)
+		os.Exit(1)
+	}
+	if resp.Error != api.ErrNone {
+		fmt.Fprintf(os.Stderr, "metadata failed: %v\n", resp.Error)
+		os.Exit(1)
+	}
+	for _, p := range resp.Partitions {
+		fmt.Printf("topic=%s partition=%d broker=%d role=%d epoch=%d start=%d hwm=%d\n",
+			p.Replica.Topic, p.Replica.Partition, p.Replica.BrokerID, p.Replica.Role, p.Replica.LeaderEpoch, p.StartOffset, p.HighWatermark)
+	}
+}
+
+func handleListOffsets(args []string) {
+	fs := flag.NewFlagSet("list-offsets", flag.ExitOnError)
+	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
+	topic := fs.String("topic", "", "topic name")
+	partition := fs.Int("partition", 0, "partition id")
+	_ = fs.Parse(args)
+
+	if *topic == "" {
+		fmt.Fprintln(os.Stderr, "topic is required")
+		os.Exit(1)
+	}
+	req := &netproto.ListOffsetsRequest{Topic: *topic, Partition: *partition}
+	resp, err := sendListOffsets(*brokerAddr, req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "list-offsets error: %v\n", err)
+		os.Exit(1)
+	}
+	if resp.Error != api.ErrNone {
+		fmt.Fprintf(os.Stderr, "list-offsets failed: %v\n", resp.Error)
+		os.Exit(1)
+	}
+	fmt.Printf("earliest=%d latest=%d\n", resp.Earliest, resp.Latest)
+}
+
+func handleCommitOffset(args []string) {
+	fs := flag.NewFlagSet("commit-offset", flag.ExitOnError)
+	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
+	group := fs.String("group", "", "consumer group")
+	topic := fs.String("topic", "", "topic name")
+	partition := fs.Int("partition", 0, "partition id")
+	offset := fs.Int64("offset", 0, "offset to commit")
+	_ = fs.Parse(args)
+	if *group == "" || *topic == "" {
+		fmt.Fprintln(os.Stderr, "group and topic are required")
+		os.Exit(1)
+	}
+	req := &netproto.CommitOffsetRequest{
+		Group:     *group,
+		Topic:     *topic,
+		Partition: *partition,
+		Offset:    api.Offset(*offset),
+	}
+	resp, err := sendCommitOffset(*brokerAddr, req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "commit-offset error: %v\n", err)
+		os.Exit(1)
+	}
+	if resp.Error != api.ErrNone {
+		fmt.Fprintf(os.Stderr, "commit-offset failed: %v\n", resp.Error)
+		os.Exit(1)
+	}
+	fmt.Println("commit-offset ok")
+}
+
+func handleFetchCommitted(args []string) {
+	fs := flag.NewFlagSet("fetch-committed", flag.ExitOnError)
+	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
+	group := fs.String("group", "", "consumer group")
+	topic := fs.String("topic", "", "topic name")
+	partition := fs.Int("partition", 0, "partition id")
+	_ = fs.Parse(args)
+	if *group == "" || *topic == "" {
+		fmt.Fprintln(os.Stderr, "group and topic are required")
+		os.Exit(1)
+	}
+	req := &netproto.FetchCommittedRequest{
+		Group:     *group,
+		Topic:     *topic,
+		Partition: *partition,
+	}
+	resp, err := sendFetchCommitted(*brokerAddr, req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fetch-committed error: %v\n", err)
+		os.Exit(1)
+	}
+	if resp.Error != api.ErrNone {
+		fmt.Fprintf(os.Stderr, "fetch-committed failed: %v\n", resp.Error)
+		os.Exit(1)
+	}
+	fmt.Printf("committed offset=%d\n", resp.Offset)
+}
+
+func handlePing(args []string) {
+	fs := flag.NewFlagSet("ping", flag.ExitOnError)
+	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
+	_ = fs.Parse(args)
+	start := time.Now()
+	resp, err := sendPing(*brokerAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ping error: %v\n", err)
+		os.Exit(1)
+	}
+	if resp.Error != api.ErrNone {
+		fmt.Fprintf(os.Stderr, "ping failed: %v\n", resp.Error)
+		os.Exit(1)
+	}
+	fmt.Printf("pong rtt=%s\n", time.Since(start))
+}
+
 func sendCreateTopic(addr string, req *netproto.CreateTopicRequest) (*netproto.CreateTopicResponse, error) {
-	conn, err := net.Dial("tcp", addr)
+	respPayload, err := sendRequest(addr, api.APIKeyCreateTopic, func() ([]byte, error) {
+		return netproto.EncodeCreateTopicRequest(req)
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
-	payload, err := encodeWithCorr(api.APIKeyCreateTopic, req, conn)
-	if err != nil {
-		return nil, err
-	}
-	return netproto.DecodeCreateTopicResponse(payload)
+	return netproto.DecodeCreateTopicResponse(respPayload)
 }
 
 func sendProduce(addr string, req *netproto.ProduceRequest) (*netproto.ProduceResponse, error) {
-	conn, err := net.Dial("tcp", addr)
+	respPayload, err := sendRequest(addr, api.APIKeyProduce, func() ([]byte, error) {
+		return netproto.EncodeProduceRequest(req)
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
-	payload, err := encodeWithCorr(api.APIKeyProduce, req, conn)
-	if err != nil {
-		return nil, err
-	}
-	return netproto.DecodeProduceResponse(payload)
+	return netproto.DecodeProduceResponse(respPayload)
 }
 
 func sendFetch(addr string, req *netproto.FetchRequest) (*netproto.FetchResponse, error) {
+	respPayload, err := sendRequest(addr, api.APIKeyFetch, func() ([]byte, error) {
+		return netproto.EncodeFetchRequest(req)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return netproto.DecodeFetchResponse(respPayload)
+}
+
+func sendMetadata(addr string, req *netproto.MetadataRequest) (*netproto.MetadataResponse, error) {
+	respPayload, err := sendRequest(addr, api.APIKeyMetadata, func() ([]byte, error) {
+		return netproto.EncodeMetadataRequest(req)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return netproto.DecodeMetadataResponse(respPayload)
+}
+
+func sendListOffsets(addr string, req *netproto.ListOffsetsRequest) (*netproto.ListOffsetsResponse, error) {
+	respPayload, err := sendRequest(addr, api.APIKeyListOffsets, func() ([]byte, error) {
+		return netproto.EncodeListOffsetsRequest(req)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return netproto.DecodeListOffsetsResponse(respPayload)
+}
+
+func sendCommitOffset(addr string, req *netproto.CommitOffsetRequest) (*netproto.CommitOffsetResponse, error) {
+	respPayload, err := sendRequest(addr, api.APIKeyCommitOffset, func() ([]byte, error) {
+		return netproto.EncodeCommitOffsetRequest(req)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return netproto.DecodeCommitOffsetResponse(respPayload)
+}
+
+func sendFetchCommitted(addr string, req *netproto.FetchCommittedRequest) (*netproto.FetchCommittedResponse, error) {
+	respPayload, err := sendRequest(addr, api.APIKeyFetchCommitted, func() ([]byte, error) {
+		return netproto.EncodeFetchCommittedRequest(req)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return netproto.DecodeFetchCommittedResponse(respPayload)
+}
+
+func sendPing(addr string) (*netproto.PingResponse, error) {
+	respPayload, err := sendRequest(addr, api.APIKeyPing, func() ([]byte, error) {
+		return netproto.EncodePingRequest(&netproto.PingRequest{})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return netproto.DecodePingResponse(respPayload)
+}
+
+func sendRequest(addr string, apiKey api.APIKey, payloadFn func() ([]byte, error)) ([]byte, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	payload, err := encodeWithCorr(api.APIKeyFetch, req, conn)
-	if err != nil {
-		return nil, err
-	}
-	return netproto.DecodeFetchResponse(payload)
-}
-
-func encodeWithCorr(apiKey api.APIKey, req interface{}, conn net.Conn) ([]byte, error) {
-	var (
-		payload []byte
-		err     error
-	)
-	switch v := req.(type) {
-	case *netproto.CreateTopicRequest:
-		payload, err = netproto.EncodeCreateTopicRequest(v)
-	case *netproto.ProduceRequest:
-		payload, err = netproto.EncodeProduceRequest(v)
-	case *netproto.FetchRequest:
-		payload, err = netproto.EncodeFetchRequest(v)
-	default:
-		return nil, fmt.Errorf("unsupported request type")
-	}
+	payload, err := payloadFn()
 	if err != nil {
 		return nil, err
 	}
