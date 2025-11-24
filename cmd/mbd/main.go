@@ -12,6 +12,7 @@ import (
 	"github.com/c4erries/wave-mq/internal/broker"
 	"github.com/c4erries/wave-mq/internal/mqtt"
 	"github.com/c4erries/wave-mq/internal/netproto"
+	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -73,6 +74,14 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	ready := func() bool { return true }
+	go func() {
+		if err := observability.StartHTTPServer(ctx, cfg.HTTPAddr, ready); err != nil {
+			log.Printf("http server stopped: %v", err)
+			cancel()
+		}
+	}()
 
 	// Start servers.
 	go func() {

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
+	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -133,19 +135,24 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 
 // Produce appends records to the specified partition.
 func (b *Broker) Produce(ctx context.Context, topic string, partition int, records []api.Record) (api.Offset, error) {
+	start := time.Now()
+	labels := []string{topic, fmt.Sprintf("%d", partition)}
 	b.mu.RLock()
 	if b.closed {
 		b.mu.RUnlock()
+		observability.RequestErrors.WithLabelValues("broker", "produce").Inc()
 		return -1, fmt.Errorf("broker closed")
 	}
 	t, ok := b.topics[topic]
 	if !ok {
 		b.mu.RUnlock()
+		observability.RequestErrors.WithLabelValues("broker", "produce").Inc()
 		return -1, fmt.Errorf("topic not found")
 	}
 	p, ok := t.Partitions[partition]
 	b.mu.RUnlock()
 	if !ok {
+		observability.RequestErrors.WithLabelValues("broker", "produce").Inc()
 		return -1, fmt.Errorf("partition not found")
 	}
 
@@ -156,8 +163,11 @@ func (b *Broker) Produce(ctx context.Context, topic string, partition int, recor
 	}
 	base, err := p.Log.AppendBatch(ctx, records)
 	if err != nil {
+		observability.RequestErrors.WithLabelValues("broker", "produce").Inc()
 		return -1, err
 	}
+	observability.MessagesProduced.WithLabelValues(labels...).Add(float64(len(records)))
+	observability.ProduceLatency.WithLabelValues(labels...).Observe(time.Since(start).Seconds())
 	hw := base + api.Offset(len(records)-1)
 	if hw > p.Metadata.HighWatermark {
 		p.Metadata.HighWatermark = hw
@@ -167,19 +177,24 @@ func (b *Broker) Produce(ctx context.Context, topic string, partition int, recor
 
 // Fetch reads records starting from offset for the given partition.
 func (b *Broker) Fetch(ctx context.Context, topic string, partition int, offset api.Offset, maxBytes int32) ([]api.Record, error) {
+	start := time.Now()
+	labels := []string{topic, fmt.Sprintf("%d", partition)}
 	b.mu.RLock()
 	if b.closed {
 		b.mu.RUnlock()
+		observability.RequestErrors.WithLabelValues("broker", "fetch").Inc()
 		return nil, fmt.Errorf("broker closed")
 	}
 	t, ok := b.topics[topic]
 	if !ok {
 		b.mu.RUnlock()
+		observability.RequestErrors.WithLabelValues("broker", "fetch").Inc()
 		return nil, fmt.Errorf("topic not found")
 	}
 	p, ok := t.Partitions[partition]
 	b.mu.RUnlock()
 	if !ok {
+		observability.RequestErrors.WithLabelValues("broker", "fetch").Inc()
 		return nil, fmt.Errorf("partition not found")
 	}
 	p.mu.RLock()
@@ -187,7 +202,14 @@ func (b *Broker) Fetch(ctx context.Context, topic string, partition int, offset 
 	if offset > p.Metadata.HighWatermark {
 		return []api.Record{}, nil
 	}
-	return p.Log.Read(ctx, offset, maxBytes)
+	recs, err := p.Log.Read(ctx, offset, maxBytes)
+	if err != nil {
+		observability.RequestErrors.WithLabelValues("broker", "fetch").Inc()
+		return nil, err
+	}
+	observability.MessagesConsumed.WithLabelValues(labels...).Add(float64(len(recs)))
+	observability.FetchLatency.WithLabelValues(labels...).Observe(time.Since(start).Seconds())
+	return recs, nil
 }
 
 // ListOffsets returns offsets such as earliest/latest per partition.
