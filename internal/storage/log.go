@@ -80,6 +80,7 @@ type Log interface {
 	Read(ctx context.Context, offset api.Offset, maxBytes int32) ([]api.Record, error)
 	Truncate(ctx context.Context, offset api.Offset) error
 	HighWatermark() api.Offset
+	StartOffset() api.Offset
 	Close() error
 }
 
@@ -100,6 +101,9 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 	if cfg.IndexInterval == 0 {
 		cfg.IndexInterval = 1024
+	}
+	if cfg.MaxLogBytes == 0 {
+		cfg.MaxLogBytes = -1
 	}
 	return &Manager{cfg: cfg, logs: make(map[string]*segmentedLog)}, nil
 }
@@ -536,6 +540,13 @@ func (l *segmentedLog) HighWatermark() api.Offset {
 		return -1
 	}
 	return l.nextOffset - 1
+}
+
+// StartOffset returns the earliest available offset in the log (after retention/truncation).
+func (l *segmentedLog) StartOffset() api.Offset {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.startOffset
 }
 
 // Close flushes and releases file handles for the log.

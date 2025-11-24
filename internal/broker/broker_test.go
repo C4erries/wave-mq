@@ -19,17 +19,22 @@ func newTestBroker(t *testing.T) (*Broker, func()) {
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+	offsetStore, err := NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
 	b, err := NewBroker(api.BrokerConfig{
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store)
+	}, store, offsetStore)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
 	cleanup := func() {
 		_ = b.Close()
 		_ = store.Close()
+		_ = offsetStore.Close()
 	}
 	return b, cleanup
 }
@@ -211,5 +216,64 @@ func TestLeaveGroupReassignment(t *testing.T) {
 	}
 	if len(assignments["t"]) != 3 {
 		t.Fatalf("expected m2 to own all partitions after m1 left, got %v", assignments["t"])
+	}
+}
+
+func TestOffsetPersistenceAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1024,
+		SyncOnAppend:    true,
+	})
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	offsetStore, err := NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+	b, err := NewBroker(api.BrokerConfig{
+		BrokerID:          1,
+		ReplicationFactor: 1,
+		DataDir:           dir,
+	}, store, offsetStore)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+	ctx := context.Background()
+	if err := b.CommitOffset(ctx, "g", "t", 0, 5); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	b.Close()
+	store.Close()
+	offsetStore.Close()
+
+	// Reopen and ensure offsets persist.
+	store, _ = storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1024,
+		SyncOnAppend:    true,
+	})
+	offsetStore, _ = NewOffsetStore(dir)
+	b, err = NewBroker(api.BrokerConfig{
+		BrokerID:          1,
+		ReplicationFactor: 1,
+		DataDir:           dir,
+	}, store, offsetStore)
+	if err != nil {
+		t.Fatalf("broker reopen: %v", err)
+	}
+	defer func() {
+		b.Close()
+		store.Close()
+		offsetStore.Close()
+	}()
+	off, err := b.FetchCommitted(ctx, "g", "t", 0)
+	if err != nil {
+		t.Fatalf("fetch committed: %v", err)
+	}
+	if off != 5 {
+		t.Fatalf("expected offset 5 after restart, got %d", off)
 	}
 }

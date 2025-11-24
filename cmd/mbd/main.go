@@ -61,7 +61,12 @@ func main() {
 		log.Fatalf("storage recover: %v", err)
 	}
 
-	b, err := broker.NewBroker(cfg, store)
+	offsetStore, err := broker.NewOffsetStore(cfg.DataDir)
+	if err != nil {
+		log.Fatalf("offset store init: %v", err)
+	}
+
+	b, err := broker.NewBroker(cfg, store, offsetStore)
 	if err != nil {
 		log.Fatalf("broker init: %v", err)
 	}
@@ -107,6 +112,7 @@ func main() {
 	_ = mqttServer.Close()
 	_ = b.Close()
 	_ = store.Close()
+	_ = offsetStore.Close()
 }
 
 func waitForSignal() {

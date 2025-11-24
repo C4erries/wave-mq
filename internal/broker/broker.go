@@ -21,6 +21,7 @@ type Storage interface {
 type Broker struct {
 	cfg     api.BrokerConfig
 	storage Storage
+	offsets *OffsetStore
 
 	mu     sync.RWMutex
 	topics map[string]*Topic
@@ -61,19 +62,46 @@ type GroupMember struct {
 }
 
 // NewBroker wires together configuration and the storage backend.
-func NewBroker(cfg api.BrokerConfig, storage Storage) (*Broker, error) {
+func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore) (*Broker, error) {
 	if storage == nil {
 		return nil, fmt.Errorf("storage is required")
+	}
+	if offsets == nil {
+		return nil, fmt.Errorf("offset store is required")
 	}
 	if cfg.ReplicationFactor < 1 {
 		return nil, fmt.Errorf("replication factor must be >= 1")
 	}
-	return &Broker{
+	b := &Broker{
 		cfg:     cfg,
 		storage: storage,
+		offsets: offsets,
 		topics:  make(map[string]*Topic),
 		groups:  make(map[string]*ConsumerGroup),
-	}, nil
+	}
+	// Recover committed offsets
+	offsetData, err := offsets.Recover(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	for group, topics := range offsetData {
+		g := &ConsumerGroup{
+			Name:        group,
+			Members:     make(map[string]*GroupMember),
+			Offsets:     make(map[string]map[int]api.Offset),
+			assignments: make(map[string]map[string][]int),
+		}
+		for topic, parts := range topics {
+			if _, ok := g.Offsets[topic]; !ok {
+				g.Offsets[topic] = make(map[int]api.Offset)
+			}
+			for pid, off := range parts {
+				g.Offsets[topic][pid] = off
+			}
+		}
+		b.groups[group] = g
+	}
+	return b, nil
 }
 
 // CreateTopic initializes partition metadata and local logs.
@@ -239,8 +267,8 @@ func (b *Broker) ListOffsets(ctx context.Context, topic string, partition int) (
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	earliest := p.Metadata.StartOffset // TODO: retention may advance this.
-	latest := p.Metadata.HighWatermark
+	earliest := p.Log.StartOffset()
+	latest := p.Log.HighWatermark()
 	return earliest, latest, nil
 }
 
@@ -268,8 +296,11 @@ func (b *Broker) CommitOffset(ctx context.Context, group string, topic string, p
 	if ok && offset < current {
 		return fmt.Errorf("offset regression: current=%d new=%d", current, offset)
 	}
+	// Persist first to keep in-memory consistent with disk.
+	if err := b.offsets.AppendCommit(ctx, group, topic, partition, offset); err != nil {
+		return err
+	}
 	g.Offsets[topic][partition] = offset
-	// TODO: persist offsets to durable storage.
 	return nil
 }
 
@@ -315,10 +346,8 @@ func (b *Broker) Metadata(ctx context.Context, topics []string) ([]api.Partition
 		for _, p := range topic.Partitions {
 			p.mu.RLock()
 			meta := p.Metadata
-			hw := p.Log.HighWatermark()
-			if hw > meta.HighWatermark {
-				meta.HighWatermark = hw
-			}
+			meta.StartOffset = p.Log.StartOffset()
+			meta.HighWatermark = p.Log.HighWatermark()
 			res = append(res, meta)
 			p.mu.RUnlock()
 		}
@@ -332,6 +361,9 @@ func (b *Broker) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true
+	if b.offsets != nil {
+		_ = b.offsets.Close()
+	}
 	return nil
 }
 

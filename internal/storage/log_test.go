@@ -344,3 +344,39 @@ func TestRetentionByAge(t *testing.T) {
 	log.Close()
 	m.Close()
 }
+
+func TestStartOffsetAfterRetention(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewManager(Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 64,
+		MaxLogBytes:     100,
+		IndexInterval:   1,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	log, err := m.OpenLog(LogOptions{Topic: "t", Partition: 0})
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		if _, err := log.Append(ctx, api.Record{Value: []byte("data")}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	start := log.StartOffset()
+	if start <= 0 {
+		t.Fatalf("expected start offset to advance after retention, got %d", start)
+	}
+	recs, err := log.Read(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(recs) == 0 || recs[0].Offset < start {
+		t.Fatalf("read returned offsets before start: %v", recs)
+	}
+	log.Close()
+	m.Close()
+}
