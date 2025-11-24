@@ -192,3 +192,63 @@ func (s *OffsetStore) Close() error {
 	}
 	return nil
 }
+
+// Compact rewrites the offset log with a single record per group/topic/partition.
+// It is intended as a maintenance operation and is not invoked automatically.
+func (s *OffsetStore) Compact(ctx context.Context, offsets map[string]map[string]map[int]api.Offset) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	dir := filepath.Dir(s.path)
+	tmp, err := os.CreateTemp(dir, "offsets-*.log")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	for group, topics := range offsets {
+		for topic, parts := range topics {
+			for partition, off := range parts {
+				select {
+				case <-ctx.Done():
+					tmp.Close()
+					_ = os.Remove(tmpPath)
+					return ctx.Err()
+				default:
+				}
+				rec, err := encodeOffsetRecord(group, topic, partition, off)
+				if err != nil {
+					tmp.Close()
+					_ = os.Remove(tmpPath)
+					return err
+				}
+				if _, err := tmp.Write(rec); err != nil {
+					tmp.Close()
+					_ = os.Remove(tmpPath)
+					return err
+				}
+			}
+		}
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	// Swap files.
+	if s.f != nil {
+		_ = s.f.Close()
+	}
+	if err := os.Rename(tmpPath, s.path); err != nil {
+		return err
+	}
+	newFile, err := os.OpenFile(s.path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	s.f = newFile
+	return nil
+}

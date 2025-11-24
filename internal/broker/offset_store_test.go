@@ -89,3 +89,37 @@ func TestOffsetStoreRecoverTruncatesTail(t *testing.T) {
 		t.Fatalf("expected offset 1 after recovery, got %d", offsets["g"]["t"][0])
 	}
 }
+
+func TestOffsetStoreCompact(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	ctx := context.Background()
+	_ = store.AppendCommit(ctx, "g1", "t1", 0, 1)
+	_ = store.AppendCommit(ctx, "g1", "t1", 0, 2)
+	_ = store.AppendCommit(ctx, "g2", "t2", 1, 3)
+
+	offsets := map[string]map[string]map[int]api.Offset{
+		"g1": {"t1": {0: 2}},
+		"g2": {"t2": {1: 3}},
+	}
+	if err := store.Compact(ctx, offsets); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	store.Close()
+
+	store, err = NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer store.Close()
+	got, err := store.Recover(ctx)
+	if err != nil {
+		t.Fatalf("recover after compact: %v", err)
+	}
+	if got["g1"]["t1"][0] != 2 || got["g2"]["t2"][1] != 3 {
+		t.Fatalf("unexpected offsets after compact: %#v", got)
+	}
+}

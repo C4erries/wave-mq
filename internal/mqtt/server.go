@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"net"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
 
@@ -90,19 +92,25 @@ func (s *Server) handleConnection(conn net.Conn) {
 	for {
 		pkt, err := readPacket(conn)
 		if err != nil {
+			if err != io.EOF {
+				observability.RequestErrors.WithLabelValues("mqtt", "decode_packet").Inc()
+			}
 			return
 		}
 		switch v := pkt.(type) {
 		case *ConnectPacket:
 			if err := s.handleConnect(state, v); err != nil {
+				observability.RequestErrors.WithLabelValues("mqtt", "connect").Inc()
 				return
 			}
 		case *SubscribePacket:
 			if err := s.handleSubscribe(state, v); err != nil {
+				observability.RequestErrors.WithLabelValues("mqtt", "subscribe").Inc()
 				return
 			}
 		case *PublishPacket:
 			if err := s.handlePublish(state, v); err != nil {
+				observability.RequestErrors.WithLabelValues("mqtt", "publish").Inc()
 				return
 			}
 		case *PingreqPacket:
@@ -240,6 +248,7 @@ func (state *clientState) consumeLoop(ctx context.Context, mqttTopic string, sub
 		}
 		recs, err := state.broker.Fetch(ctx, sub.topic, sub.partition, offset, 64<<10)
 		if err != nil {
+			observability.RequestErrors.WithLabelValues("mqtt", "fetch").Inc()
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
