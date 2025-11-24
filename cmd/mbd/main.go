@@ -48,6 +48,9 @@ func main() {
 	store, err := storage.NewManager(storage.Config{
 		DataDir:         cfg.DataDir,
 		MaxSegmentBytes: cfg.MaxSegmentBytes,
+		IndexInterval:   1024,
+		SegmentMaxAge:   cfg.RetentionTime,
+		MaxLogBytes:     cfg.RetentionBytes,
 		// TODO: load index interval/segment age from config or flags.
 	})
 	if err != nil {

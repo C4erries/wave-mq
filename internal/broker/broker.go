@@ -137,6 +137,7 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 func (b *Broker) Produce(ctx context.Context, topic string, partition int, records []api.Record) (api.Offset, error) {
 	start := time.Now()
 	labels := []string{topic, fmt.Sprintf("%d", partition)}
+	defer observability.ProduceLatency.WithLabelValues(labels...).Observe(time.Since(start).Seconds())
 	b.mu.RLock()
 	if b.closed {
 		b.mu.RUnlock()
@@ -179,6 +180,13 @@ func (b *Broker) Produce(ctx context.Context, topic string, partition int, recor
 func (b *Broker) Fetch(ctx context.Context, topic string, partition int, offset api.Offset, maxBytes int32) ([]api.Record, error) {
 	start := time.Now()
 	labels := []string{topic, fmt.Sprintf("%d", partition)}
+	var count int
+	defer func() {
+		observability.FetchLatency.WithLabelValues(labels...).Observe(time.Since(start).Seconds())
+		if count > 0 {
+			observability.MessagesConsumed.WithLabelValues(labels...).Add(float64(count))
+		}
+	}()
 	b.mu.RLock()
 	if b.closed {
 		b.mu.RUnlock()
@@ -207,8 +215,7 @@ func (b *Broker) Fetch(ctx context.Context, topic string, partition int, offset 
 		observability.RequestErrors.WithLabelValues("broker", "fetch").Inc()
 		return nil, err
 	}
-	observability.MessagesConsumed.WithLabelValues(labels...).Add(float64(len(recs)))
-	observability.FetchLatency.WithLabelValues(labels...).Observe(time.Since(start).Seconds())
+	count = len(recs)
 	return recs, nil
 }
 

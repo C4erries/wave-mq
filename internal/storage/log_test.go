@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -123,6 +124,7 @@ func TestRecoverTruncatesCorruptTail(t *testing.T) {
 		DataDir:         dir,
 		MaxSegmentBytes: 1024,
 		SyncOnAppend:    true,
+		IndexInterval:   1,
 	})
 	if err != nil {
 		t.Fatalf("manager: %v", err)
@@ -171,4 +173,174 @@ func TestRecoverTruncatesCorruptTail(t *testing.T) {
 			t.Fatalf("offset mismatch after recover at %d: %d", i, r.Offset)
 		}
 	}
+}
+
+func TestIndexRebuildAndSeek(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewManager(Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1 << 20,
+		IndexInterval:   2,
+		SyncOnAppend:    false,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	log, err := m.OpenLog(LogOptions{Topic: "t", Partition: 0})
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer func() {
+		log.Close()
+		m.Close()
+	}()
+	defer func() {
+		log.Close()
+		m.Close()
+	}()
+	defer func() {
+		log.Close()
+		m.Close()
+	}()
+	defer func() {
+		log.Close()
+		m.Close()
+	}()
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		if _, err := log.Append(ctx, api.Record{Value: []byte(strings.Repeat("x", 10))}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	idxPath := filepath.Join(dir, "t", "0", "00000000000000000000.idx")
+	if _, err := os.Stat(idxPath); err != nil {
+		t.Fatalf("index not created: %v", err)
+	}
+	recs, err := log.Read(ctx, 5, 0)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(recs) == 0 || recs[0].Offset != 5 {
+		t.Fatalf("expected offset 5, got %+v", recs)
+	}
+
+	// Delete index and reopen, ensure it is rebuilt.
+	log.Close()
+	if err := os.Remove(idxPath); err != nil {
+		t.Fatalf("remove idx: %v", err)
+	}
+	log, err = m.OpenLog(LogOptions{Topic: "t", Partition: 0})
+	if err != nil {
+		t.Fatalf("reopen log: %v", err)
+	}
+	defer log.Close()
+	if _, err := os.Stat(idxPath); err != nil {
+		t.Fatalf("index not rebuilt: %v", err)
+	}
+	recs, err = log.Read(ctx, 7, 0)
+	if err != nil || len(recs) == 0 || recs[0].Offset != 7 {
+		t.Fatalf("read after rebuild failed: %+v err=%v", recs, err)
+	}
+}
+
+func TestRetentionBySize(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewManager(Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 128,
+		MaxLogBytes:     256,
+		IndexInterval:   1,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	log, err := m.OpenLog(LogOptions{Topic: "t", Partition: 0})
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer func() {
+		log.Close()
+		m.Close()
+	}()
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		if _, err := log.Append(ctx, api.Record{Value: []byte(strings.Repeat("a", 64))}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	logDir := filepath.Join(dir, "t", "0")
+	entries, _ := os.ReadDir(logDir)
+	var logFiles int
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".log" {
+			logFiles++
+		}
+	}
+	if logFiles >= 4 { // should have deleted some
+		t.Fatalf("retention by size did not delete segments, log files=%d", logFiles)
+	}
+	recs, err := log.Read(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("read after retention: %v", err)
+	}
+	if len(recs) == 0 {
+		t.Fatalf("expected data after retention")
+	}
+	log.Close()
+	m.Close()
+}
+
+func TestRetentionByAge(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewManager(Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 128,
+		SegmentMaxAge:   time.Millisecond,
+		IndexInterval:   1,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	log, err := m.OpenLog(LogOptions{Topic: "t", Partition: 0})
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if _, err := log.Append(ctx, api.Record{Value: []byte(strings.Repeat("b", 64))}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	// Touch oldest segment to be old
+	dirPath := filepath.Join(dir, "t", "0")
+	files, err := filepath.Glob(filepath.Join(dirPath, "*.log"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no log files to age")
+	}
+	segPath := files[0]
+	oldTime := time.Now().Add(-time.Second)
+	log.Close()
+	if err := os.Chtimes(segPath, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	log, err = m.OpenLog(LogOptions{Topic: "t", Partition: 0})
+	if err != nil {
+		t.Fatalf("reopen log: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if _, err := log.Append(ctx, api.Record{Value: []byte("new")}); err != nil {
+		t.Fatalf("append new: %v", err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "t", "0"))
+	var logFiles int
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".log" {
+			logFiles++
+		}
+	}
+	if logFiles == 0 {
+		t.Fatalf("all segments removed unexpectedly")
+	}
+	log.Close()
+	m.Close()
 }

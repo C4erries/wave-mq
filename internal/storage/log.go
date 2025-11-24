@@ -36,6 +36,12 @@ import (
 //     key bytes (if keyLen >= 0), value bytes (if valueLen >= 0)
 // - Recovery invariant: offsets are strictly increasing starting at segment baseOffset;
 //   scanning stops on malformed length/CRC/offset and the tail is truncated to the last valid record.
+// - Sparse index per segment (<baseOffset>.idx):
+//     int64 baseOffset
+//     repeated entries:
+//         int64 relativeOffset (offset - baseOffset)
+//         int64 position (byte position of the record in .log, starting at length prefix)
+//   IndexInterval controls how often entries are added (every N records).
 
 const (
 	logExt            = ".log"
@@ -45,6 +51,11 @@ const (
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
+type indexEntry struct {
+	RelativeOffset int64
+	Position       int64
+}
+
 // Config controls global storage behaviour such as segment sizing and retention.
 type Config struct {
 	DataDir         string
@@ -52,6 +63,7 @@ type Config struct {
 	IndexInterval   int
 	SegmentMaxAge   time.Duration
 	SyncOnAppend    bool
+	MaxLogBytes     int64 // per-partition total size limit (-1 disables)
 }
 
 // LogOptions configures a single partition log instance.
@@ -85,6 +97,9 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 	if cfg.MaxSegmentBytes == 0 {
 		cfg.MaxSegmentBytes = defaultMaxSegment
+	}
+	if cfg.IndexInterval == 0 {
+		cfg.IndexInterval = 1024
 	}
 	return &Manager{cfg: cfg, logs: make(map[string]*segmentedLog)}, nil
 }
@@ -179,6 +194,11 @@ type segment struct {
 	file       *os.File
 	size       int64
 	path       string
+	createdAt  time.Time
+
+	idxPath string
+	idxFile *os.File
+	idx     []indexEntry
 }
 
 // segmentedLog is a segmented WAL for a single partition.
@@ -249,12 +269,27 @@ func (l *segmentedLog) createSegment(base api.Offset) error {
 	if err != nil {
 		return err
 	}
+	idxPath := filepath.Join(l.dir, fmt.Sprintf("%020d%s", base, indexExt))
+	idxFile, err := os.OpenFile(idxPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := binary.Write(idxFile, binary.LittleEndian, int64(base)); err != nil {
+		_ = f.Close()
+		_ = idxFile.Close()
+		return err
+	}
 	seg := &segment{
 		baseOffset: base,
 		nextOffset: base,
 		file:       f,
 		size:       0,
 		path:       path,
+		createdAt:  time.Now(),
+		idxPath:    idxPath,
+		idxFile:    idxFile,
+		idx:        make([]indexEntry, 0),
 	}
 	l.segments = append(l.segments, seg)
 	if l.startOffset == 0 || base < l.startOffset {
@@ -270,7 +305,7 @@ func (l *segmentedLog) recoverSegmentFile(path string, base api.Offset) error {
 		return err
 	}
 	defer f.Close()
-	nextOffset, goodBytes, err := scanSegment(f, base)
+	_, goodBytes, err := scanSegment(f, base)
 	if err != nil {
 		return err
 	}
@@ -283,7 +318,8 @@ func (l *segmentedLog) recoverSegmentFile(path string, base api.Offset) error {
 			return err
 		}
 	}
-	_ = nextOffset
+	idxPath := strings.TrimSuffix(path, logExt) + indexExt
+	_ = rebuildIndex(path, idxPath, base, l.cfg.IndexInterval)
 	return nil
 }
 
@@ -305,13 +341,21 @@ func (l *segmentedLog) openSegment(path string, base api.Offset, repair bool) (*
 			}
 		}
 	}
-	return &segment{
+	info, _ := f.Stat()
+	seg := &segment{
 		baseOffset: base,
 		nextOffset: nextOffset,
 		file:       f,
 		size:       goodBytes,
 		path:       path,
-	}, nil
+		createdAt:  info.ModTime(),
+		idxPath:    strings.TrimSuffix(path, logExt) + indexExt,
+	}
+	if err := l.loadOrRebuildIndex(seg); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return seg, nil
 }
 
 // Append writes a single record to the WAL.
@@ -358,8 +402,17 @@ func (l *segmentedLog) AppendBatch(ctx context.Context, records []api.Record) (a
 			}
 			active = l.segments[len(l.segments)-1]
 		}
+		pos := active.size
 		if _, err := active.file.Write(b); err != nil {
 			return -1, err
+		}
+		recordCount := int(active.nextOffset - active.baseOffset)
+		if recordCount%l.cfg.IndexInterval == 0 && active.idxFile != nil {
+			rel := int64(records[i].Offset - active.baseOffset)
+			if err := binary.Write(active.idxFile, binary.LittleEndian, rel); err == nil {
+				_ = binary.Write(active.idxFile, binary.LittleEndian, pos)
+				active.idx = append(active.idx, indexEntry{RelativeOffset: rel, Position: pos})
+			}
 		}
 		active.size += int64(len(b))
 		l.nextOffset++
@@ -370,6 +423,7 @@ func (l *segmentedLog) AppendBatch(ctx context.Context, records []api.Record) (a
 			return -1, err
 		}
 	}
+	l.enforceRetentionLocked()
 	return baseOffset, nil
 }
 
@@ -427,6 +481,9 @@ func (l *segmentedLog) Truncate(ctx context.Context, offset api.Offset) error {
 		if offset <= seg.baseOffset {
 			_ = seg.file.Truncate(0)
 			_ = seg.file.Close()
+			if seg.idxFile != nil {
+				_ = seg.idxFile.Close()
+			}
 			continue
 		}
 		if offset >= seg.nextOffset {
@@ -443,10 +500,18 @@ func (l *segmentedLog) Truncate(ctx context.Context, offset api.Offset) error {
 		}
 		seg.size = pos
 		seg.nextOffset = offset
+		if seg.idxFile != nil {
+			_ = seg.idxFile.Close()
+		}
+		_ = rebuildIndex(seg.path, seg.idxPath, seg.baseOffset, l.cfg.IndexInterval)
+		seg.idxFile, seg.idx, _ = loadIndex(seg.idxPath, seg.baseOffset)
 		kept = append(kept, seg)
 		// Close and discard any following segments.
 		for j := i + 1; j < len(l.segments); j++ {
 			_ = l.segments[j].file.Close()
+			if l.segments[j].idxFile != nil {
+				_ = l.segments[j].idxFile.Close()
+			}
 		}
 		break
 	}
@@ -489,6 +554,12 @@ func (l *segmentedLog) Close() error {
 		if err := seg.file.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+		if seg.idxFile != nil {
+			_ = seg.idxFile.Sync()
+			if err := seg.idxFile.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
 	}
 	return firstErr
 }
@@ -498,6 +569,153 @@ func (l *segmentedLog) ensureActiveSegmentLocked() *segment {
 		_ = l.createSegment(l.opts.BaseOffset)
 	}
 	return l.segments[len(l.segments)-1]
+}
+
+func (l *segmentedLog) enforceRetentionLocked() {
+	// Age-based retention
+	now := time.Now()
+	for len(l.segments) > 1 && l.cfg.SegmentMaxAge > 0 {
+		oldest := l.segments[0]
+		if now.Sub(oldest.createdAt) <= l.cfg.SegmentMaxAge {
+			break
+		}
+		l.removeOldestSegmentLocked()
+	}
+	// Size-based retention (per partition)
+	if l.cfg.MaxLogBytes > 0 {
+		for l.totalSizeLocked() > l.cfg.MaxLogBytes && len(l.segments) > 1 {
+			l.removeOldestSegmentLocked()
+		}
+	}
+}
+
+func (l *segmentedLog) totalSizeLocked() int64 {
+	var total int64
+	for _, seg := range l.segments {
+		total += seg.size
+	}
+	return total
+}
+
+func (l *segmentedLog) removeOldestSegmentLocked() {
+	if len(l.segments) == 0 {
+		return
+	}
+	oldest := l.segments[0]
+	_ = oldest.file.Close()
+	if oldest.idxFile != nil {
+		_ = oldest.idxFile.Close()
+	}
+	_ = os.Remove(oldest.path)
+	if oldest.idxPath != "" {
+		_ = os.Remove(oldest.idxPath)
+	}
+	l.segments = l.segments[1:]
+	if len(l.segments) > 0 {
+		l.startOffset = l.segments[0].baseOffset
+	} else {
+		l.startOffset = l.nextOffset
+	}
+}
+
+func (l *segmentedLog) loadOrRebuildIndex(seg *segment) error {
+	idxPath := seg.idxPath
+	if f, entries, err := loadIndex(idxPath, seg.baseOffset); err == nil {
+		seg.idxFile = f
+		seg.idx = entries
+		return nil
+	}
+	// Rebuild index from log if missing or corrupt.
+	if err := rebuildIndex(seg.path, idxPath, seg.baseOffset, l.cfg.IndexInterval); err != nil {
+		return err
+	}
+	f, entries, err := loadIndex(idxPath, seg.baseOffset)
+	if err != nil {
+		return err
+	}
+	seg.idxFile = f
+	seg.idx = entries
+	return nil
+}
+
+func rebuildIndex(logPath, idxPath string, base api.Offset, interval int) error {
+	if interval <= 0 {
+		interval = 1024
+	}
+	logFile, err := os.OpenFile(logPath, os.O_RDONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	idxFile, err := os.OpenFile(idxPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer idxFile.Close()
+	if err := binary.Write(idxFile, binary.LittleEndian, int64(base)); err != nil {
+		return err
+	}
+	var (
+		readerOffset int64
+		count        int
+		expected     = base
+		headerBuf    = make([]byte, 4)
+	)
+	for {
+		if _, err := logFile.ReadAt(headerBuf, readerOffset); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil
+			}
+			return err
+		}
+		size := binary.LittleEndian.Uint32(headerBuf)
+		if size == 0 {
+			return nil
+		}
+		recordBuf := make([]byte, size)
+		if _, err := logFile.ReadAt(recordBuf, readerOffset+4); err != nil {
+			return nil
+		}
+		if err := validateRecord(recordBuf, expected); err != nil {
+			return nil
+		}
+		if count%interval == 0 {
+			rel := int64(expected - base)
+			if err := binary.Write(idxFile, binary.LittleEndian, rel); err != nil {
+				return err
+			}
+			if err := binary.Write(idxFile, binary.LittleEndian, readerOffset); err != nil {
+				return err
+			}
+		}
+		readerOffset += int64(4 + size)
+		count++
+		expected++
+	}
+}
+
+func loadIndex(idxPath string, base api.Offset) (*os.File, []indexEntry, error) {
+	f, err := os.OpenFile(idxPath, os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, nil, err
+	}
+	var hdr int64
+	if err := binary.Read(f, binary.LittleEndian, &hdr); err != nil || api.Offset(hdr) != base {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("invalid index header")
+	}
+	var entries []indexEntry
+	for {
+		var rel, pos int64
+		if err := binary.Read(f, binary.LittleEndian, &rel); err != nil {
+			break
+		}
+		if err := binary.Read(f, binary.LittleEndian, &pos); err != nil {
+			break
+		}
+		entries = append(entries, indexEntry{RelativeOffset: rel, Position: pos})
+	}
+	return f, entries, nil
 }
 
 func scanSegment(f *os.File, base api.Offset) (api.Offset, int64, error) {
@@ -554,7 +772,11 @@ func validateRecord(data []byte, expectedOffset api.Offset) error {
 
 func readFromSegment(ctx context.Context, seg *segment, offset api.Offset, maxBytes int32) ([]api.Record, error) {
 	var res []api.Record
-	reader := io.NewSectionReader(seg.file, 0, seg.size)
+	startPos := int64(0)
+	if pos, ok := lookupIndex(seg, offset); ok {
+		startPos = pos
+	}
+	reader := io.NewSectionReader(seg.file, startPos, seg.size-startPos)
 	var consumed int64
 	for {
 		select {
@@ -598,7 +820,7 @@ func readFromSegment(ctx context.Context, seg *segment, offset api.Offset, maxBy
 				return res, nil
 			}
 		}
-		if consumed >= seg.size {
+		if consumed+startPos >= seg.size {
 			return res, nil
 		}
 	}
@@ -634,6 +856,32 @@ func seekToOffset(seg *segment, target api.Offset) (int64, error) {
 		}
 		pos += entrySize
 	}
+}
+
+func lookupIndex(seg *segment, target api.Offset) (int64, bool) {
+	if len(seg.idx) == 0 {
+		return 0, false
+	}
+	relTarget := int64(target - seg.baseOffset)
+	lo, hi := 0, len(seg.idx)-1
+	best := -1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		if seg.idx[mid].RelativeOffset == relTarget {
+			best = mid
+			break
+		}
+		if seg.idx[mid].RelativeOffset < relTarget {
+			best = mid
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if best >= 0 {
+		return seg.idx[best].Position, true
+	}
+	return 0, false
 }
 
 func encodeRecord(r api.Record) ([]byte, error) {
