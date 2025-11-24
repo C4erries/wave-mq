@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/c4erries/wave-mq/internal/broker"
+	"github.com/c4erries/wave-mq/internal/httpapi"
 	"github.com/c4erries/wave-mq/internal/mqtt"
 	"github.com/c4erries/wave-mq/internal/netproto"
 	"github.com/c4erries/wave-mq/internal/observability"
@@ -95,7 +96,9 @@ func main() {
 
 	ready := func() bool { return readyFlag.Load() }
 	go func() {
-		if err := observability.StartHTTPServer(ctx, cfg.HTTPAddr, ready); err != nil {
+		apiHandler := httpapi.New(b, cfg)
+		onStarted := func() { readyFlag.Store(true) }
+		if err := observability.StartHTTPServer(ctx, cfg.HTTPAddr, ready, apiHandler.Register, onStarted); err != nil {
 			readyFlag.Store(false)
 			logger.Error("http server stopped", "err", err)
 			cancel()
@@ -117,8 +120,6 @@ func main() {
 			cancel()
 		}
 	}()
-
-	readyFlag.Store(true)
 
 	waitForSignal()
 	cancel()

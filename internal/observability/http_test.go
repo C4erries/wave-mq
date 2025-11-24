@@ -15,7 +15,7 @@ func TestHTTPServerHealthAndMetrics(t *testing.T) {
 	ready := func() bool { return true }
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- StartHTTPServer(ctx, addr, ready)
+		errCh <- StartHTTPServer(ctx, addr, ready, nil, nil)
 	}()
 
 	// Give server a moment to start
@@ -59,7 +59,7 @@ func TestHealthzNotReady(t *testing.T) {
 	ready := func() bool { return false }
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- StartHTTPServer(ctx, addr, ready)
+		errCh <- StartHTTPServer(ctx, addr, ready, nil, nil)
 	}()
 	time.Sleep(100 * time.Millisecond)
 

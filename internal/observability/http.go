@@ -10,9 +10,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// StartHTTPServer launches an HTTP server exposing metrics, healthz and pprof.
+// StartHTTPServer launches an HTTP server exposing metrics, healthz, pprof and optional extra handlers.
 // readyFunc indicates readiness; if nil, readiness is always true.
-func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool) error {
+// onStarted is called after ListenAndServe begins successfully (can be nil).
+func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool, extra func(mux *http.ServeMux), onStarted func()) error {
 	if addr == "" {
 		return fmt.Errorf("http addr is required")
 	}
@@ -36,6 +37,9 @@ func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool) er
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	if extra != nil {
+		extra(mux)
+	}
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -45,6 +49,9 @@ func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool) er
 
 	errCh := make(chan error, 1)
 	go func() {
+		if onStarted != nil {
+			onStarted()
+		}
 		errCh <- srv.ListenAndServe()
 	}()
 

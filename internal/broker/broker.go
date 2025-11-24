@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -33,8 +34,9 @@ type Broker struct {
 
 // Topic represents a logical stream of ordered partitions.
 type Topic struct {
-	Name       string
-	Partitions map[int]*Partition
+	Name              string
+	Partitions        map[int]*Partition
+	ReplicationFactor int
 }
 
 // Partition holds metadata and a handle to the underlying storage log.
@@ -125,8 +127,9 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 	}
 
 	topic := &Topic{
-		Name:       name,
-		Partitions: make(map[int]*Partition, cfg.Partitions),
+		Name:              name,
+		ReplicationFactor: cfg.ReplicationFactor,
+		Partitions:        make(map[int]*Partition, cfg.Partitions),
 	}
 
 	for p := 0; p < cfg.Partitions; p++ {
@@ -390,6 +393,181 @@ func (b *Broker) snapshotOffsetsLocked() map[string]map[string]map[int]api.Offse
 		out[group] = topics
 	}
 	return out
+}
+
+// TopicAndPartitionCounts returns counts for summary.
+func (b *Broker) TopicAndPartitionCounts() (int, int) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	topics := len(b.topics)
+	partitions := 0
+	for _, t := range b.topics {
+		partitions += len(t.Partitions)
+	}
+	return topics, partitions
+}
+
+type TopicSummary struct {
+	Name              string `json:"name"`
+	Partitions        int    `json:"partitions"`
+	ReplicationFactor int    `json:"replicationFactor"`
+}
+
+type PartitionInfo struct {
+	ID            int        `json:"id"`
+	Leader        int        `json:"leader"`
+	HighWatermark api.Offset `json:"highWatermark"`
+	StartOffset   api.Offset `json:"startOffset"`
+}
+
+type TopicDetail struct {
+	Name              string          `json:"name"`
+	PartitionCount    int             `json:"partitionCount"`
+	ReplicationFactor int             `json:"replicationFactor"`
+	Partitions        []PartitionInfo `json:"partitions"`
+}
+
+func (b *Broker) TopicsSnapshot() []TopicSummary {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	var res []TopicSummary
+	for _, t := range b.topics {
+		res = append(res, TopicSummary{
+			Name:              t.Name,
+			Partitions:        len(t.Partitions),
+			ReplicationFactor: t.ReplicationFactor,
+		})
+	}
+	return res
+}
+
+func (b *Broker) TopicDetail(name string) (TopicDetail, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	t, ok := b.topics[name]
+	if !ok {
+		return TopicDetail{}, false
+	}
+	var parts []PartitionInfo
+	for pid, p := range t.Partitions {
+		p.mu.RLock()
+		info := PartitionInfo{
+			ID:            pid,
+			Leader:        p.Metadata.Replica.BrokerID,
+			HighWatermark: p.Log.HighWatermark(),
+			StartOffset:   p.Log.StartOffset(),
+		}
+		p.mu.RUnlock()
+		parts = append(parts, info)
+	}
+	return TopicDetail{
+		Name:              t.Name,
+		PartitionCount:    len(t.Partitions),
+		ReplicationFactor: t.ReplicationFactor,
+		Partitions:        parts,
+	}, true
+}
+
+// FetchMessages fetches up to limit messages ending at offset (if provided) from a partition.
+func (b *Broker) FetchMessages(ctx context.Context, topic string, partition int, offsetParam string, limit int) (api.Offset, []api.Record, error) {
+	earliest, latest, err := b.ListOffsets(ctx, topic, partition)
+	if err != nil {
+		return 0, nil, err
+	}
+	target := latest
+	if offsetParam != "" {
+		if v, err := strconv.ParseInt(offsetParam, 10, 64); err == nil {
+			target = api.Offset(v)
+		} else {
+			return 0, nil, fmt.Errorf("invalid offset")
+		}
+	}
+	if target < earliest {
+		target = earliest
+	}
+	start := target - api.Offset(limit) + 1
+	if start < earliest {
+		start = earliest
+	}
+	if start < 0 {
+		start = 0
+	}
+	recs, err := b.Fetch(ctx, topic, partition, start, 10<<20)
+	if err != nil {
+		return 0, nil, err
+	}
+	var filtered []api.Record
+	for _, r := range recs {
+		if r.Offset > target {
+			continue
+		}
+		if r.Offset < start {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	// keep only last limit
+	if len(filtered) > limit {
+		filtered = filtered[len(filtered)-limit:]
+	}
+	return start, filtered, nil
+}
+
+type ConsumerAssignment struct {
+	Topic           string     `json:"topic"`
+	Partition       int        `json:"partition"`
+	CommittedOffset api.Offset `json:"committedOffset"`
+	HighWatermark   api.Offset `json:"highWatermark"`
+	Lag             api.Offset `json:"lag"`
+}
+
+type ConsumerGroupInfo struct {
+	Name        string               `json:"name"`
+	Members     int                  `json:"members"`
+	Assignments []ConsumerAssignment `json:"assignments"`
+}
+
+func (b *Broker) ConsumerGroupsSnapshot(ctx context.Context) []ConsumerGroupInfo {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	meta, _ := b.Metadata(ctx, nil)
+	hwm := make(map[string]map[int]api.Offset)
+	for _, m := range meta {
+		if _, ok := hwm[m.Replica.Topic]; !ok {
+			hwm[m.Replica.Topic] = make(map[int]api.Offset)
+		}
+		hwm[m.Replica.Topic][m.Replica.Partition] = m.HighWatermark
+	}
+	var groups []ConsumerGroupInfo
+	for name, g := range b.groups {
+		g.mu.RLock()
+		info := ConsumerGroupInfo{
+			Name:    name,
+			Members: len(g.Members),
+		}
+		for topic, parts := range g.Offsets {
+			for pid, off := range parts {
+				h := hwm[topic][pid]
+				lag := api.Offset(0)
+				if h >= 0 && h > off {
+					lag = h - off - 1
+					if lag < 0 {
+						lag = 0
+					}
+				}
+				info.Assignments = append(info.Assignments, ConsumerAssignment{
+					Topic:           topic,
+					Partition:       pid,
+					CommittedOffset: off,
+					HighWatermark:   h,
+					Lag:             lag,
+				})
+			}
+		}
+		g.mu.RUnlock()
+		groups = append(groups, info)
+	}
+	return groups
 }
 
 // JoinGroup registers a member in a consumer group and returns its assignments.

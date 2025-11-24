@@ -225,12 +225,15 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 	pubHeader := []byte{(packetTypePUBLISH << 4) | (qos1 << 1)}
 	pubHeader = append(pubHeader, encodeRemainingLength(pubBody.Len())...)
 	sendPacket(append(pubHeader, pubBody.Bytes()...))
-	tp, body, err = readPacketType()
-	if err != nil {
-		t.Fatalf("puback read: %v", err)
-	}
-	if tp != packetTypePUBACK {
-		t.Fatalf("expected PUBACK got %d", tp)
+	for {
+		tp, body, err = readPacketType()
+		if err != nil {
+			t.Fatalf("puback read: %v", err)
+		}
+		if tp == packetTypePUBACK {
+			break
+		}
+		// ignore other packets (e.g., echoed publish)
 	}
 
 	// PINGREQ/PINGRESP
