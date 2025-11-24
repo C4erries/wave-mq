@@ -28,6 +28,9 @@ type BrokerConfig struct {
 	MaxSegmentBytes   int64
 	RetentionBytes    int64
 	RetentionTime     time.Duration
+	ClusterID         string
+	ControllerAddr    string
+	AdvertisedAddr    string
 }
 
 // TopicConfig describes how a topic should be created.
@@ -50,6 +53,32 @@ type PartitionMetadata struct {
 	Replica       PartitionReplica
 	StartOffset   Offset
 	HighWatermark Offset
+}
+
+// BrokerInfo describes a broker in the cluster.
+type BrokerInfo struct {
+	BrokerID int
+	Host     string
+	Port     int
+	Rack     string
+}
+
+// PartitionAssignment describes replica layout and leader/ISR for a partition.
+type PartitionAssignment struct {
+	Topic       string
+	Partition   int
+	Replicas    []int
+	ISR         []int
+	Leader      int
+	LeaderEpoch int32
+}
+
+// ClusterMetadata captures cluster-wide broker and partition state.
+type ClusterMetadata struct {
+	ClusterID  string
+	Version    int64
+	Brokers    []BrokerInfo
+	Partitions []PartitionAssignment
 }
 
 // Header is an optional key/value pair attached to a record.
