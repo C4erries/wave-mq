@@ -97,8 +97,7 @@ func main() {
 	ready := func() bool { return readyFlag.Load() }
 	go func() {
 		apiHandler := httpapi.New(b, cfg)
-		onStarted := func() { readyFlag.Store(true) }
-		if err := observability.StartHTTPServer(ctx, cfg.HTTPAddr, ready, apiHandler.Register, onStarted); err != nil {
+		if err := observability.StartHTTPServer(ctx, cfg.HTTPAddr, ready, apiHandler.Register, nil); err != nil {
 			readyFlag.Store(false)
 			logger.Error("http server stopped", "err", err)
 			cancel()
@@ -120,6 +119,7 @@ func main() {
 			cancel()
 		}
 	}()
+	readyFlag.Store(true)
 
 	waitForSignal()
 	cancel()

@@ -35,6 +35,20 @@ Example:
 curl http://localhost:8090/metrics
 ```
 
+## Docker Compose (broker + UI)
+
+В корне репозитория есть `docker-compose.yml`, который поднимает брокер и UI (`wave-ui`):
+
+```sh
+docker compose up --build
+```
+
+Порты:
+- брокер: `7912` (binary), `1883` (MQTT), `8090` (HTTP/metrics)
+- UI: `8080` (nginx со статикой Vite)
+
+Данные брокера хранятся в `wave_data` (volume). UI собирается с `VITE_USE_MOCKS=false` и обращается к HTTP API по адресу `http://broker:8090`.
+
 ## Benchmarks & Load
 
 Microbenchmarks:

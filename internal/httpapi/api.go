@@ -28,12 +28,11 @@ func New(b *broker.Broker, cfg api.BrokerConfig) *Handler {
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/api/broker", h.handleBroker)
-	mux.HandleFunc("/api/summary", h.handleSummary)
-	mux.HandleFunc("/api/topics", h.handleTopics)
-	mux.HandleFunc("/api/consumers", h.handleConsumers)
-	// Dynamic paths handled inside handleTopicPaths.
-	mux.HandleFunc("/api/topics/", h.handleTopicPaths)
+	mux.Handle("/api/broker", withCORS(http.HandlerFunc(h.handleBroker)))
+	mux.Handle("/api/summary", withCORS(http.HandlerFunc(h.handleSummary)))
+	mux.Handle("/api/topics", withCORS(http.HandlerFunc(h.handleTopics)))
+	mux.Handle("/api/consumers", withCORS(http.HandlerFunc(h.handleConsumers)))
+	mux.Handle("/api/topics/", withCORS(http.HandlerFunc(h.handleTopicPaths)))
 }
 
 func (h *Handler) handleBroker(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +48,10 @@ func (h *Handler) handleBroker(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	topics, partitions := h.b.TopicAndPartitionCounts()
 	produced := sumCounter("wavemq_messages_produced_total")
 	consumed := sumCounter("wavemq_messages_consumed_total")
@@ -68,8 +71,15 @@ func (h *Handler) handleTopics(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	topics := h.b.TopicsSnapshot()
-	writeJSON(w, topics)
+	switch r.Method {
+	case http.MethodGet:
+		topics := h.b.TopicsSnapshot()
+		writeJSON(w, topics)
+	case http.MethodPost:
+		h.handleCreateTopic(w, r)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }
 
 func (h *Handler) handleTopicPaths(w http.ResponseWriter, r *http.Request) {
@@ -92,7 +102,14 @@ func (h *Handler) handleTopicPaths(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid partition id", http.StatusBadRequest)
 			return
 		}
-		h.partitionMessages(w, r, name, pid)
+		switch r.Method {
+		case http.MethodGet:
+			h.partitionMessages(w, r, name, pid)
+		case http.MethodPost:
+			h.partitionProduce(w, r, name, pid)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
 		return
 	}
 	http.NotFound(w, r)
@@ -108,6 +125,10 @@ func (h *Handler) topicDetail(w http.ResponseWriter, r *http.Request, name strin
 }
 
 func (h *Handler) partitionMessages(w http.ResponseWriter, r *http.Request, topic string, partition int) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	q := r.URL.Query()
 	limit := 50
 	if l := q.Get("limit"); l != "" {
@@ -144,8 +165,78 @@ func (h *Handler) partitionMessages(w http.ResponseWriter, r *http.Request, topi
 }
 
 func (h *Handler) handleConsumers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	groups := h.b.ConsumerGroupsSnapshot(r.Context())
 	writeJSON(w, groups)
+}
+
+func (h *Handler) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name              string `json:"name"`
+		Partitions        int    `json:"partitions"`
+		ReplicationFactor int    `json:"replicationFactor"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" || req.Partitions < 1 {
+		http.Error(w, "name required and partitions>=1", http.StatusBadRequest)
+		return
+	}
+	cfg := api.TopicConfig{
+		Partitions:        req.Partitions,
+		ReplicationFactor: req.ReplicationFactor,
+	}
+	if err := h.b.CreateTopic(r.Context(), req.Name, cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	detail, _ := h.b.TopicDetail(req.Name)
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, detail)
+}
+
+func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic string, partition int) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Key   *string `json:"key"`
+		Value string  `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if req.Value == "" {
+		http.Error(w, "value is required", http.StatusBadRequest)
+		return
+	}
+	rec := api.Record{
+		Timestamp: time.Now().UTC(),
+		Value:     []byte(req.Value),
+	}
+	if req.Key != nil {
+		rec.Key = []byte(*req.Key)
+	}
+	base, err := h.b.Produce(r.Context(), topic, partition, []api.Record{rec})
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"partition":  partition,
+		"baseOffset": base,
+	})
 }
 
 func encodeMaybeBase64(b []byte) interface{} {
@@ -161,6 +252,19 @@ func encodeMaybeBase64(b []byte) interface{} {
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func withCORS(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 func sumCounter(metricName string) float64 {
