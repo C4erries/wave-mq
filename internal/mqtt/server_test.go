@@ -255,3 +255,107 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 		t.Fatalf("expected committed offset 0, got %d", b.committed["client-1"]["t/1"][0])
 	}
 }
+
+func TestMQTTServerTailVsBacklog(t *testing.T) {
+	b := newFakeBroker()
+	// preload backlog
+	b.records["topic"] = map[int][]api.Record{
+		0: {
+			{Offset: 0, Value: []byte("old1")},
+			{Offset: 1, Value: []byte("old2")},
+		},
+	}
+
+	makeConnect := func(cleanStart bool) []byte {
+		body := &bytes.Buffer{}
+		_ = writeString(body, "MQTT")
+		body.WriteByte(4)
+		flags := byte(0)
+		if cleanStart {
+			flags = 0b00000010
+		}
+		body.WriteByte(flags)
+		body.Write([]byte{0, 10})
+		_ = writeString(body, "client-1")
+		header := []byte{packetTypeCONNECT << 4}
+		header = append(header, encodeRemainingLength(body.Len())...)
+		return append(header, body.Bytes()...)
+	}
+
+	subscribe := func(conn net.Conn) error {
+		subBody := &bytes.Buffer{}
+		subBody.Write([]byte{0, 1})
+		_ = writeString(subBody, "topic")
+		subBody.WriteByte(0) // QoS0
+		subHeader := []byte{(packetTypeSUBSCRIBE << 4) | 0x02}
+		subHeader = append(subHeader, encodeRemainingLength(subBody.Len())...)
+		_, err := conn.Write(append(subHeader, subBody.Bytes()...))
+		return err
+	}
+
+	// Backlog mode (CleanStart=false): should read old messages
+	client1, server1 := net.Pipe()
+	defer client1.Close()
+	defer server1.Close()
+	srv, _ := NewServer("localhost:0", b)
+	go srv.handleConnection(server1)
+	_, _ = client1.Write(makeConnect(false))
+	_, _, _ = readPacketTypeClient(client1)
+	_ = subscribe(client1)
+	_, _, _ = readPacketTypeClient(client1) // SUBACK
+	// Expect backlog publish
+	tp, body, err := readPacketTypeClient(client1)
+	if err != nil || tp != packetTypePUBLISH {
+		t.Fatalf("expected backlog publish, got type %d err %v", tp, err)
+	}
+	buf := bytes.NewBuffer(body)
+	_, _ = readString(buf)
+	payload := buf.Bytes()
+	if string(payload) != "old1" {
+		t.Fatalf("expected old1, got %s", string(payload))
+	}
+	client1.Close()
+	server1.Close()
+
+	// Tail-only (CleanStart=true): start after latest
+	client2, server2 := net.Pipe()
+	defer client2.Close()
+	defer server2.Close()
+	go srv.handleConnection(server2)
+	_, _ = client2.Write(makeConnect(true))
+	_, _, _ = readPacketTypeClient(client2)
+	_ = subscribe(client2)
+	_, _, _ = readPacketTypeClient(client2) // SUBACK
+	// Append new message after subscribe
+	b.records["topic"][0] = append(b.records["topic"][0], api.Record{Offset: 2, Value: []byte("new")})
+	// Expect to receive only "new"
+	tp, body, err = readPacketTypeClient(client2)
+	if err != nil || tp != packetTypePUBLISH {
+		t.Fatalf("expected publish in tail mode, got %d err %v", tp, err)
+	}
+	buf = bytes.NewBuffer(body)
+	_, _ = readString(buf)
+	payload = buf.Bytes()
+	if string(payload) != "new" {
+		t.Fatalf("tail mode received unexpected payload %s", string(payload))
+	}
+}
+
+// readPacketTypeClient is a helper similar to the inline one in basic flow.
+func readPacketTypeClient(c net.Conn) (byte, []byte, error) {
+	var header [1]byte
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Read(header[:]); err != nil {
+		return 0, nil, err
+	}
+	tp := header[0] >> 4
+	remaining, err := decodeRemainingLength(c)
+	if err != nil {
+		return 0, nil, err
+	}
+	body := make([]byte, remaining)
+	if _, err := c.Read(body); err != nil {
+		return 0, nil, err
+	}
+	return tp, body, nil
+}

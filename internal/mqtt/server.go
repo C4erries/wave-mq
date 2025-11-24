@@ -203,7 +203,21 @@ func (state *clientState) trackSubscription(mqttTopic, topic string, partition i
 		qos:       qos,
 		stop:      cancel,
 	}
-	// Determine starting offset using committed offsets (last processed) and earliest.
+	sub.offset = state.initialOffsetForSub(ctx, topic, partition)
+	state.subs[mqttTopic] = sub
+	go state.consumeLoop(ctx, mqttTopic, sub)
+}
+
+func (state *clientState) initialOffsetForSub(ctx context.Context, topic string, partition int) api.Offset {
+	// Tail-only: ignore committed offsets, start at latest+1.
+	if state.cleanStart {
+		_, latest, err := state.broker.ListOffsets(ctx, topic, partition)
+		if err != nil {
+			return 0
+		}
+		return latest + 1
+	}
+	// Resume mode: start from max(earliest, committed+1).
 	earliest, _, errEarliest := state.broker.ListOffsets(ctx, topic, partition)
 	committed, errCommitted := state.broker.FetchCommitted(ctx, state.group, topic, partition)
 	start := earliest
@@ -211,11 +225,9 @@ func (state *clientState) trackSubscription(mqttTopic, topic string, partition i
 		start = committed + 1
 	}
 	if errEarliest != nil {
-		start = 0
+		return 0
 	}
-	sub.offset = start
-	state.subs[mqttTopic] = sub
-	go state.consumeLoop(ctx, mqttTopic, sub)
+	return start
 }
 
 func (state *clientState) consumeLoop(ctx context.Context, mqttTopic string, sub subscriptionState) {
