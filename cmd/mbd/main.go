@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/c4erries/wave-mq/internal/broker"
+	"github.com/c4erries/wave-mq/internal/controller"
 	"github.com/c4erries/wave-mq/internal/httpapi"
 	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/internal/mqtt"
@@ -74,6 +75,12 @@ func main() {
 		logger.Error("metadata store init failed", "err", err)
 		os.Exit(1)
 	}
+	recoveredTopics, err := metadataStore.RecoverTopics(context.Background())
+	if err != nil {
+		logger.Error("metadata recover failed", "err", err)
+		os.Exit(1)
+	}
+	ctrl := controller.NewSingleNodeController(cfg, recoveredTopics.Topics)
 
 	offsetStore, err := broker.NewOffsetStore(cfg.DataDir)
 	if err != nil {
@@ -103,7 +110,7 @@ func main() {
 
 	ready := func() bool { return readyFlag.Load() }
 	go func() {
-		apiHandler := httpapi.New(b, cfg)
+		apiHandler := httpapi.New(b, cfg, ctrl)
 		if err := observability.StartHTTPServer(ctx, cfg.HTTPAddr, ready, apiHandler.Register, nil); err != nil {
 			readyFlag.Store(false)
 			logger.Error("http server stopped", "err", err)

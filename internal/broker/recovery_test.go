@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	brokerpkg "github.com/c4erries/wave-mq/internal/broker"
+	"github.com/c4erries/wave-mq/internal/controller"
 	"github.com/c4erries/wave-mq/internal/httpapi"
 	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/internal/storage"
@@ -48,7 +49,7 @@ func TestBrokerRecoversTopicsFromMetadataLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
-	server := newHTTPTestServer(b, brokerCfg)
+	server := newHTTPTestServer(t, b, brokerCfg, metaStore)
 	client := server.Client()
 
 	createTopicHTTP(t, client, server.URL, "alpha", 2)
@@ -88,7 +89,7 @@ func TestBrokerRecoversTopicsFromMetadataLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("broker reopen: %v", err)
 	}
-	server = newHTTPTestServer(b, brokerCfg)
+	server = newHTTPTestServer(t, b, brokerCfg, metaStore)
 	defer func() {
 		server.Close()
 		b.Close()
@@ -120,10 +121,23 @@ func TestBrokerRecoversTopicsFromMetadataLog(t *testing.T) {
 	if !found {
 		t.Fatalf("did not find alpha-0 message after restart, got %v", msgs)
 	}
+	cluster := fetchCluster(t, server.URL)
+	if len(cluster.Brokers) != 1 || cluster.Brokers[0].BrokerID != brokerCfg.BrokerID {
+		t.Fatalf("unexpected cluster brokers: %+v", cluster.Brokers)
+	}
+	if len(cluster.Partitions) != 3 {
+		t.Fatalf("expected 3 partitions in cluster metadata, got %d", len(cluster.Partitions))
+	}
 }
 
-func newHTTPTestServer(b *brokerpkg.Broker, cfg api.BrokerConfig) *httptest.Server {
-	handler := httpapi.New(b, cfg)
+func newHTTPTestServer(t *testing.T, b *brokerpkg.Broker, cfg api.BrokerConfig, metaStore *metadata.Store) *httptest.Server {
+	t.Helper()
+	recovered, err := metaStore.RecoverTopics(context.Background())
+	if err != nil {
+		t.Fatalf("recover topics for controller: %v", err)
+	}
+	ctrl := controller.NewSingleNodeController(cfg, recovered.Topics)
+	handler := httpapi.New(b, cfg, ctrl)
 	mux := http.NewServeMux()
 	handler.Register(mux)
 	return httptest.NewServer(mux)
@@ -213,4 +227,18 @@ func fetchMessages(t *testing.T, baseURL, topic string, partition int) []map[str
 		t.Fatalf("decode messages: %v", err)
 	}
 	return msgs
+}
+
+func fetchCluster(t *testing.T, baseURL string) api.ClusterMetadata {
+	t.Helper()
+	resp, err := http.Get(baseURL + "/api/cluster")
+	if err != nil {
+		t.Fatalf("get cluster: %v", err)
+	}
+	defer resp.Body.Close()
+	var meta api.ClusterMetadata
+	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
+		t.Fatalf("decode cluster: %v", err)
+	}
+	return meta
 }

@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/c4erries/wave-mq/internal/broker"
+	"github.com/c4erries/wave-mq/internal/controller"
 	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/pkg/api"
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,13 +20,14 @@ import (
 )
 
 type Handler struct {
-	b   *broker.Broker
-	cfg api.BrokerConfig
+	b    *broker.Broker
+	cfg  api.BrokerConfig
+	ctrl controller.MetadataStore
 }
 
 // New returns an HTTP handler for admin JSON API under /api.
-func New(b *broker.Broker, cfg api.BrokerConfig) *Handler {
-	return &Handler{b: b, cfg: cfg}
+func New(b *broker.Broker, cfg api.BrokerConfig, ctrl controller.MetadataStore) *Handler {
+	return &Handler{b: b, cfg: cfg, ctrl: ctrl}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -33,6 +35,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/api/summary", withCORS(http.HandlerFunc(h.handleSummary)))
 	mux.Handle("/api/topics", withCORS(http.HandlerFunc(h.handleTopics)))
 	mux.Handle("/api/consumers", withCORS(http.HandlerFunc(h.handleConsumers)))
+	mux.Handle("/api/cluster", withCORS(http.HandlerFunc(h.handleClusterMetadata)))
 	mux.Handle("/api/topics/", withCORS(http.HandlerFunc(h.handleTopicPaths)))
 }
 
@@ -46,6 +49,23 @@ func (h *Handler) handleBroker(w http.ResponseWriter, r *http.Request) {
 		"replicationFactor": h.cfg.ReplicationFactor,
 	}
 	writeJSON(w, resp)
+}
+
+func (h *Handler) handleClusterMetadata(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.ctrl == nil {
+		http.Error(w, "controller not configured", http.StatusInternalServerError)
+		return
+	}
+	meta, err := h.ctrl.GetClusterMetadata(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, meta)
 }
 
 func (h *Handler) handleSummary(w http.ResponseWriter, r *http.Request) {
