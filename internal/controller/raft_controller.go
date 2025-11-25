@@ -360,12 +360,12 @@ func (c *RaftController) RaftTerm() uint64 {
 	return 0
 }
 
-// RaftPeers returns peer addresses.
-func (c *RaftController) RaftPeers() []string {
+// RaftPeers returns peer ids and addresses.
+func (c *RaftController) RaftPeers() []PeerInfo {
 	servers := c.raft.GetConfiguration().Configuration().Servers
-	out := make([]string, 0, len(servers))
+	out := make([]PeerInfo, 0, len(servers))
 	for _, s := range servers {
-		out = append(out, string(s.Address))
+		out = append(out, PeerInfo{ID: string(s.ID), Address: string(s.Address)})
 	}
 	return out
 }

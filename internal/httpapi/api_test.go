@@ -38,7 +38,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *broker.Broker, *storage.M
 	if err != nil {
 		t.Fatalf("recover topics: %v", err)
 	}
-	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 1, ControllerMode: "single"}
+	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 1, ControllerMode: "single", ClusterID: "test-cluster"}
 	ctrl, err := controller.NewSingleNodeController(cfg, recovered.Topics)
 	if err != nil {
 		t.Fatalf("controller: %v", err)
@@ -117,6 +117,91 @@ func TestControllerStatusEndpoint(t *testing.T) {
 	}
 	if status["raftState"] != "none" {
 		t.Fatalf("expected raftState none, got %v", status["raftState"])
+	}
+	if status["term"].(float64) != 0 {
+		t.Fatalf("expected term 0, got %v", status["term"])
+	}
+	if peers, ok := status["peers"].([]interface{}); !ok || len(peers) != 0 {
+		t.Fatalf("expected empty peers, got %v", status["peers"])
+	}
+	if status["clusterID"] == "" {
+		t.Fatalf("expected clusterID")
+	}
+	if status["version"] == nil {
+		t.Fatalf("expected version")
+	}
+}
+
+func TestControllerStatusEndpointRaft(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1 << 20,
+		IndexInterval:   1,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	offsetStore, err := broker.NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
+	initial := api.ClusterMetadata{ClusterID: "cluster-raft", Version: 1, Brokers: []api.BrokerInfo{{BrokerID: 1}}}
+	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 1, ControllerMode: "raft"}
+	ctrl, err := controller.NewRaftController(cfg, initial, "")
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
+	defer ctrl.Close()
+	if err := ctrl.RegisterBroker(context.Background(), api.BrokerInfo{BrokerID: 1, Host: "b1"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	b, err := broker.NewBroker(api.BrokerConfig{
+		BrokerID:          1,
+		DataDir:           dir,
+		ReplicationFactor: 1,
+	}, store, offsetStore, metaStore, ctrl)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+	handler := New(b, cfg, ctrl)
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer func() {
+		server.Close()
+		b.Close()
+		store.Close()
+		offsetStore.Close()
+		metaStore.Close()
+	}()
+
+	resp, err := http.Get(server.URL + "/api/controller")
+	if err != nil {
+		t.Fatalf("get controller: %v", err)
+	}
+	defer resp.Body.Close()
+	var status map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if status["mode"] != "raft" {
+		t.Fatalf("expected mode raft, got %v", status["mode"])
+	}
+	state, _ := status["raftState"].(string)
+	if state == "" {
+		t.Fatalf("expected raftState set")
+	}
+	termVal, _ := status["term"].(float64)
+	if termVal < 1 {
+		t.Fatalf("expected term >=1, got %v", termVal)
+	}
+	if peers, ok := status["peers"].([]interface{}); !ok || len(peers) == 0 {
+		t.Fatalf("expected non-empty peers, got %v", status["peers"])
 	}
 }
 

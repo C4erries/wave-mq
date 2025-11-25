@@ -58,24 +58,37 @@ func (h *Handler) handleControllerStatus(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	status := map[string]interface{}{
-		"mode":      h.cfg.ControllerMode,
-		"raftState": "none",
-		"term":      0,
-		"peers":     []string{},
+	mode := h.cfg.ControllerMode
+	if mode == "" {
+		mode = "single"
 	}
+	raftState := "none"
+	term := uint64(0)
+	peers := []controller.PeerInfo{}
 	if rc, ok := h.ctrl.(interface {
 		ControllerMode() string
 		RaftState() string
 		RaftTerm() uint64
-		RaftPeers() []string
+		RaftPeers() []controller.PeerInfo
 	}); ok {
-		status["mode"] = rc.ControllerMode()
-		status["raftState"] = rc.RaftState()
-		status["term"] = rc.RaftTerm()
-		status["peers"] = rc.RaftPeers()
+		mode = rc.ControllerMode()
+		raftState = strings.ToLower(rc.RaftState())
+		term = rc.RaftTerm()
+		peers = rc.RaftPeers()
 	}
-	writeJSON(w, status)
+	meta, _ := h.ctrl.GetClusterMetadata(r.Context())
+	if h.ctrl == nil {
+		meta = api.ClusterMetadata{}
+	}
+	resp := map[string]interface{}{
+		"mode":      mode,
+		"raftState": raftState,
+		"term":      term,
+		"peers":     peers,
+		"clusterID": meta.ClusterID,
+		"version":   meta.Version,
+	}
+	writeJSON(w, resp)
 }
 
 func (h *Handler) handleClusterMetadata(w http.ResponseWriter, r *http.Request) {

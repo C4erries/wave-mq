@@ -4,11 +4,11 @@ Single-node log-based message broker in Go, ready to grow into a cluster. Provid
 
 ## Project Status
 
-- Core single-node broker (storage, binary protocol, MQTT, consumer groups, HTTP UI/API) — implemented and suitable for local experiments and demos.
-- Topic metadata persistence (`metadata.log`) — implemented; topics/partitions survive broker restart.
-- Cluster metadata layer (controller + `/api/cluster`) — implemented in single-node and static multi-broker form; Raft-based controller exists as an experimental alternative, selectable via `-controller=raft` (default `single`) and optional `-raft-dir` for state (empty=in-memory).
-- Replication path (leader → follower) — binary client and partition replicator implemented as prototypes; **not** enabled in the default runtime, RF effectively remains 1.
-- Multi-node / Raft-backed controller quorum — design and scaffolding in place, production wiring and operations are future work.
+- Core single-node broker (storage, binary protocol, MQTT, consumer groups, HTTP UI/API) вЂ” implemented and suitable for local experiments and demos.
+- Topic metadata persistence (metadata.log) вЂ” implemented; topics/partitions survive broker restart.
+- Cluster metadata layer (controller + /api/cluster) вЂ” implemented in single-node and static multi-broker form; Raft-based controller available via -controller=raft (default single) with optional -raft-dir for state (empty=in-memory).
+- Replication path (leader в†’ follower) вЂ” binary client and partition replicator implemented as prototypes; **not** enabled in the default runtime, RF effectively remains 1.
+- Multi-node / Raft-backed controller quorum вЂ” supported for local multi-broker clusters; production hardening and operational tooling are ongoing.
 
 ## Roadmap
 
@@ -49,7 +49,7 @@ This stage is split into three major chapters.
   - ensure idempotence and correct offset tracking on follower.
 - Start replication loops for follower partitions:
   - derive follower assignments from `ClusterMetadata` (roles/replicas);
-  - for each follower partition, run a `PartitionReplicator` pointing at the leader’s `BrokerInfo`.
+  - for each follower partition, run a `PartitionReplicator` pointing at the leaderвЂ™s `BrokerInfo`.
   - Use `ReportReplicaProgress` to maintain ISR:
   - report follower progress (last applied offset + leader HighWatermark) back to the controller;
   - controller updates `ISR` and `Version` accordingly.
@@ -93,7 +93,7 @@ This stage is split into three major chapters.
 
 #### 3.3 Large E2E scenario fuzzing
 
-- Scripted “big test” that runs many randomized scenarios to shake out edge cases:
+- Scripted вЂњbig testвЂќ that runs many randomized scenarios to shake out edge cases:
   - random topic/partition creation, consumer group joins/leaves, produces/fetches, restarts;
   - invariants: no lost acknowledged messages, offsets monotonic per partition, ISR never empty, etc.
 - Designed to run long and cover many combinations, closer to system-level fuzzing.
@@ -131,16 +131,16 @@ MQTT usage: connect any MQTT 3.1.1/5.0 client to `:1883`, SUBSCRIBE to a topic, 
 ## Observability
 
 HTTP endpoints (default `:8090`):
-- `/metrics` — Prometheus metrics.
-- `/healthz` — readiness probe.
-- `/debug/pprof/*` — pprof handlers.
+- `/metrics` вЂ” Prometheus metrics.
+- `/healthz` вЂ” readiness probe.
+- `/debug/pprof/*` вЂ” pprof handlers.
 
 Example:
 ```sh
 curl http://localhost:8090/metrics
 ```
 
-### Two-broker Raft example (experimental)
+### Two-broker Raft example
 
 Run two brokers sharing one Raft controller cluster:
 
@@ -168,21 +168,26 @@ Broker 2:
   -bind=:8912 -http=:8092
 ```
 
-Expected behavior: one controller becomes leader; `/api/cluster` on both brokers converges to the same `ClusterMetadata`, and partition leaders are spread across broker IDs.
+Expected behavior: one controller becomes leader; `/api/cluster` on both brokers converges to the same `ClusterMetadata`, and partition leaders are spread across broker IDs. The `/api/controller` endpoint shows `mode=raft`, current `raftState`/`term`, peers, clusterID and version.
+
+#### Operating a Raft cluster
+- Bootstrap: start the first broker with the full `-raft-peer` list; ensure `/api/controller` reports a leader and correct `clusterID`.
+- Join: start additional brokers with the same `-raft-peer` list; verify they appear in `/api/controller` peers and `/api/cluster` brokers.
+- Rolling restart: restart brokers one by one, checking `/api/controller` after each restart to ensure a leader exists and versions keep increasing.
 
 ## Docker Compose (broker + UI)
 
-В корне репозитория есть `docker-compose.yml`, который поднимает брокер и UI (`wave-ui`):
+Р’ РєРѕСЂРЅРµ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ РµСЃС‚СЊ `docker-compose.yml`, РєРѕС‚РѕСЂС‹Р№ РїРѕРґРЅРёРјР°РµС‚ Р±СЂРѕРєРµСЂ Рё UI (`wave-ui`):
 
 ```sh
 docker compose up --build
 ```
 
-Порты:
-- брокер: `7912` (binary), `1883` (MQTT), `8090` (HTTP/metrics)
-- UI: `8080` (nginx со статикой Vite)
+РџРѕСЂС‚С‹:
+- Р±СЂРѕРєРµСЂ: `7912` (binary), `1883` (MQTT), `8090` (HTTP/metrics)
+- UI: `8080` (nginx СЃРѕ СЃС‚Р°С‚РёРєРѕР№ Vite)
 
-Данные брокера хранятся в `wave_data` (volume). UI собирается с `VITE_USE_MOCKS=false` и обращается к HTTP API по адресу `http://broker:8090`.
+Р”Р°РЅРЅС‹Рµ Р±СЂРѕРєРµСЂР° С…СЂР°РЅСЏС‚СЃСЏ РІ `wave_data` (volume). UI СЃРѕР±РёСЂР°РµС‚СЃСЏ СЃ `VITE_USE_MOCKS=false` Рё РѕР±СЂР°С‰Р°РµС‚СЃСЏ Рє HTTP API РїРѕ Р°РґСЂРµСЃСѓ `http://broker:8090`.
 
 ## Benchmarks & Load
 
