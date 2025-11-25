@@ -304,7 +304,9 @@ func containsInt(list []int, id int) bool {
 func (b *Broker) Produce(ctx context.Context, topic string, partition int, records []api.Record) (api.Offset, error) {
 	start := time.Now()
 	labels := []string{topic, fmt.Sprintf("%d", partition)}
-	defer observability.ProduceLatency.WithLabelValues(labels...).Observe(time.Since(start).Seconds())
+	defer func(start time.Time) {
+		observability.ProduceLatency.WithLabelValues(labels...).Observe(time.Since(start).Seconds())
+	}(start)
 	b.mu.RLock()
 	if b.closed {
 		b.mu.RUnlock()
@@ -335,7 +337,6 @@ func (b *Broker) Produce(ctx context.Context, topic string, partition int, recor
 		return -1, err
 	}
 	observability.MessagesProduced.WithLabelValues(labels...).Add(float64(len(records)))
-	observability.ProduceLatency.WithLabelValues(labels...).Observe(time.Since(start).Seconds())
 	hw := base + api.Offset(len(records)-1)
 	if hw > p.Metadata.HighWatermark {
 		p.Metadata.HighWatermark = hw
