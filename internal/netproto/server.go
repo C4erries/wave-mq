@@ -2,12 +2,13 @@ package netproto
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"sync/atomic"
 
+	"github.com/c4erries/wave-mq/internal/broker"
 	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -249,17 +250,15 @@ func (s *Server) nextCorrID() int32 {
 }
 
 func mapError(err error) api.ErrorCode {
-	if err == nil {
-		return api.ErrNone
-	}
-	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "topic not found"):
+	case err == nil:
+		return api.ErrNone
+	case errors.Is(err, broker.ErrTopicNotFound):
 		return api.ErrTopicNotFound
-	case strings.Contains(msg, "partition not found"):
+	case errors.Is(err, broker.ErrPartitionNotFound):
 		return api.ErrPartitionNotFound
-	case strings.Contains(msg, "broker closed"):
-		return api.ErrInternal
+	case errors.Is(err, broker.ErrTopicExists):
+		return api.ErrTopicExists
 	default:
 		return api.ErrInternal
 	}

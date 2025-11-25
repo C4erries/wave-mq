@@ -2,12 +2,14 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
@@ -18,15 +20,23 @@ type Storage interface {
 	OpenLog(opts storage.LogOptions) (storage.Log, error)
 }
 
+var (
+	ErrTopicExists       = errors.New("topic already exists")
+	ErrTopicNotFound     = errors.New("topic not found")
+	ErrPartitionNotFound = errors.New("partition not found")
+)
+
 // Broker owns topics, partitions, consumer groups and access to local storage.
 type Broker struct {
 	cfg     api.BrokerConfig
 	storage Storage
 	offsets *OffsetStore
+	meta    *metadata.Store
 
 	mu     sync.RWMutex
 	topics map[string]*Topic
 	groups map[string]*ConsumerGroup
+	known  map[string]metadata.TopicState
 	closed bool
 
 	commitCount int
@@ -66,12 +76,15 @@ type GroupMember struct {
 }
 
 // NewBroker wires together configuration and the storage backend.
-func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore) (*Broker, error) {
+func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore, meta *metadata.Store) (*Broker, error) {
 	if storage == nil {
 		return nil, fmt.Errorf("storage is required")
 	}
 	if offsets == nil {
 		return nil, fmt.Errorf("offset store is required")
+	}
+	if meta == nil {
+		return nil, fmt.Errorf("metadata store is required")
 	}
 	if cfg.ReplicationFactor < 1 {
 		return nil, fmt.Errorf("replication factor must be >= 1")
@@ -80,8 +93,10 @@ func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore) (*Br
 		cfg:     cfg,
 		storage: storage,
 		offsets: offsets,
+		meta:    meta,
 		topics:  make(map[string]*Topic),
 		groups:  make(map[string]*ConsumerGroup),
+		known:   make(map[string]metadata.TopicState),
 	}
 	// Recover committed offsets
 	offsetData, err := offsets.Recover(context.Background())
@@ -105,6 +120,16 @@ func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore) (*Br
 		}
 		b.groups[group] = g
 	}
+	recoveredTopics, err := meta.RecoverTopics(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	for name, state := range recoveredTopics.Topics {
+		b.known[name] = state
+	}
+	if err := b.bootstrapTopicsFromMetadata(context.Background(), recoveredTopics.Topics); err != nil {
+		return nil, err
+	}
 	return b, nil
 }
 
@@ -113,57 +138,122 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 	if name == "" {
 		return fmt.Errorf("topic name is required")
 	}
-	if cfg.Partitions <= 0 {
-		cfg.Partitions = 1
+	partitions := cfg.Partitions
+	if partitions <= 0 {
+		partitions = 1
 	}
-	if cfg.ReplicationFactor <= 0 {
-		cfg.ReplicationFactor = b.cfg.ReplicationFactor
+	rf := cfg.ReplicationFactor
+	if rf <= 0 {
+		rf = b.cfg.ReplicationFactor
+	}
+	state := metadata.TopicState{
+		Name:              name,
+		NumPartitions:     partitions,
+		ReplicationFactor: rf,
+		Partitions:        make([]metadata.PartitionSpec, 0, partitions),
+	}
+	for p := 0; p < partitions; p++ {
+		state.Partitions = append(state.Partitions, metadata.PartitionSpec{
+			ID: int32(p),
+			Replicas: []metadata.ReplicaSpec{{
+				BrokerID:    int32(b.cfg.BrokerID),
+				Role:        api.RoleLeader,
+				LeaderEpoch: 0,
+			}},
+		})
 	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, ok := b.topics[name]; ok {
+		return ErrTopicExists
+	}
+	if _, ok := b.known[name]; ok {
+		return ErrTopicExists
+	}
+	event := metadata.CreateTopicEvent{
+		Name:              state.Name,
+		NumPartitions:     state.NumPartitions,
+		ReplicationFactor: state.ReplicationFactor,
+		Partitions:        state.Partitions,
+	}
+	if err := b.meta.AppendCreateTopic(ctx, event); err != nil {
+		return err
+	}
+	b.known[name] = state
+	return b.loadTopicLocked(ctx, state)
+}
+
+func (b *Broker) bootstrapTopicsFromMetadata(ctx context.Context, topics map[string]metadata.TopicState) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, state := range topics {
+		if err := b.loadTopicLocked(ctx, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *Broker) loadTopicLocked(ctx context.Context, state metadata.TopicState) error {
+	if _, ok := b.topics[state.Name]; ok {
 		return nil
 	}
-
 	topic := &Topic{
-		Name:              name,
-		ReplicationFactor: cfg.ReplicationFactor,
-		Partitions:        make(map[int]*Partition, cfg.Partitions),
+		Name:              state.Name,
+		ReplicationFactor: state.ReplicationFactor,
+		Partitions:        make(map[int]*Partition, state.NumPartitions),
 	}
-
-	for p := 0; p < cfg.Partitions; p++ {
+	specs := append([]metadata.PartitionSpec(nil), state.Partitions...)
+	sort.Slice(specs, func(i, j int) bool { return specs[i].ID < specs[j].ID })
+	for _, ps := range specs {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 		log, err := b.storage.OpenLog(storage.LogOptions{
-			Topic:     name,
-			Partition: p,
+			Topic:     state.Name,
+			Partition: int(ps.ID),
 		})
 		if err != nil {
 			return err
 		}
+		replica := b.replicaForPartition(ps)
 		meta := api.PartitionMetadata{
 			Replica: api.PartitionReplica{
-				Topic:       name,
-				Partition:   p,
-				BrokerID:    b.cfg.BrokerID,
-				Role:        api.RoleLeader,
-				LeaderEpoch: 0,
+				Topic:       state.Name,
+				Partition:   int(ps.ID),
+				BrokerID:    int(replica.BrokerID),
+				Role:        replica.Role,
+				LeaderEpoch: replica.LeaderEpoch,
 			},
-			StartOffset:   0,
-			HighWatermark: -1,
+			StartOffset:   log.StartOffset(),
+			HighWatermark: log.HighWatermark(),
 		}
-		topic.Partitions[p] = &Partition{
+		topic.Partitions[int(ps.ID)] = &Partition{
 			Metadata: meta,
 			Log:      log,
 		}
 	}
-
-	b.topics[name] = topic
+	b.topics[state.Name] = topic
 	return nil
+}
+
+func (b *Broker) replicaForPartition(ps metadata.PartitionSpec) metadata.ReplicaSpec {
+	for _, r := range ps.Replicas {
+		if int(r.BrokerID) == b.cfg.BrokerID {
+			return r
+		}
+	}
+	if len(ps.Replicas) > 0 {
+		return ps.Replicas[0]
+	}
+	return metadata.ReplicaSpec{
+		BrokerID:    int32(b.cfg.BrokerID),
+		Role:        api.RoleLeader,
+		LeaderEpoch: 0,
+	}
 }
 
 // Produce appends records to the specified partition.
@@ -181,13 +271,13 @@ func (b *Broker) Produce(ctx context.Context, topic string, partition int, recor
 	if !ok {
 		b.mu.RUnlock()
 		observability.RequestErrors.WithLabelValues("broker", "produce").Inc()
-		return -1, fmt.Errorf("topic not found")
+		return -1, fmt.Errorf("%w", ErrTopicNotFound)
 	}
 	p, ok := t.Partitions[partition]
 	b.mu.RUnlock()
 	if !ok {
 		observability.RequestErrors.WithLabelValues("broker", "produce").Inc()
-		return -1, fmt.Errorf("partition not found")
+		return -1, fmt.Errorf("%w", ErrPartitionNotFound)
 	}
 
 	p.mu.Lock()
@@ -230,13 +320,13 @@ func (b *Broker) Fetch(ctx context.Context, topic string, partition int, offset 
 	if !ok {
 		b.mu.RUnlock()
 		observability.RequestErrors.WithLabelValues("broker", "fetch").Inc()
-		return nil, fmt.Errorf("topic not found")
+		return nil, fmt.Errorf("%w", ErrTopicNotFound)
 	}
 	p, ok := t.Partitions[partition]
 	b.mu.RUnlock()
 	if !ok {
 		observability.RequestErrors.WithLabelValues("broker", "fetch").Inc()
-		return nil, fmt.Errorf("partition not found")
+		return nil, fmt.Errorf("%w", ErrPartitionNotFound)
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -263,12 +353,12 @@ func (b *Broker) ListOffsets(ctx context.Context, topic string, partition int) (
 	t, ok := b.topics[topic]
 	if !ok {
 		b.mu.RUnlock()
-		return -1, -1, fmt.Errorf("topic not found")
+		return -1, -1, fmt.Errorf("%w", ErrTopicNotFound)
 	}
 	p, ok := t.Partitions[partition]
 	b.mu.RUnlock()
 	if !ok {
-		return -1, -1, fmt.Errorf("partition not found")
+		return -1, -1, fmt.Errorf("%w", ErrPartitionNotFound)
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -373,6 +463,9 @@ func (b *Broker) Close() error {
 	b.closed = true
 	if b.offsets != nil {
 		_ = b.offsets.Close()
+	}
+	if b.meta != nil {
+		_ = b.meta.Close()
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -23,11 +24,15 @@ func newTestBroker(t *testing.T) (*Broker, func()) {
 	if err != nil {
 		t.Fatalf("offset store: %v", err)
 	}
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
 	b, err := NewBroker(api.BrokerConfig{
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore)
+	}, store, offsetStore, metaStore)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -35,6 +40,7 @@ func newTestBroker(t *testing.T) (*Broker, func()) {
 		_ = b.Close()
 		_ = store.Close()
 		_ = offsetStore.Close()
+		_ = metaStore.Close()
 	}
 	return b, cleanup
 }
@@ -233,11 +239,15 @@ func TestOffsetPersistenceAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("offset store: %v", err)
 	}
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
 	b, err := NewBroker(api.BrokerConfig{
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore)
+	}, store, offsetStore, metaStore)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -248,6 +258,7 @@ func TestOffsetPersistenceAcrossRestart(t *testing.T) {
 	b.Close()
 	store.Close()
 	offsetStore.Close()
+	metaStore.Close()
 
 	// Reopen and ensure offsets persist.
 	store, _ = storage.NewManager(storage.Config{
@@ -256,11 +267,12 @@ func TestOffsetPersistenceAcrossRestart(t *testing.T) {
 		SyncOnAppend:    true,
 	})
 	offsetStore, _ = NewOffsetStore(dir)
+	metaStore, _ = metadata.NewStore(api.BrokerConfig{DataDir: dir})
 	b, err = NewBroker(api.BrokerConfig{
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore)
+	}, store, offsetStore, metaStore)
 	if err != nil {
 		t.Fatalf("broker reopen: %v", err)
 	}
@@ -268,6 +280,7 @@ func TestOffsetPersistenceAcrossRestart(t *testing.T) {
 		b.Close()
 		store.Close()
 		offsetStore.Close()
+		metaStore.Close()
 	}()
 	off, err := b.FetchCommitted(ctx, "g", "t", 0)
 	if err != nil {

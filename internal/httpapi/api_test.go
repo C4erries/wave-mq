@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/c4erries/wave-mq/internal/broker"
+	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -28,11 +29,15 @@ func setupTestServer(t *testing.T) (*httptest.Server, *broker.Broker, *storage.M
 	if err != nil {
 		t.Fatalf("offset store: %v", err)
 	}
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
 	b, err := broker.NewBroker(api.BrokerConfig{
 		BrokerID:          1,
 		DataDir:           dir,
 		ReplicationFactor: 1,
-	}, store, offsetStore)
+	}, store, offsetStore, metaStore)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}

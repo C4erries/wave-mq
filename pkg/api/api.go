@@ -120,6 +120,7 @@ const (
 	ErrInvalidRequest
 	ErrTopicNotFound
 	ErrPartitionNotFound
+	ErrTopicExists
 	ErrNotLeader
 	ErrInternal
 	// TODO: extend with protocol-compatible error codes as features land.

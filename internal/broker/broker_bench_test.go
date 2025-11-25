@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -23,11 +24,15 @@ func BenchmarkBrokerProduce(b *testing.B) {
 	if err != nil {
 		b.Fatalf("offset store: %v", err)
 	}
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		b.Fatalf("metadata store: %v", err)
+	}
 	br, err := NewBroker(api.BrokerConfig{
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore)
+	}, store, offsetStore, metaStore)
 	if err != nil {
 		b.Fatalf("broker: %v", err)
 	}
@@ -35,6 +40,7 @@ func BenchmarkBrokerProduce(b *testing.B) {
 		br.Close()
 		store.Close()
 		offsetStore.Close()
+		metaStore.Close()
 	}()
 	ctx := context.Background()
 	if err := br.CreateTopic(ctx, "bench", api.TopicConfig{Partitions: 1}); err != nil {
@@ -64,11 +70,15 @@ func BenchmarkBrokerFetch(b *testing.B) {
 	if err != nil {
 		b.Fatalf("offset store: %v", err)
 	}
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		b.Fatalf("metadata store: %v", err)
+	}
 	br, err := NewBroker(api.BrokerConfig{
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore)
+	}, store, offsetStore, metaStore)
 	if err != nil {
 		b.Fatalf("broker: %v", err)
 	}
@@ -76,6 +86,7 @@ func BenchmarkBrokerFetch(b *testing.B) {
 		br.Close()
 		store.Close()
 		offsetStore.Close()
+		metaStore.Close()
 	}()
 	ctx := context.Background()
 	if err := br.CreateTopic(ctx, "bench", api.TopicConfig{Partitions: 1}); err != nil {

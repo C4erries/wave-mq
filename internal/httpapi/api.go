@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
 	"strconv"
@@ -192,6 +193,10 @@ func (h *Handler) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 		ReplicationFactor: req.ReplicationFactor,
 	}
 	if err := h.b.CreateTopic(r.Context(), req.Name, cfg); err != nil {
+		if errors.Is(err, broker.ErrTopicExists) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -226,12 +231,14 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 	}
 	base, err := h.b.Produce(r.Context(), topic, partition, []api.Record{rec})
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		switch {
+		case errors.Is(err, broker.ErrTopicNotFound), errors.Is(err, broker.ErrPartitionNotFound):
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
+		default:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
 	}
 	writeJSON(w, map[string]interface{}{
 		"partition":  partition,

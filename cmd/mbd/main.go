@@ -12,6 +12,7 @@ import (
 
 	"github.com/c4erries/wave-mq/internal/broker"
 	"github.com/c4erries/wave-mq/internal/httpapi"
+	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/internal/mqtt"
 	"github.com/c4erries/wave-mq/internal/netproto"
 	"github.com/c4erries/wave-mq/internal/observability"
@@ -68,13 +69,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	metadataStore, err := metadata.NewStore(cfg)
+	if err != nil {
+		logger.Error("metadata store init failed", "err", err)
+		os.Exit(1)
+	}
+
 	offsetStore, err := broker.NewOffsetStore(cfg.DataDir)
 	if err != nil {
 		logger.Error("offset store init failed", "err", err)
 		os.Exit(1)
 	}
 
-	b, err := broker.NewBroker(cfg, store, offsetStore)
+	b, err := broker.NewBroker(cfg, store, offsetStore, metadataStore)
 	if err != nil {
 		logger.Error("broker init failed", "err", err)
 		os.Exit(1)
@@ -129,6 +136,7 @@ func main() {
 	_ = b.Close()
 	_ = store.Close()
 	_ = offsetStore.Close()
+	_ = metadataStore.Close()
 }
 
 func waitForSignal() {
