@@ -80,7 +80,11 @@ func main() {
 		logger.Error("metadata recover failed", "err", err)
 		os.Exit(1)
 	}
-	ctrl := controller.NewSingleNodeController(cfg, recoveredTopics.Topics)
+	ctrl, err := controller.NewSingleNodeController(cfg, recoveredTopics.Topics)
+	if err != nil {
+		logger.Error("controller init failed", "err", err)
+		os.Exit(1)
+	}
 
 	offsetStore, err := broker.NewOffsetStore(cfg.DataDir)
 	if err != nil {

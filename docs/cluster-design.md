@@ -4,7 +4,7 @@
 - Multiple brokers with unique `BrokerID`.
 - Partition replication with leader/follower roles, ISR tracking, and leader epochs.
 - Separate controller to own metadata, topic assignments, and leader elections (future: Raft).
-- Reuse/extend existing binary protocol for broker↔broker metadata/replication RPCs.
+- Reuse/extend existing binary protocol for broker–broker metadata/replication RPCs.
 
 ## Entities
 - **ClusterMetadata**: ClusterID, Brokers (BrokerID, host/port, rack), Partitions (assignments, ISR, leader, leaderEpoch, replication factor), version/epoch.
@@ -19,11 +19,16 @@
 
 ## Components & Packages
 - `internal/controller`: controller core, metadata store, broker registration, topic assignment; single-node controller returns static metadata now; future: Raft-backed metadata.
-- `internal/replication`: broker↔broker fetch/replicate; follower fetches from leader using (a subset of) binary protocol; track HWMark/leader epoch.
+- `internal/replication`: broker–broker fetch/replicate; follower fetches from leader using (a subset of) binary protocol; track HWMark/leader epoch.
 - Reuse binary protocol for:
-  - broker↔client (already),
-  - broker↔broker replication (future fetch),
-  - broker↔controller metadata sync (future).
+  - broker–client (already),
+  - broker–broker replication (future fetch),
+  - broker–controller metadata sync (future).
+
+### Static cluster bootstrap (current step)
+- Early multi-broker mode is defined by `api.StaticClusterConfig` (ClusterID + Brokers).
+- ReplicationFactor is kept at 1; controller assigns partition leaders via a simple deterministic policy (e.g., round-robin) across the static broker list.
+- No controller quorum/Raft yet; all brokers can share the same static config to derive identical `ClusterMetadata`.
 
 ## Client Routing
 - Clients discover leader via Metadata response (extended with ClusterMetadata).

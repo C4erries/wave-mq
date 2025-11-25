@@ -47,7 +47,10 @@ func setupTestServer(t *testing.T) (*httptest.Server, *broker.Broker, *storage.M
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
-	ctrl := controller.NewSingleNodeController(cfg, recovered.Topics)
+	ctrl, err := controller.NewSingleNodeController(cfg, recovered.Topics)
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
 	handler := New(b, cfg, ctrl)
 	mux := http.NewServeMux()
 	handler.Register(mux)
@@ -142,7 +145,10 @@ func TestClusterMetadataEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recover topics: %v", err)
 	}
-	ctrl := controller.NewSingleNodeController(cfg, recovered.Topics)
+	ctrl, err := controller.NewSingleNodeController(cfg, recovered.Topics)
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
 	handler := New(b, cfg, ctrl)
 	mux := http.NewServeMux()
 	handler.Register(mux)

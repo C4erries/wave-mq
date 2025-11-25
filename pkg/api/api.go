@@ -31,6 +31,7 @@ type BrokerConfig struct {
 	ClusterID         string
 	ControllerAddr    string
 	AdvertisedAddr    string
+	StaticCluster     *StaticClusterConfig
 }
 
 // TopicConfig describes how a topic should be created.
@@ -79,6 +80,13 @@ type ClusterMetadata struct {
 	Version    int64
 	Brokers    []BrokerInfo
 	Partitions []PartitionAssignment
+}
+
+// StaticClusterConfig describes a preconfigured cluster layout used for bootstrapping.
+// It is intended for early multi-broker experiments before dynamic controllers/consensus.
+type StaticClusterConfig struct {
+	ClusterID string
+	Brokers   []BrokerInfo
 }
 
 // Header is an optional key/value pair attached to a record.

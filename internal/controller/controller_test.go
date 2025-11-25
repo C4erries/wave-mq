@@ -29,7 +29,10 @@ func TestSingleNodeControllerBuildsMetadata(t *testing.T) {
 		},
 	}
 	cfg := api.BrokerConfig{BrokerID: 1, ClusterID: "c1", AdvertisedAddr: "localhost:9999"}
-	ctrl := NewSingleNodeController(cfg, topics)
+	ctrl, err := NewSingleNodeController(cfg, topics)
+	if err != nil {
+		t.Fatalf("NewSingleNodeController: %v", err)
+	}
 	meta, err := ctrl.GetClusterMetadata(context.Background())
 	if err != nil {
 		t.Fatalf("GetClusterMetadata: %v", err)
@@ -56,5 +59,68 @@ func TestSingleNodeControllerBuildsMetadata(t *testing.T) {
 		if p.Topic == "alpha" && p.Partition == 0 && p.LeaderEpoch != 3 {
 			t.Fatalf("expected epoch 3 for alpha-0, got %d", p.LeaderEpoch)
 		}
+	}
+}
+
+func TestStaticClusterAssignmentsRoundRobin(t *testing.T) {
+	topics := map[string]metadata.TopicState{
+		"alpha": {
+			Name:              "alpha",
+			NumPartitions:     3,
+			ReplicationFactor: 1,
+			Partitions: []metadata.PartitionSpec{
+				{ID: 0, Replicas: []metadata.ReplicaSpec{{BrokerID: 1, Role: api.RoleLeader, LeaderEpoch: 1}}},
+				{ID: 1, Replicas: []metadata.ReplicaSpec{{BrokerID: 1, Role: api.RoleLeader, LeaderEpoch: 1}}},
+				{ID: 2, Replicas: []metadata.ReplicaSpec{{BrokerID: 1, Role: api.RoleLeader, LeaderEpoch: 1}}},
+			},
+		},
+		"beta": {
+			Name:              "beta",
+			NumPartitions:     1,
+			ReplicationFactor: 1,
+			Partitions: []metadata.PartitionSpec{
+				{ID: 0, Replicas: []metadata.ReplicaSpec{{BrokerID: 1, Role: api.RoleLeader, LeaderEpoch: 1}}},
+			},
+		},
+	}
+	cfg := api.BrokerConfig{
+		BrokerID: 1,
+		StaticCluster: &api.StaticClusterConfig{
+			ClusterID: "cluster-1",
+			Brokers: []api.BrokerInfo{
+				{BrokerID: 1, Host: "broker1:7912"},
+				{BrokerID: 2, Host: "broker2:7912"},
+			},
+		},
+	}
+	ctrl, err := NewSingleNodeController(cfg, topics)
+	if err != nil {
+		t.Fatalf("NewSingleNodeController: %v", err)
+	}
+	meta, err := ctrl.GetClusterMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("GetClusterMetadata: %v", err)
+	}
+	if meta.ClusterID != "cluster-1" {
+		t.Fatalf("unexpected cluster id %s", meta.ClusterID)
+	}
+	if len(meta.Brokers) != 2 {
+		t.Fatalf("expected 2 brokers, got %d", len(meta.Brokers))
+	}
+	if len(meta.Partitions) != 4 {
+		t.Fatalf("expected 4 partitions, got %d", len(meta.Partitions))
+	}
+	leaders := make(map[int]int)
+	for _, p := range meta.Partitions {
+		leaders[p.Leader]++
+		if len(p.Replicas) != 1 || p.Replicas[0] != p.Leader {
+			t.Fatalf("replicas mismatch for %s-%d: %+v", p.Topic, p.Partition, p.Replicas)
+		}
+		if len(p.ISR) != 1 || p.ISR[0] != p.Leader {
+			t.Fatalf("isr mismatch for %s-%d: %+v", p.Topic, p.Partition, p.ISR)
+		}
+	}
+	if leaders[1] == 0 || leaders[2] == 0 {
+		t.Fatalf("leaders not balanced across brokers: %+v", leaders)
 	}
 }

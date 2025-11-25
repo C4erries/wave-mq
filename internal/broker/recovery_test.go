@@ -136,7 +136,10 @@ func newHTTPTestServer(t *testing.T, b *brokerpkg.Broker, cfg api.BrokerConfig, 
 	if err != nil {
 		t.Fatalf("recover topics for controller: %v", err)
 	}
-	ctrl := controller.NewSingleNodeController(cfg, recovered.Topics)
+	ctrl, err := controller.NewSingleNodeController(cfg, recovered.Topics)
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
 	handler := httpapi.New(b, cfg, ctrl)
 	mux := http.NewServeMux()
 	handler.Register(mux)
