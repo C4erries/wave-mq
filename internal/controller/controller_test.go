@@ -124,3 +124,45 @@ func TestStaticClusterAssignmentsRoundRobin(t *testing.T) {
 		t.Fatalf("leaders not balanced across brokers: %+v", leaders)
 	}
 }
+
+func TestAssignTopicUpdatesMetadata(t *testing.T) {
+	cfg := api.BrokerConfig{BrokerID: 1, ClusterID: "assign-1"}
+	ctrl, err := NewSingleNodeController(cfg, map[string]metadata.TopicState{})
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
+	ctx := context.Background()
+	meta1, err := ctrl.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 2})
+	if err != nil {
+		t.Fatalf("assign alpha: %v", err)
+	}
+	if len(meta1.Partitions) != 2 {
+		t.Fatalf("expected 2 partitions after alpha, got %d", len(meta1.Partitions))
+	}
+	if meta1.Version != 2 {
+		t.Fatalf("expected version 2 after first assign, got %d", meta1.Version)
+	}
+	meta2, err := ctrl.AssignTopic(ctx, "beta", api.TopicConfig{Partitions: 1})
+	if err != nil {
+		t.Fatalf("assign beta: %v", err)
+	}
+	if len(meta2.Partitions) != 3 {
+		t.Fatalf("expected 3 partitions after beta, got %d", len(meta2.Partitions))
+	}
+	foundAlpha := false
+	foundBeta := false
+	for _, p := range meta2.Partitions {
+		if p.Topic == "alpha" {
+			foundAlpha = true
+		}
+		if p.Topic == "beta" && p.Partition == 0 && p.Leader != cfg.BrokerID {
+			t.Fatalf("unexpected leader for beta-0: %d", p.Leader)
+		}
+		if p.Topic == "beta" {
+			foundBeta = true
+		}
+	}
+	if !foundAlpha || !foundBeta {
+		t.Fatalf("missing topics in metadata: alpha=%v beta=%v", foundAlpha, foundBeta)
+	}
+}

@@ -134,18 +134,7 @@ func TestClusterMetadataEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
-	ctx := context.Background()
-	if err := b.CreateTopic(ctx, "alpha", api.TopicConfig{Partitions: 2}); err != nil {
-		t.Fatalf("create topic alpha: %v", err)
-	}
-	if err := b.CreateTopic(ctx, "beta", api.TopicConfig{Partitions: 1}); err != nil {
-		t.Fatalf("create topic beta: %v", err)
-	}
-	recovered, err := metaStore.RecoverTopics(ctx)
-	if err != nil {
-		t.Fatalf("recover topics: %v", err)
-	}
-	ctrl, err := controller.NewSingleNodeController(cfg, recovered.Topics)
+	ctrl, err := controller.NewSingleNodeController(cfg, map[string]metadata.TopicState{})
 	if err != nil {
 		t.Fatalf("controller: %v", err)
 	}
@@ -160,6 +149,29 @@ func TestClusterMetadataEndpoint(t *testing.T) {
 		offsetStore.Close()
 		metaStore.Close()
 	}()
+	// create topics via HTTP to trigger controller.AssignTopic
+	for _, topic := range []struct {
+		name       string
+		partitions int
+	}{
+		{"alpha", 2},
+		{"beta", 1},
+	} {
+		body := map[string]interface{}{
+			"name":              topic.name,
+			"partitions":        topic.partitions,
+			"replicationFactor": 1,
+		}
+		data, _ := json.Marshal(body)
+		resp, err := http.Post(server.URL+"/api/topics", "application/json", bytes.NewReader(data))
+		if err != nil {
+			t.Fatalf("post topic %s: %v", topic.name, err)
+		}
+		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusConflict {
+			t.Fatalf("unexpected status %d for topic %s", resp.StatusCode, topic.name)
+		}
+		resp.Body.Close()
+	}
 	resp, err := http.Get(server.URL + "/api/cluster")
 	if err != nil {
 		t.Fatalf("get cluster: %v", err)

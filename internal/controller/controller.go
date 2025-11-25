@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/pkg/api"
@@ -13,17 +14,19 @@ import (
 type MetadataStore interface {
 	GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error)
 	WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error)
+	AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error)
 }
 
 // Controller manages brokers, topics and assignments.
 type Controller interface {
 	RegisterBroker(ctx context.Context, info api.BrokerInfo) error
-	AssignTopic(ctx context.Context, cfg api.TopicConfig) (api.ClusterMetadata, error)
+	AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error)
 }
 
 // SingleNodeController is a placeholder controller for single-node deployments.
 // It returns static metadata with a single broker and local partitions recovered from metadata.log.
 type SingleNodeController struct {
+	mu   sync.RWMutex
 	meta api.ClusterMetadata
 	cfg  api.BrokerConfig
 }
@@ -46,6 +49,8 @@ func NewSingleNodeController(cfg api.BrokerConfig, topics map[string]metadata.To
 
 func (c *SingleNodeController) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
 	_ = ctx
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.meta, nil
 }
 
@@ -54,10 +59,13 @@ func (c *SingleNodeController) WatchClusterMetadata(ctx context.Context, sinceVe
 	ch := make(chan api.ClusterMetadata, 1)
 	go func() {
 		defer close(ch)
+		c.mu.RLock()
+		meta := c.meta
+		c.mu.RUnlock()
 		select {
 		case <-ctx.Done():
 			return
-		case ch <- c.meta:
+		case ch <- meta:
 		}
 	}()
 	return ch, nil
@@ -77,10 +85,19 @@ func (c *SingleNodeController) RegisterBroker(ctx context.Context, info api.Brok
 	return nil
 }
 
-func (c *SingleNodeController) AssignTopic(ctx context.Context, cfg api.TopicConfig) (api.ClusterMetadata, error) {
+func (c *SingleNodeController) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
 	_ = ctx
-	_ = cfg
-	// TODO: assign leaders/replicas and update metadata.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cfg.Partitions <= 0 {
+		cfg.Partitions = 1
+	}
+	if cfg.ReplicationFactor <= 0 {
+		cfg.ReplicationFactor = 1
+	}
+	newParts := assignTopicPartitions(c.cfg, c.meta.Brokers, name, cfg.Partitions, c.meta.Partitions)
+	c.meta.Partitions = append(c.meta.Partitions, newParts...)
+	c.meta.Version++
 	return c.meta, nil
 }
 
@@ -160,4 +177,26 @@ func brokerPresent(id int, brokers []api.BrokerInfo) bool {
 		}
 	}
 	return false
+}
+
+func assignTopicPartitions(cfg api.BrokerConfig, brokers []api.BrokerInfo, name string, partitions int, existing []api.PartitionAssignment) []api.PartitionAssignment {
+	if len(brokers) == 0 {
+		return nil
+	}
+	sort.Slice(brokers, func(i, j int) bool { return brokers[i].BrokerID < brokers[j].BrokerID })
+	counter := len(existing)
+	var res []api.PartitionAssignment
+	for pid := 0; pid < partitions; pid++ {
+		leader := brokers[counter%len(brokers)].BrokerID
+		counter++
+		res = append(res, api.PartitionAssignment{
+			Topic:       name,
+			Partition:   pid,
+			Replicas:    []int{leader},
+			ISR:         []int{leader},
+			Leader:      leader,
+			LeaderEpoch: 0,
+		})
+	}
+	return res
 }

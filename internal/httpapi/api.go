@@ -220,6 +220,12 @@ func (h *Handler) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if h.ctrl != nil {
+		if _, err := h.ctrl.AssignTopic(r.Context(), req.Name, cfg); err != nil {
+			http.Error(w, "cluster metadata update failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	detail, _ := h.b.TopicDetail(req.Name)
 	w.WriteHeader(http.StatusCreated)
 	writeJSON(w, detail)
