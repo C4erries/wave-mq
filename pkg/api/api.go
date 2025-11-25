@@ -34,6 +34,8 @@ type BrokerConfig struct {
 	StaticCluster     *StaticClusterConfig
 	ControllerMode    string // "single" (default) or "raft"
 	RaftDir           string
+	RaftBindAddr      string
+	RaftPeers         []string
 	Replication       bool // enable follower replication manager
 }
 

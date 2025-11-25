@@ -139,14 +139,14 @@ func (s *metadataSnapshot) Persist(sink raft.SnapshotSink) error {
 
 func (s *metadataSnapshot) Release() {}
 
-// RaftController replicates cluster metadata through a Raft log (single-node in this step).
+// RaftController replicates cluster metadata through a Raft log.
 type RaftController struct {
 	cfg  api.BrokerConfig
 	fsm  *raftMetadataFSM
 	raft *raft.Raft
 }
 
-// NewRaftController bootstraps a single-node Raft instance with given initial metadata.
+// NewRaftController bootstraps a Raft instance with given initial metadata.
 func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, raftDir string) (*RaftController, error) {
 	rCfg := raft.DefaultConfig()
 	rCfg.LocalID = raft.ServerID(fmt.Sprintf("broker-%d", cfg.BrokerID))
@@ -160,11 +160,25 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 	logStore := raft.NewInmemStore()
 	stableStore := raft.NewInmemStore()
 	snapStore := raft.NewInmemSnapshotStore()
-	transportAddr, transport := raft.NewInmemTransport(raft.ServerAddress(rCfg.LocalID))
+	var transport raft.Transport
+	var transportAddr raft.ServerAddress
+	if cfg.RaftBindAddr != "" {
+		tcpTransport, err := raft.NewTCPTransport(cfg.RaftBindAddr, nil, 3, 2*time.Second, io.Discard)
+		if err != nil {
+			return nil, err
+		}
+		transport = tcpTransport
+		transportAddr = raft.ServerAddress(cfg.RaftBindAddr)
+	} else {
+		addr, inmem := raft.NewInmemTransport(raft.ServerAddress(rCfg.LocalID))
+		transport = inmem
+		transportAddr = addr
+	}
+	if len(cfg.RaftPeers) == 0 {
+		cfg.RaftPeers = []string{string(transportAddr)}
+	}
 	config := raft.Configuration{
-		Servers: []raft.Server{
-			{Suffrage: raft.Voter, ID: rCfg.LocalID, Address: transportAddr},
-		},
+		Servers: buildServers(cfg, rCfg.LocalID, transportAddr),
 	}
 	if err := raft.BootstrapCluster(rCfg, logStore, stableStore, snapStore, transport, config); err != nil && err != raft.ErrCantBootstrap {
 		return nil, err
@@ -286,4 +300,50 @@ func (c *RaftController) SnapshotDump() ([]byte, error) {
 	c.fsm.mu.Lock()
 	defer c.fsm.mu.Unlock()
 	return json.Marshal(c.fsm.meta)
+}
+
+// ControllerMode returns the configured controller mode.
+func (c *RaftController) ControllerMode() string { return "raft" }
+
+// RaftState returns the current raft state as string.
+func (c *RaftController) RaftState() string { return c.raft.State().String() }
+
+// RaftTerm returns the current term.
+func (c *RaftController) RaftTerm() uint64 {
+	stats := c.raft.Stats()
+	if termStr, ok := stats["term"]; ok {
+		var term uint64
+		fmt.Sscanf(termStr, "%d", &term)
+		return term
+	}
+	return 0
+}
+
+// RaftPeers returns peer addresses.
+func (c *RaftController) RaftPeers() []string {
+	servers := c.raft.GetConfiguration().Configuration().Servers
+	out := make([]string, 0, len(servers))
+	for _, s := range servers {
+		out = append(out, string(s.Address))
+	}
+	return out
+}
+
+func buildServers(cfg api.BrokerConfig, localID raft.ServerID, localAddr raft.ServerAddress) []raft.Server {
+	seen := make(map[raft.ServerID]struct{})
+	var servers []raft.Server
+	add := func(id raft.ServerID, addr raft.ServerAddress) {
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		servers = append(servers, raft.Server{Suffrage: raft.Voter, ID: id, Address: addr})
+	}
+	add(localID, localAddr)
+	for _, peer := range cfg.RaftPeers {
+		id := raft.ServerID(peer)
+		addr := raft.ServerAddress(peer)
+		add(id, addr)
+	}
+	return servers
 }

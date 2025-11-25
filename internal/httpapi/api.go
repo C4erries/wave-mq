@@ -36,6 +36,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/api/topics", withCORS(http.HandlerFunc(h.handleTopics)))
 	mux.Handle("/api/consumers", withCORS(http.HandlerFunc(h.handleConsumers)))
 	mux.Handle("/api/cluster", withCORS(http.HandlerFunc(h.handleClusterMetadata)))
+	mux.Handle("/api/controller", withCORS(http.HandlerFunc(h.handleControllerStatus)))
 	mux.Handle("/api/topics/", withCORS(http.HandlerFunc(h.handleTopicPaths)))
 }
 
@@ -50,6 +51,31 @@ func (h *Handler) handleBroker(w http.ResponseWriter, r *http.Request) {
 		"controllerMode":    h.cfg.ControllerMode,
 	}
 	writeJSON(w, resp)
+}
+
+func (h *Handler) handleControllerStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	status := map[string]interface{}{
+		"mode":      h.cfg.ControllerMode,
+		"raftState": "none",
+		"term":      0,
+		"peers":     []string{},
+	}
+	if rc, ok := h.ctrl.(interface {
+		ControllerMode() string
+		RaftState() string
+		RaftTerm() uint64
+		RaftPeers() []string
+	}); ok {
+		status["mode"] = rc.ControllerMode()
+		status["raftState"] = rc.RaftState()
+		status["term"] = rc.RaftTerm()
+		status["peers"] = rc.RaftPeers()
+	}
+	writeJSON(w, status)
 }
 
 func (h *Handler) handleClusterMetadata(w http.ResponseWriter, r *http.Request) {

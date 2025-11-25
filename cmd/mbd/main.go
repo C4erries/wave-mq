@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -38,6 +39,8 @@ func main() {
 		retentionHours    = flag.Int("retention-hours", 0, "retention by age in hours (0 disables time-based retention)")
 		controllerMode    = flag.String("controller", "single", "controller mode: single or raft")
 		raftDir           = flag.String("raft-dir", "", "directory for Raft state (empty = in-memory)")
+		raftBind          = flag.String("raft-bind", "", "raft bind address for controller (host:port)")
+		raftPeers         = flag.String("raft-peer", "", "comma-separated list of raft peer addresses")
 		enableReplication = flag.Bool("replication", false, "enable follower replication (experimental)")
 	)
 	flag.Parse()
@@ -53,7 +56,11 @@ func main() {
 		RetentionBytes:    *retentionBytes,
 		ControllerMode:    *controllerMode,
 		RaftDir:           *raftDir,
+		RaftBindAddr:      *raftBind,
 		Replication:       *enableReplication,
+	}
+	if *raftPeers != "" {
+		cfg.RaftPeers = strings.Split(*raftPeers, ",")
 	}
 	if *retentionHours > 0 {
 		cfg.RetentionTime = time.Duration(*retentionHours) * time.Hour

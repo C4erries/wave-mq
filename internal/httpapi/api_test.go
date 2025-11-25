@@ -95,6 +95,31 @@ func TestCreateTopicEndpoint(t *testing.T) {
 	}
 }
 
+func TestControllerStatusEndpoint(t *testing.T) {
+	server, b, store, offsetStore, metaStore := setupTestServer(t)
+	defer server.Close()
+	defer b.Close()
+	defer store.Close()
+	defer offsetStore.Close()
+	defer metaStore.Close()
+
+	resp, err := http.Get(server.URL + "/api/controller")
+	if err != nil {
+		t.Fatalf("get controller: %v", err)
+	}
+	defer resp.Body.Close()
+	var status map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if status["mode"] != "single" {
+		t.Fatalf("expected mode single, got %v", status["mode"])
+	}
+	if status["raftState"] != "none" {
+		t.Fatalf("expected raftState none, got %v", status["raftState"])
+	}
+}
+
 func TestProduceEndpoint(t *testing.T) {
 	server, b, store, offsetStore, metaStore := setupTestServer(t)
 	defer server.Close()
