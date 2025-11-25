@@ -34,6 +34,7 @@ type BrokerConfig struct {
 	StaticCluster     *StaticClusterConfig
 	ControllerMode    string // "single" (default) or "raft"
 	RaftDir           string
+	Replication       bool // enable follower replication manager
 }
 
 // TopicConfig describes how a topic should be created.

@@ -17,6 +17,7 @@ import (
 	"github.com/c4erries/wave-mq/internal/mqtt"
 	"github.com/c4erries/wave-mq/internal/netproto"
 	"github.com/c4erries/wave-mq/internal/observability"
+	"github.com/c4erries/wave-mq/internal/replication"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -37,6 +38,7 @@ func main() {
 		retentionHours    = flag.Int("retention-hours", 0, "retention by age in hours (0 disables time-based retention)")
 		controllerMode    = flag.String("controller", "single", "controller mode: single or raft")
 		raftDir           = flag.String("raft-dir", "", "directory for Raft state (empty = in-memory)")
+		enableReplication = flag.Bool("replication", false, "enable follower replication (experimental)")
 	)
 	flag.Parse()
 
@@ -51,6 +53,7 @@ func main() {
 		RetentionBytes:    *retentionBytes,
 		ControllerMode:    *controllerMode,
 		RaftDir:           *raftDir,
+		Replication:       *enableReplication,
 	}
 	if *retentionHours > 0 {
 		cfg.RetentionTime = time.Duration(*retentionHours) * time.Hour
@@ -116,6 +119,18 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	if cfg.Replication {
+		rep := replication.NewBinaryReplicator()
+		replMgr := replication.NewManager(cfg, store, ctrl, rep)
+		go func() {
+			logger.Info("replication manager starting", "mode", cfg.ControllerMode)
+			if err := replMgr.Run(ctx); err != nil && err != context.Canceled {
+				logger.Error("replication manager stopped", "err", err)
+				cancel()
+			}
+		}()
+	}
 
 	ready := func() bool { return readyFlag.Load() }
 	go func() {
