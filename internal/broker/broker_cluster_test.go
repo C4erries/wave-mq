@@ -34,6 +34,16 @@ func (f fakeCluster) AssignTopic(ctx context.Context, name string, cfg api.Topic
 	return f.meta, nil
 }
 
+func (f fakeCluster) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = topic
+	_ = partition
+	_ = brokerID
+	_ = lastOffset
+	_ = leaderHighWatermark
+	return f.meta, nil
+}
+
 func TestLocalPartitionsSnapshotSingleNode(t *testing.T) {
 	b, cleanup := newTestBroker(t)
 	defer cleanup()

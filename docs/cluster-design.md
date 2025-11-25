@@ -29,6 +29,7 @@
 - Early multi-broker mode is defined by `api.StaticClusterConfig` (ClusterID + Brokers).
 - ReplicationFactor is kept at 1; controller assigns partition leaders via a simple deterministic policy (e.g., round-robin) across the static broker list.
 - No controller quorum/Raft yet; all brokers can share the same static config to derive identical `ClusterMetadata`.
+- ISR membership is adjusted by the controller via follower progress reports (ReportReplicaProgress); follower joins ISR once it reaches the leader high watermark and is removed when it lags behind (temporary rule to be refined later).
 
 ## Client Routing
 - Clients discover leader via Metadata response (extended with ClusterMetadata).

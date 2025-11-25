@@ -125,6 +125,116 @@ func TestStaticClusterAssignmentsRoundRobin(t *testing.T) {
 	}
 }
 
+func TestReportReplicaProgressAddsToISR(t *testing.T) {
+	topics := map[string]metadata.TopicState{
+		"alpha": {
+			Name:              "alpha",
+			NumPartitions:     1,
+			ReplicationFactor: 2,
+			Partitions: []metadata.PartitionSpec{
+				{ID: 0, Replicas: []metadata.ReplicaSpec{
+					{BrokerID: 1, Role: api.RoleLeader, LeaderEpoch: 1},
+					{BrokerID: 2, Role: api.RoleFollower, LeaderEpoch: 1},
+				}},
+			},
+		},
+	}
+	cfg := api.BrokerConfig{
+		BrokerID: 1,
+		StaticCluster: &api.StaticClusterConfig{
+			ClusterID: "cluster-1",
+			Brokers: []api.BrokerInfo{
+				{BrokerID: 1, Host: "b1"},
+				{BrokerID: 2, Host: "b2"},
+			},
+		},
+	}
+	ctrl, err := NewSingleNodeController(cfg, topics)
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
+	// Seed ISR to only leader.
+	ctrl.meta.Partitions[0].ISR = []int{1}
+	ctrl.meta.Partitions[0].Replicas = []int{1, 2}
+	meta, err := ctrl.ReportReplicaProgress(context.Background(), "alpha", 0, 2, 10, 10)
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	isr := meta.Partitions[0].ISR
+	if !(contains(isr, 1) && contains(isr, 2)) {
+		t.Fatalf("expected brokers 1 and 2 in ISR, got %+v", isr)
+	}
+	if meta.Version != 2 {
+		t.Fatalf("expected version 2, got %d", meta.Version)
+	}
+}
+
+func TestReportReplicaProgressRemovesFromISR(t *testing.T) {
+	topics := map[string]metadata.TopicState{
+		"alpha": {
+			Name:              "alpha",
+			NumPartitions:     1,
+			ReplicationFactor: 2,
+			Partitions: []metadata.PartitionSpec{
+				{ID: 0, Replicas: []metadata.ReplicaSpec{
+					{BrokerID: 1, Role: api.RoleLeader, LeaderEpoch: 1},
+					{BrokerID: 2, Role: api.RoleFollower, LeaderEpoch: 1},
+				}},
+			},
+		},
+	}
+	cfg := api.BrokerConfig{
+		BrokerID: 1,
+		StaticCluster: &api.StaticClusterConfig{
+			ClusterID: "cluster-1",
+			Brokers: []api.BrokerInfo{
+				{BrokerID: 1, Host: "b1"},
+				{BrokerID: 2, Host: "b2"},
+			},
+		},
+	}
+	ctrl, err := NewSingleNodeController(cfg, topics)
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
+	ctrl.meta.Partitions[0].ISR = []int{1, 2}
+	ctrl.meta.Partitions[0].Replicas = []int{1, 2}
+	meta, err := ctrl.ReportReplicaProgress(context.Background(), "alpha", 0, 2, 5, 10)
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	isr := meta.Partitions[0].ISR
+	if contains(isr, 2) {
+		t.Fatalf("expected broker 2 to be removed from ISR, got %+v", isr)
+	}
+	if !contains(isr, 1) {
+		t.Fatalf("leader must stay in ISR")
+	}
+}
+
+func TestReportReplicaProgressRejectsUnknownReplica(t *testing.T) {
+	topics := map[string]metadata.TopicState{
+		"alpha": {
+			Name:              "alpha",
+			NumPartitions:     1,
+			ReplicationFactor: 1,
+			Partitions: []metadata.PartitionSpec{
+				{ID: 0, Replicas: []metadata.ReplicaSpec{
+					{BrokerID: 1, Role: api.RoleLeader, LeaderEpoch: 1},
+				}},
+			},
+		},
+	}
+	cfg := api.BrokerConfig{BrokerID: 1}
+	ctrl, err := NewSingleNodeController(cfg, topics)
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
+	_, err = ctrl.ReportReplicaProgress(context.Background(), "alpha", 0, 999, 1, 1)
+	if err == nil {
+		t.Fatalf("expected error for unknown replica")
+	}
+}
 func TestAssignTopicUpdatesMetadata(t *testing.T) {
 	cfg := api.BrokerConfig{BrokerID: 1, ClusterID: "assign-1"}
 	ctrl, err := NewSingleNodeController(cfg, map[string]metadata.TopicState{})

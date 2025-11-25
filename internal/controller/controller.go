@@ -15,12 +15,14 @@ type MetadataStore interface {
 	GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error)
 	WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error)
 	AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error)
+	ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error)
 }
 
 // Controller manages brokers, topics and assignments.
 type Controller interface {
 	RegisterBroker(ctx context.Context, info api.BrokerInfo) error
 	AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error)
+	ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error)
 }
 
 // SingleNodeController is a placeholder controller for single-node deployments.
@@ -97,6 +99,39 @@ func (c *SingleNodeController) AssignTopic(ctx context.Context, name string, cfg
 	}
 	newParts := assignTopicPartitions(c.cfg, c.meta.Brokers, name, cfg.Partitions, c.meta.Partitions)
 	c.meta.Partitions = append(c.meta.Partitions, newParts...)
+	c.meta.Version++
+	return c.meta, nil
+}
+
+// ReportReplicaProgress updates ISR based on follower progress relative to leader high watermark.
+func (c *SingleNodeController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+	_ = ctx
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	idx := -1
+	for i, p := range c.meta.Partitions {
+		if p.Topic == topic && p.Partition == partition {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return c.meta, fmt.Errorf("partition not found")
+	}
+	assign := c.meta.Partitions[idx]
+	if !brokerPresent(brokerID, brokersFromInts(assign.Replicas)) {
+		return c.meta, fmt.Errorf("broker %d not in replicas", brokerID)
+	}
+	shouldBeISR := lastOffset >= leaderHighWatermark
+	assign.ISR = ensureLeaderInISR(assign.Leader, assign.ISR)
+	inISR := contains(assign.ISR, brokerID)
+	switch {
+	case shouldBeISR && !inISR:
+		assign.ISR = append(assign.ISR, brokerID)
+	case !shouldBeISR && inISR && brokerID != assign.Leader:
+		assign.ISR = remove(assign.ISR, brokerID)
+	}
+	c.meta.Partitions[idx] = assign
 	c.meta.Version++
 	return c.meta, nil
 }
@@ -197,6 +232,40 @@ func assignTopicPartitions(cfg api.BrokerConfig, brokers []api.BrokerInfo, name 
 			Leader:      leader,
 			LeaderEpoch: 0,
 		})
+	}
+	return res
+}
+
+func brokersFromInts(ids []int) []api.BrokerInfo {
+	res := make([]api.BrokerInfo, 0, len(ids))
+	for _, id := range ids {
+		res = append(res, api.BrokerInfo{BrokerID: id})
+	}
+	return res
+}
+
+func ensureLeaderInISR(leader int, isr []int) []int {
+	if contains(isr, leader) {
+		return isr
+	}
+	return append(isr, leader)
+}
+
+func contains(list []int, id int) bool {
+	for _, v := range list {
+		if v == id {
+			return true
+		}
+	}
+	return false
+}
+
+func remove(list []int, id int) []int {
+	var res []int
+	for _, v := range list {
+		if v != id {
+			res = append(res, v)
+		}
 	}
 	return res
 }
