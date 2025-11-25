@@ -121,6 +121,20 @@ func main() {
 	}
 	logger.Info("controller initialized", "mode", cfg.ControllerMode)
 
+	brokerHost := cfg.AdvertisedAddr
+	if brokerHost == "" {
+		brokerHost = cfg.BinaryAddr
+	}
+	bInfo := api.BrokerInfo{
+		BrokerID: cfg.BrokerID,
+		Host:     brokerHost,
+	}
+	if err := ctrl.RegisterBroker(context.Background(), bInfo); err != nil {
+		logger.Error("broker registration failed", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("broker registered in controller", "brokerID", bInfo.BrokerID, "host", bInfo.Host)
+
 	offsetStore, err := broker.NewOffsetStore(cfg.DataDir)
 	if err != nil {
 		logger.Error("offset store init failed", "err", err)

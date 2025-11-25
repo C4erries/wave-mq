@@ -43,6 +43,12 @@ func (f *fakeController) ReportReplicaProgress(ctx context.Context, topic string
 	return api.ClusterMetadata{}, nil
 }
 
+func (f *fakeController) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
+	_ = ctx
+	_ = info
+	return nil
+}
+
 func TestReportingSinkReportsProgress(t *testing.T) {
 	dir := t.TempDir()
 	store, err := storage.NewManager(storage.Config{DataDir: dir})

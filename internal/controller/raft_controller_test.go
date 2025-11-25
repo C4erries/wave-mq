@@ -105,6 +105,54 @@ func TestRaftControllerReportReplicaProgress(t *testing.T) {
 	}
 }
 
+func TestRaftControllerRegisterBrokerSingleNode(t *testing.T) {
+	cfg := api.BrokerConfig{
+		BrokerID:       1,
+		ControllerMode: "raft",
+	}
+	initial := api.ClusterMetadata{
+		ClusterID: "c1",
+		Version:   1,
+	}
+	rc, err := NewRaftController(cfg, initial, "")
+	if err != nil {
+		t.Fatalf("new raft controller: %v", err)
+	}
+	defer rc.raft.Shutdown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := rc.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 1, Host: "b1"}); err != nil {
+		t.Fatalf("register broker 1: %v", err)
+	}
+	meta, _ := rc.GetClusterMetadata(ctx)
+	if len(meta.Brokers) != 1 {
+		t.Fatalf("expected 1 broker, got %d", len(meta.Brokers))
+	}
+	firstVersion := meta.Version
+
+	// idempotent re-register
+	if err := rc.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 1, Host: "b1"}); err != nil {
+		t.Fatalf("register broker 1 again: %v", err)
+	}
+	meta, _ = rc.GetClusterMetadata(ctx)
+	if meta.Version != firstVersion {
+		t.Fatalf("version should not change on identical re-register: got %d want %d", meta.Version, firstVersion)
+	}
+
+	if err := rc.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 2, Host: "b2"}); err != nil {
+		t.Fatalf("register broker 2: %v", err)
+	}
+	meta, _ = rc.GetClusterMetadata(ctx)
+	if len(meta.Brokers) != 2 {
+		t.Fatalf("expected 2 brokers, got %d", len(meta.Brokers))
+	}
+	if meta.Version != firstVersion+1 {
+		t.Fatalf("expected version to increment on new broker")
+	}
+}
+
 func TestRaftControllerMultiPeerAssignTopic(t *testing.T) {
 	addr1 := freeAddr(t)
 	addr2 := freeAddr(t)
@@ -199,4 +247,55 @@ func waitForMetadata(pred func() bool) error {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return fmt.Errorf("condition not met before deadline")
+}
+
+func TestRaftControllerMultiPeerRegisterBrokerReplicates(t *testing.T) {
+	addr1 := freeAddr(t)
+	addr2 := freeAddr(t)
+	peers := []string{addr1, addr2}
+
+	cfg1 := api.BrokerConfig{
+		BrokerID:       1,
+		ControllerMode: "raft",
+		RaftBindAddr:   addr1,
+		RaftPeers:      peers,
+	}
+	cfg2 := cfg1
+	cfg2.BrokerID = 2
+	cfg2.RaftBindAddr = addr2
+
+	initial := api.ClusterMetadata{
+		ClusterID: "cluster-raft",
+		Version:   1,
+	}
+
+	rc1, err := NewRaftController(cfg1, initial, "")
+	if err != nil {
+		t.Fatalf("new raft controller 1: %v", err)
+	}
+	defer rc1.raft.Shutdown()
+	rc2, err := NewRaftController(cfg2, initial, "")
+	if err != nil {
+		t.Fatalf("new raft controller 2: %v", err)
+	}
+	defer rc2.raft.Shutdown()
+
+	leader := waitForLeader(t, []*RaftController{rc1, rc2})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := leader.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 1, Host: "b1"}); err != nil {
+		t.Fatalf("register broker1: %v", err)
+	}
+	if err := leader.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 2, Host: "b2"}); err != nil {
+		t.Fatalf("register broker2: %v", err)
+	}
+
+	if err := waitForMetadata(func() bool {
+		m1, _ := rc1.GetClusterMetadata(ctx)
+		m2, _ := rc2.GetClusterMetadata(ctx)
+		return len(m1.Brokers) == 2 && len(m2.Brokers) == 2 && m1.Version == m2.Version
+	}); err != nil {
+		t.Fatalf("brokers not replicated: %v", err)
+	}
 }

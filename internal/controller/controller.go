@@ -14,6 +14,7 @@ import (
 type MetadataStore interface {
 	GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error)
 	WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error)
+	RegisterBroker(ctx context.Context, info api.BrokerInfo) error
 	AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error)
 	ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error)
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ type commandType uint8
 const (
 	cmdAssignTopic commandType = iota + 1
 	cmdReportReplicaProgress
+	cmdRegisterBroker
 )
 
 type raftCommand struct {
@@ -32,6 +34,8 @@ type raftCommand struct {
 
 	LastOffset          api.Offset
 	LeaderHighWatermark api.Offset
+
+	BrokerInfo *api.BrokerInfo
 }
 
 func encodeCommand(cmd raftCommand) ([]byte, error) {
@@ -68,6 +72,12 @@ func (f *raftMetadataFSM) Apply(l *raft.Log) interface{} {
 		f.meta.Version++
 	case cmdReportReplicaProgress:
 		err = f.applyReplicaProgressLocked(cmd.Topic, cmd.Part, cmd.Broker, cmd.LastOffset, cmd.LeaderHighWatermark)
+	case cmdRegisterBroker:
+		if cmd.BrokerInfo == nil {
+			err = fmt.Errorf("missing broker info")
+		} else {
+			err = f.applyRegisterBrokerLocked(*cmd.BrokerInfo)
+		}
 	default:
 		err = fmt.Errorf("unknown command type %d", cmd.Type)
 	}
@@ -99,6 +109,26 @@ func (f *raftMetadataFSM) applyReplicaProgressLocked(topic string, partition int
 		assign.ISR = remove(assign.ISR, brokerID)
 	}
 	f.meta.Partitions[idx] = assign
+	f.meta.Version++
+	return nil
+}
+
+func (f *raftMetadataFSM) applyRegisterBrokerLocked(info api.BrokerInfo) error {
+	updated := false
+	for i, b := range f.meta.Brokers {
+		if b.BrokerID == info.BrokerID {
+			if b.Host == info.Host && b.Port == info.Port && b.Rack == info.Rack {
+				return nil
+			}
+			f.meta.Brokers[i] = info
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		f.meta.Brokers = append(f.meta.Brokers, info)
+	}
+	sort.Slice(f.meta.Brokers, func(i, j int) bool { return f.meta.Brokers[i].BrokerID < f.meta.Brokers[j].BrokerID })
 	f.meta.Version++
 	return nil
 }
@@ -224,10 +254,11 @@ func (c *RaftController) WatchClusterMetadata(ctx context.Context, sinceVersion 
 }
 
 func (c *RaftController) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
-	_ = ctx
-	_ = info
-	// TODO: replicate broker registration via Raft when multi-node is needed.
-	return nil
+	cmd := raftCommand{
+		Type:       cmdRegisterBroker,
+		BrokerInfo: &info,
+	}
+	return c.applyCommand(ctx, cmd)
 }
 
 func (c *RaftController) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {

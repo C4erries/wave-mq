@@ -44,6 +44,12 @@ func (f fakeCluster) ReportReplicaProgress(ctx context.Context, topic string, pa
 	return f.meta, nil
 }
 
+func (f fakeCluster) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
+	_ = ctx
+	_ = info
+	return nil
+}
+
 func TestLocalPartitionsSnapshotSingleNode(t *testing.T) {
 	b, cleanup := newTestBroker(t)
 	defer cleanup()

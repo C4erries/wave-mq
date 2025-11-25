@@ -36,6 +36,12 @@ func (f *fakeMetadataStore) ReportReplicaProgress(ctx context.Context, topic str
 	return f.meta, nil
 }
 
+func (f *fakeMetadataStore) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
+	_ = ctx
+	_ = info
+	return nil
+}
+
 type fakeReplicator struct {
 	mu    sync.Mutex
 	fetch []FetchRequest
