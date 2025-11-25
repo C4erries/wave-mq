@@ -104,6 +104,7 @@ func TestFetchCodec(t *testing.T) {
 		Records: []api.Record{
 			{Offset: 2, Value: []byte("x")},
 		},
+		HighWatermark: 3,
 	}
 	rp, err := encodeFetchResponse(resp)
 	if err != nil {
@@ -113,7 +114,7 @@ func TestFetchCodec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode resp: %v", err)
 	}
-	if dr.Error != resp.Error || len(dr.Records) != 1 || string(dr.Records[0].Value) != "x" {
+	if dr.Error != resp.Error || len(dr.Records) != 1 || string(dr.Records[0].Value) != "x" || dr.HighWatermark != 3 {
 		t.Fatalf("resp mismatch: %#v", dr)
 	}
 }

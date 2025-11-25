@@ -450,6 +450,9 @@ func encodeFetchResponse(resp *FetchResponse) ([]byte, error) {
 			return nil, err
 		}
 	}
+	if err := binary.Write(buf, binary.BigEndian, int64(resp.HighWatermark)); err != nil {
+		return nil, err
+	}
 	return buf.Bytes(), nil
 }
 
@@ -477,7 +480,11 @@ func decodeFetchResponse(payload []byte) (*FetchResponse, error) {
 		}
 		recs = append(recs, rec)
 	}
-	return &FetchResponse{Error: api.ErrorCode(ec), Records: recs}, nil
+	var hwm int64
+	if err := binary.Read(buf, binary.BigEndian, &hwm); err != nil {
+		return nil, err
+	}
+	return &FetchResponse{Error: api.ErrorCode(ec), Records: recs, HighWatermark: api.Offset(hwm)}, nil
 }
 
 func encodeMetadataRequest(req *MetadataRequest) ([]byte, error) {

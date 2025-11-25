@@ -38,7 +38,9 @@ type FetchRequest struct {
 // FetchResponse returns a slice of records plus metadata.
 type FetchResponse struct {
 	Records []api.Record
-	Error   api.ErrorCode
+	// HighWatermark is the leader's durable offset boundary for the partition.
+	HighWatermark api.Offset
+	Error         api.ErrorCode
 }
 
 // ListOffsetsRequest placeholder (not yet used on the wire).

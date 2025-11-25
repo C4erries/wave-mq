@@ -83,6 +83,14 @@ func (s *Server) Close() error {
 	return nil
 }
 
+// Addr returns the listener address after ListenAndServe has started.
+func (s *Server) Addr() net.Addr {
+	if s.ln == nil {
+		return nil
+	}
+	return s.ln.Addr()
+}
+
 // frame is a placeholder for length-prefixed protocol frames.
 type frame struct {
 	APIKey api.APIKey
@@ -156,6 +164,11 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 		if err != nil {
 			resp.Error = mapError(err)
 			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
+		} else {
+			_, latest, offErr := s.broker.ListOffsets(ctx, req.Topic, req.Partition)
+			if offErr == nil {
+				resp.HighWatermark = latest
+			}
 		}
 		return encodeFetchResponse(resp)
 	case api.APIKeyMetadata:
