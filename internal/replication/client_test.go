@@ -169,6 +169,7 @@ func TestBinaryReplicatorConnectionFailure(t *testing.T) {
 	}
 }
 
+// waitForAddr waits until server listener is available.
 func waitForAddr(t *testing.T, srv *netproto.Server) net.Addr {
 	t.Helper()
 	for i := 0; i < 50; i++ {
