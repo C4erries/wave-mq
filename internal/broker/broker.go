@@ -188,9 +188,41 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 }
 
 func (b *Broker) bootstrapTopicsFromMetadata(ctx context.Context, topics map[string]metadata.TopicState) error {
+	var allowed map[string]map[int]api.PartitionAssignment
+	if b.cluster != nil {
+		meta, err := b.cluster.GetClusterMetadata(ctx)
+		if err != nil {
+			return err
+		}
+		allowed = make(map[string]map[int]api.PartitionAssignment)
+		for _, p := range meta.Partitions {
+			if p.Leader != b.cfg.BrokerID && !containsInt(p.Replicas, b.cfg.BrokerID) {
+				continue
+			}
+			if _, ok := allowed[p.Topic]; !ok {
+				allowed[p.Topic] = make(map[int]api.PartitionAssignment)
+			}
+			allowed[p.Topic][p.Partition] = p
+		}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, state := range topics {
+		if allowed != nil {
+			parts := state.Partitions[:0]
+			for _, ps := range state.Partitions {
+				if topicParts, ok := allowed[state.Name]; ok {
+					if _, ok := topicParts[int(ps.ID)]; ok {
+						parts = append(parts, ps)
+					}
+				}
+			}
+			if len(parts) == 0 {
+				continue
+			}
+			state.Partitions = parts
+			state.NumPartitions = len(parts)
+		}
 		if err := b.loadTopicLocked(ctx, state); err != nil {
 			return err
 		}
@@ -257,6 +289,15 @@ func (b *Broker) replicaForPartition(ps metadata.PartitionSpec) metadata.Replica
 		Role:        api.RoleLeader,
 		LeaderEpoch: 0,
 	}
+}
+
+func containsInt(list []int, id int) bool {
+	for _, v := range list {
+		if v == id {
+			return true
+		}
+	}
+	return false
 }
 
 // Produce appends records to the specified partition.
