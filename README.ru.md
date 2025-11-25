@@ -1,88 +1,94 @@
 # wave-mq
 
-Single-node log-based message broker на Go, спроектированный так, чтобы его можно было развить в кластер. Поддерживает кастомный бинарный протокол, минимальный MQTT 3.1.1/5.0 фронтенд (QoS0/1), consumer groups с offset’ами на брокере и сегментированное WAL‑хранилище со sparse‑индексом и retention.
+wave-mq — это односерверный log-based брокер сообщений на Go, спроектированный так, чтобы его можно было развить в небольшой, понятный Kafka‑подобный кластер. Он предоставляет кастомный бинарный протокол, минимальный MQTT 3.1.1/5.0 фронтенд (QoS0/1), consumer groups с offset’ами на брокере и сегментированное WAL‑хранилище со sparse‑индексом и retention.
 
 ## Состояние проекта
 
 - Основной single-node брокер (storage, бинарный протокол, MQTT, consumer groups, HTTP UI/API) — реализован и подходит для локальных экспериментов и демонстраций.
-- Persist метаданных топиков (`metadata.log`) — реализован, топики и партиции поднимаются после рестарта.
-- Слой кластерных метаданных (controller + `/api/cluster`) — реализован для single-node и статического multi-broker; Raft‑контроллер существует как экспериментальная альтернатива и пока не подключён к основному бинарю.
-- Путь репликации (leader → follower) — реализованы бинарный клиент и PartitionReplicator как прототипы; **не** включены в стандартный runtime, эффективный RF остаётся 1.
-- Multi-node / Raft‑кластер контроллера — дизайн и scaffolding есть, производственная интеграция и эксплуатация — будущая работа.
+- Persist метаданных топиков (`metadata.log`) — реализован; топики и партиции поднимаются после рестарта и восстанавливаются при старте брокера.
+- Слой кластерных метаданных (контроллер + `/api/cluster`) — реализован для single-node и multi-broker режимов. Raft‑контроллер доступен через `-controller=raft` (single-node или multi-peer) и является рекомендуемым режимом для кластерных развёртываний; `-controller=single` оставляет легаси in‑memory контроллер.
+- Путь репликации (leader → follower) — реализованы бинарный клиент (`BinaryReplicator`) и PartitionReplicator (WAL‑sink + отчёт о прогрессе в ISR). Репликация включается опционально через флаг `-replication`. RF>1 поддержан на уровне протокола и метаданных; включение репликации можно делать поэтапно.
+- Multi-node / Raft‑кластер контроллера — поддерживается для локальных multi-broker кластеров. Базовые сценарии failover и rolling restart покрыты тестами; дальнейшая эксплуатационная обкатка и тулзы находятся в работе.
 
 ## Дорожная карта
 
 ### 1. Основа (текущее состояние)
 
 - Single-node брокер с сегментированным WAL, sparse‑индексом, retention по размеру/времени и crash‑recovery.
-- Сервер бинарного протокола (`netproto`), минимальный MQTT‑фронтенд, CLI‑клиент, HTTP admin API + React UI.
+- Сервер бинарного протокола (`internal/netproto`), минимальный MQTT‑фронтенд (`internal/mqtt`), CLI‑клиент (`cmd/mbctl`), HTTP admin API + React UI (`wave-ui`).
 - Persist метаданных топиков через `metadata.log`; broker и HTTP API восстанавливают topics/partitions после рестарта.
 - Контроллер кластерных метаданных:
-  - SingleNodeController с `ClusterMetadata` и снимком `/api/cluster`.
-  - Статический multi-broker layout через `StaticClusterConfig` и round-robin лидеров.
-- Экспериментальный RaftController:
-  - Single-node Raft FSM для `ClusterMetadata` с командами `AssignTopic` и `ReportReplicaProgress`.
-  - Snapshot/restore кластерных метаданных, пока не используется в стандартном бинаре.
-- Заготовки для репликации:
-  - BinaryReplicator (использует существующий Fetch в бинарном протоколе и возвращает записи + HighWatermark).
-  - PartitionReplicator с интерфейсом `Sink` и API управления ISR (`ReportReplicaProgress`) в контроллере.
-  - Пока не подключены к основному runtime; эффективный RF = 1.
+  - `SingleNodeController` с `ClusterMetadata` и `/api/cluster`‑снапшотом для простых/single-node сценариев.
+  - `RaftController`: Raft‑поддерживаемая FSM для `ClusterMetadata` (single-node или multi-peer) с командами `AssignTopic`, `RegisterBroker`, `ReportReplicaProgress` и snapshot/restore.
+- Репликация:
+  - `BinaryReplicator` (использует существующий Fetch бинарного протокола и возвращает записи + HighWatermark).
+  - `PartitionReplicator` с интерфейсом `Sink` (WAL‑sink + reporting‑sink) и API управления ISR (`ReportReplicaProgress`) в контроллере.
+  - Репликация включается флагом `-replication`; по умолчанию брокер ведёт себя как RF=1 leader‑only.
 
-### 2. Multi-broker (развитие)
+### 2. Multi-broker (кластерный режим)
 
-Этот этап делится на три крупные главы.
+Этот этап во многом реализован и отвечает за практическое поведение кластера.
 
-#### 2.1 Интеграция Raft‑контроллера в основной путь
+#### 2.1 Raft‑контроллер в основном пути
 
-- Сделать RaftController drop-in заменой SingleNodeController за существующими интерфейсами контроллера.
-- Подключить RaftController в `cmd/mbd` и HTTP:
-  - конфиг/флаг для выбора между in‑memory контроллером и Raft‑контроллером;
-  - `/api/cluster` и все операции, меняющие метаданные (`CreateTopic`, будущие admin API), проходят через Raft.
-- Операционно стабилизировать single-node Raft:
-  - частота snapshot’ов, поведение при рестарте, HTTP‑эндпоинт статуса контроллера;
-  - убедиться, что всё совместимо с существующими тестами и UI.
+- RaftController — полноценная реализация интерфейсов контроллера, выбирается флагами:
 
-#### 2.2 Связка репликатора с Broker и контроллером
+  ```sh
+  -controller=raft \
+  -raft-bind=<host:port> \
+  -raft-peer=<host1:port1,host2:port2,...> \
+  -raft-dir=<path или пусто для in-memory>
+  ```
 
-- Подключить `PartitionReplicator` к storage:
-  - реализовать `Sink`, который аппендит записи в локальный WAL и обновляет HighWatermark партиции;
-  - обеспечить идемпотентность и корректное отслеживание offset’ов на follower’е.
-- Запускать репликационные циклы для follower‑партиций:
-  - получать assignment’ы follower’ов из `ClusterMetadata` (roles/replicas);
-  - для каждой follower‑партиции запускать `PartitionReplicator`, нацеленный на leader’а (`BrokerInfo`).
-- Использовать `ReportReplicaProgress` для поддержки ISR:
-  - реплика репортит прогресс (last applied offset + leader HighWatermark) в контроллер;
-  - контроллер обновляет `ISR` и `Version`.
-- Тесты и безопасность:
-  - сценарий “один leader + follower” в одном процессе, проверка репликации и обновления ISR;
-  - флаги/конфиг для включения/выключения репликации в runtime.
+- В режиме `controller=raft` `/api/cluster` и все операции, меняющие метаданные (`CreateTopic`, назначения партиций, обновления ISR), проходят через Raft‑журнал.
+- Режимы работы Raft:
+  - in‑memory для тестов/локальной разработки;
+  - TCP‑transport для реальных multi-node кластеров с настраиваемым списком peers и таймаутами.
 
-#### 2.3 Многоузловой Raft‑кластер и multi-broker runtime
+#### 2.2 Репликация, связанная с Broker и контроллером
 
-- Переход от single-node Raft к multi-peer Raft‑кластеру контроллера:
-  - конфигурация Raft‑пиров (servers) из cluster‑config;
-  - сетевой transport между нодами контроллера.
-- Multi-broker деплой:
+- `PartitionReplicator` подключён к storage через WAL‑sink:
+  - аппендит записи в локальный WAL на follower‑партициях;
+  - отслеживает последний применённый offset.
+- Менеджер репликации:
+  - получает assignment’ы follower‑партиций из `ClusterMetadata` (roles/replicas);
+  - для каждой follower‑партиции запускает `PartitionReplicator`, который ходит к leader’у по бинарному протоколу (`BrokerInfo`);
+  - использует `ReportReplicaProgress`, чтобы поддерживать ISR:
+    - реплика репортит прогресс (last applied offset + leader HighWatermark) в контроллер;
+    - контроллер обновляет `ISR` и `Version`.
+- Тестами покрыт сценарий single‑leader + follower в одном процессе, проверяются репликация и обновление ISR. Репликация контролируется флагом `-replication`.
+
+#### 2.3 Multi-node Raft‑кластер и multi-broker runtime
+
+- Multi-peer Raft‑кластер контроллера:
+  - peers задаются через `RaftBindAddr` и `RaftPeers`;
+  - RaftController использует TCP‑transport для прод‑режима и in‑memory transport в тестах.
+- Multi-broker‑развёртывание:
   - каждый broker поднимается с уникальным `BrokerID` и общим cluster‑config;
-  - брокеры регистрируются в Raft‑контроллере и получают cluster‑view (leaders/replicas/ISR).
-- Маршрутизация клиентов по лидерам:
-  - клиенты получают информацию о лидерах через Metadata/HTTP‑API и ходят на нужный broker;
-  - UI показывает несколько брокеров, их роли, ISR и HighWatermark’и.
+  - брокеры регистрируются в Raft‑контроллере через `RegisterBroker` и получают cluster‑view (leaders/replicas/ISR) через `ClusterMetadata`.
+- Осознанность брокера о кластере:
+  - при старте брокер открывает только те партиции, которые ему принадлежат (где он лидер или реплика) согласно `ClusterMetadata`;
+  - клиентские API (`/api/topics`, `/api/topics/:name`, `/api/topics/:name/partitions/:id/messages`) отражают только те партиции, которые реально обслуживает этот broker.
+- Маршрутизация клиентов по лидерам (на уровне дизайна и API):
+  - клиенты могут узнавать лидеров через бинарный Metadata‑запрос и HTTP `/api/cluster`;
+  - UI показывает несколько брокеров, их роли, ISR и HighWatermark’ы на отдельной странице кластера.
 - Операционные сценарии:
   - rolling restart брокеров и нод контроллера;
-  - failover лидера, сжатие/расширение ISR, деградированные режимы.
-- Укрепление:
-  - надёжность и совместимость snapshot’ов Raft для `ClusterMetadata`;
-  - тулзы для инспекции состояния кластера и выполнения админ‑операций.
+  - failover лидера (в тестах: после Shutdown лидера выбирается новый и продолжает применять команды);
+  - сжатие/расширение ISR и деградированные режимы.
+- Hardening:
+  - надёжность и совместимость Raft‑snapshot’ов `ClusterMetadata`;
+  - `/api/controller` экспонирует состояние контроллера (mode, Raft‑state, term, peers, clusterID, версия метаданных) для операторов;
+  - задокументированы процедуры bootstrap/join/rolling restart (см. ниже).
 
 ### 3. Тестирование и валидация
 
 #### 3.1 Интеграционные тесты
 
-- In‑process тесты, покрывающие broker + storage + controller + HTTP:
-  - жизненный цикл топиков/партиций, restart‑recovery, консистентность `/api/topics` и `/api/cluster`.
-- Тесты кластерных метаданных:
-  - статические multi-broker layout’ы, применение команд RaftController, обновление ISR.
+- In‑process тесты, покрывающие связку broker + storage + controller + HTTP:
+  - жизненный цикл топиков/партиций, восстановление после рестарта, консистентность `/api/topics` и `/api/cluster`.
+- Тесты кластерного слоя:
+  - statically multi-broker layout’ы, применение команд RaftController, обновление ISR, проверка того, что брокер открывает только «свои» партиции.
 
 #### 3.2 End-to-End (E2E) тесты
 
@@ -90,22 +96,28 @@ Single-node log-based message broker на Go, спроектированный �
   - запуск broker+UI, создание топиков, produce/consume через CLI, HTTP и MQTT;
   - проверка метрик, health‑чеков и поведения UI end‑to‑end.
 - Для multi-broker:
-  - сценарии с несколькими брокерами и контроллером, включая базовые failover‑случаи.
+  - сценарии с несколькими брокерами и Raft‑контроллером, включая простые случаи failover.
 
 #### 3.3 Большое E2E‑тестирование (перебор сценариев)
 
-- Скрипт “большого теста”, который гоняет множество рандомизированных сценариев, чтобы находить краевые случаи:
+- Скрипт «большого теста», гоняющий множество рандомизированных сценариев для поиска краевых случаев:
   - случайное создание топиков/партиций, join/leave consumer‑групп, produce/fetch, рестарты;
   - инварианты: нет потерянных acknowledged‑сообщений, offset’ы монотонны per partition, ISR никогда не пустой и т.п.
-- Тест рассчитан на длительный прогон и большое покрытие сочетаний, близко к системному fuzzing’у.
+- Тест рассчитан на длительный прогон и большое покрытие сочетаний, близок к системному fuzzing’у.
 
 #### 3.4 Стресс‑ и нагрузочные тесты
 
-- Микробенчмарки (уже есть) для storage и горячих путей брокера.
-- Нагрузочные тесты для бинарного протокола (например, `mbbench`) и MQTT:
+- Микробенчмарки для storage и горячих путей брокера:
+
+  ```sh
+  go test ./internal/storage -bench=.
+  go test ./internal/broker -bench=.
+  ```
+
+- Нагрузочные тесты для бинарного протокола и MQTT:
   - высокие скорости сообщений, разные размеры payload’ов, несколько concurrent producers/consumers;
   - измерение throughput, latency percentiles и использования ресурсов.
-- Для будущего multi-broker:
+- Для будущих multi-broker сценариев:
   - неравномерное распределение нагрузки, падение брокеров/лидеров под нагрузкой, churn ISR под давлением.
 
 ## Сборка и запуск
@@ -129,7 +141,7 @@ go build ./cmd/mbctl
 ./mbctl fetch -topic test -partition 0 -offset 0
 ```
 
-MQTT: подключите любой MQTT 3.1.1/5.0‑клиент к `:1883`, сделайте SUBSCRIBE на топик и PUBLISH сообщений (QoS0/1). MQTT‑топики маппятся на broker topics, партиция выбирается по hash’у.
+MQTT: подключите MQTT 3.1.1/5.0‑клиент к `:1883`, сделайте SUBSCRIBE на топик и PUBLISH сообщений (QoS0/1). MQTT‑топики напрямую маппятся на broker‑topics, партиция выбирается по hash’у.
 
 ## Наблюдаемость
 
@@ -145,9 +157,12 @@ HTTP‑эндпоинты (по умолчанию `:8090`):
 curl http://localhost:8090/metrics
 ```
 
-### Пример двух брокеров с общим Raft‑контроллером
+### Пример двух брокеров с Raft
+
+Запуск двух брокеров, разделяющих один Raft‑кластер контроллера:
 
 Broker 1:
+
 ```sh
 ./mbd \
   -broker-id=1 \
@@ -159,6 +174,7 @@ Broker 1:
 ```
 
 Broker 2:
+
 ```sh
 ./mbd \
   -broker-id=2 \
@@ -169,16 +185,27 @@ Broker 2:
   -bind=:8912 -http=:8092
 ```
 
-Ожидания: один контроллер станет лидером; `/api/cluster` на обоих брокерах со временем покажет одинаковый `ClusterMetadata`, лидеры партиций распределятся по разным BrokerID. `/api/controller` покажет `mode=raft`, `raftState`/`term`, список peers, `clusterID` и `version`.
+Ожидаемое поведение:
 
-#### Операционка для Raft‑кластера
-- Bootstrap: запустите первый брокер с полным списком `-raft-peer`; убедитесь через `/api/controller`, что выбран лидер и `clusterID` корректен.
-- Join: запускайте новые брокеры с тем же `-raft-peer`; проверяйте их появление в `/api/controller` peers и в `/api/cluster` Brokers.
-- Rolling restart: перезапускайте брокеры по одному, после каждого смотрите `/api/controller`, что лидер есть и версия метаданных растёт.
+- одна из нод контроллера становится лидером;
+- `/api/controller` на обоих брокерах показывает `mode="raft"`, актуальные `raftState`/`term`, список peers, `clusterID` и версию метаданных;
+- `/api/cluster` на обоих брокерах сходится к одинаковому `ClusterMetadata`, а лидеры партиций распределены по BrokerID.
+
+#### Операция кластера Raft
+
+- Bootstrap:
+  - запустить первый broker с полным списком `-raft-peer`;
+  - убедиться, что `/api/controller` показывает лидера и корректный `clusterID`.
+- Join:
+  - запускать дополнительные брокеры с тем же списком `-raft-peer`;
+  - убедиться, что они появляются в peers `/api/controller` и в brokers `/api/cluster`.
+- Rolling restart:
+  - перезапускать брокеры по одному;
+  - после каждого рестарта проверять `/api/controller`, что лидер есть, а версия метаданных (`version`) продолжает расти.
 
 ## Docker Compose (broker + UI)
 
-В корне есть `docker-compose.yml`, который поднимает broker + UI (`wave-ui`):
+В репозитории есть `docker-compose.yml`, который поднимает broker и UI (`wave-ui`):
 
 ```sh
 docker compose up --build
@@ -187,9 +214,9 @@ docker compose up --build
 Порты:
 
 - broker: `7912` (binary), `1883` (MQTT), `8090` (HTTP/metrics)
-- UI: `8080` (nginx со статикой Vite)
+- UI: `8080` (nginx со статическими файлами, собранными Vite)
 
-Данные broker’а лежат в volume `wave_data`. UI можно собрать с `VITE_USE_MOCKS=false`, чтобы ходить в реальный HTTP API по `http://broker:8090`.
+Данные брокера лежат в volume `wave_data`. UI можно собрать с `VITE_USE_MOCKS=false`, чтобы ходить в реальный HTTP API по `http://broker:8090`.
 
 ## Benchmarks и нагрузка
 
@@ -206,7 +233,7 @@ go test ./internal/broker -bench=.
 go run ./cmd/mbbench -broker 127.0.0.1:7912 -topic bench -messages 20000 -value-size 200 -concurrency 8
 ```
 
-Выводит количество сообщений, среднюю/максимальную задержку, общее время и RPS.
+Выводит количество произведённых сообщений, среднюю/максимальную задержку, общее время и RPS.
 
 ## Docker
 
@@ -225,7 +252,11 @@ docker run --rm \
   wavemq:latest
 ```
 
-По умолчанию: `-data-dir=/data -bind=:7912 -mqtt=:1883 -http=:8090`. Флаги можно переопределить: `docker run wavemq:latest <flags>...`.
+По умолчанию: `-data-dir=/data -bind=:7912 -mqtt=:1883 -http=:8090`. Флаги можно переопределить:
+
+```sh
+docker run wavemq:latest <flags>...
+```
 
 Доступ:
 
@@ -235,7 +266,8 @@ docker run --rm \
 
 ## Ограничения
 
-- По умолчанию билд остаётся single-node; multi-broker/raft‑контроллер находятся в экспериментальной стадии и не подключены к основному пути инициализации.
+- Примеры в README ориентированы на single-node; multi-broker/Raft‑режим доступен через флаги (`-controller=raft`, `-raft-bind`, `-raft-peer`) и описан выше.
 - Координация consumer groups локальная; offsets persist’ятся через WAL для offset’ов.
 - MQTT реализован минимально (QoS0/1, без retained/will/shared‑подписок).
 - Storage использует сегментированный WAL со sparse‑индексом и retention по размеру/времени.
+
