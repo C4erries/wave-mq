@@ -149,7 +149,17 @@ type RaftController struct {
 // NewRaftController bootstraps a Raft instance with given initial metadata.
 func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, raftDir string) (*RaftController, error) {
 	rCfg := raft.DefaultConfig()
-	rCfg.LocalID = raft.ServerID(fmt.Sprintf("broker-%d", cfg.BrokerID))
+	useInmem := cfg.RaftBindAddr == "" || len(cfg.RaftPeers) == 0
+	var localAddr raft.ServerAddress
+	var localID raft.ServerID
+
+	if useInmem {
+		localID = raft.ServerID(fmt.Sprintf("broker-%d", cfg.BrokerID))
+	} else {
+		localAddr = raft.ServerAddress(cfg.RaftBindAddr)
+		localID = raft.ServerID(localAddr)
+	}
+	rCfg.LocalID = localID
 	rCfg.SnapshotInterval = 2 * time.Second
 	rCfg.SnapshotThreshold = 64
 	rCfg.HeartbeatTimeout = 50 * time.Millisecond
@@ -161,24 +171,24 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 	stableStore := raft.NewInmemStore()
 	snapStore := raft.NewInmemSnapshotStore()
 	var transport raft.Transport
-	var transportAddr raft.ServerAddress
-	if cfg.RaftBindAddr != "" {
+	if useInmem {
+		addr, inmem := raft.NewInmemTransport(raft.ServerAddress(rCfg.LocalID))
+		transport = inmem
+		localAddr = addr
+	} else {
 		tcpTransport, err := raft.NewTCPTransport(cfg.RaftBindAddr, nil, 3, 2*time.Second, io.Discard)
 		if err != nil {
 			return nil, err
 		}
 		transport = tcpTransport
-		transportAddr = raft.ServerAddress(cfg.RaftBindAddr)
-	} else {
-		addr, inmem := raft.NewInmemTransport(raft.ServerAddress(rCfg.LocalID))
-		transport = inmem
-		transportAddr = addr
+		localAddr = raft.ServerAddress(cfg.RaftBindAddr)
 	}
+
 	if len(cfg.RaftPeers) == 0 {
-		cfg.RaftPeers = []string{string(transportAddr)}
+		cfg.RaftPeers = []string{string(localAddr)}
 	}
 	config := raft.Configuration{
-		Servers: buildServers(cfg, rCfg.LocalID, transportAddr),
+		Servers: buildServers(cfg, rCfg.LocalID, localAddr),
 	}
 	if err := raft.BootstrapCluster(rCfg, logStore, stableStore, snapStore, transport, config); err != nil && err != raft.ErrCantBootstrap {
 		return nil, err
@@ -280,7 +290,7 @@ func (c *RaftController) waitForLeader(ctx context.Context) error {
 	}
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
-	timeout := time.After(2 * time.Second)
+	timeout := time.After(5 * time.Second)
 	for {
 		select {
 		case <-ctx.Done():

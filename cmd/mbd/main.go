@@ -65,6 +65,26 @@ func main() {
 	if *retentionHours > 0 {
 		cfg.RetentionTime = time.Duration(*retentionHours) * time.Hour
 	}
+	if cfg.ControllerMode == "raft" {
+		if cfg.RaftBindAddr == "" {
+			logger.Error("raft controller mode requires -raft-bind")
+			os.Exit(1)
+		}
+		if len(cfg.RaftPeers) == 0 {
+			logger.Error("raft controller mode requires at least one -raft-peer (including self)")
+			os.Exit(1)
+		}
+		inPeers := false
+		for _, peer := range cfg.RaftPeers {
+			if peer == cfg.RaftBindAddr {
+				inPeers = true
+				break
+			}
+		}
+		if !inPeers {
+			logger.Warn("raft-bind not present in raft-peer list", "bind", cfg.RaftBindAddr)
+		}
+	}
 
 	store, err := storage.NewManager(storage.Config{
 		DataDir:         cfg.DataDir,
