@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/c4erries/wave-mq/internal/controller"
 	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/internal/storage"
@@ -32,6 +33,7 @@ type Broker struct {
 	storage Storage
 	offsets *OffsetStore
 	meta    *metadata.Store
+	cluster controller.MetadataStore
 
 	mu     sync.RWMutex
 	topics map[string]*Topic
@@ -76,7 +78,7 @@ type GroupMember struct {
 }
 
 // NewBroker wires together configuration and the storage backend.
-func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore, meta *metadata.Store) (*Broker, error) {
+func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore, meta *metadata.Store, cluster controller.MetadataStore) (*Broker, error) {
 	if storage == nil {
 		return nil, fmt.Errorf("storage is required")
 	}
@@ -94,6 +96,7 @@ func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore, meta
 		storage: storage,
 		offsets: offsets,
 		meta:    meta,
+		cluster: cluster,
 		topics:  make(map[string]*Topic),
 		groups:  make(map[string]*ConsumerGroup),
 		known:   make(map[string]metadata.TopicState),
@@ -498,6 +501,40 @@ func (b *Broker) TopicAndPartitionCounts() (int, int) {
 		partitions += len(t.Partitions)
 	}
 	return topics, partitions
+}
+
+// LocalPartitionsSnapshot returns partition assignments this broker should serve.
+// If no cluster metadata provider is configured, it derives assignments from local topics.
+func (b *Broker) LocalPartitionsSnapshot(ctx context.Context) ([]api.PartitionAssignment, error) {
+	if b.cluster == nil {
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		var res []api.PartitionAssignment
+		for name, t := range b.topics {
+			for pid := range t.Partitions {
+				res = append(res, api.PartitionAssignment{
+					Topic:       name,
+					Partition:   pid,
+					Replicas:    []int{b.cfg.BrokerID},
+					ISR:         []int{b.cfg.BrokerID},
+					Leader:      b.cfg.BrokerID,
+					LeaderEpoch: 0,
+				})
+			}
+		}
+		return res, nil
+	}
+	meta, err := b.cluster.GetClusterMetadata(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var res []api.PartitionAssignment
+	for _, p := range meta.Partitions {
+		if p.Leader == b.cfg.BrokerID {
+			res = append(res, p)
+		}
+	}
+	return res, nil
 }
 
 type TopicSummary struct {

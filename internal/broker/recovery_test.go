@@ -45,7 +45,15 @@ func TestBrokerRecoversTopicsFromMetadataLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("metadata store: %v", err)
 	}
-	b, err := brokerpkg.NewBroker(brokerCfg, store, offsetStore, metaStore)
+	recoveredTopics, err := metaStore.RecoverTopics(ctx)
+	if err != nil {
+		t.Fatalf("recover topics: %v", err)
+	}
+	ctrl, err := controller.NewSingleNodeController(brokerCfg, recoveredTopics.Topics)
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
+	b, err := brokerpkg.NewBroker(brokerCfg, store, offsetStore, metaStore, ctrl)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -85,7 +93,15 @@ func TestBrokerRecoversTopicsFromMetadataLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("metadata store reopen: %v", err)
 	}
-	b, err = brokerpkg.NewBroker(brokerCfg, store, offsetStore, metaStore)
+	recoveredTopics, err = metaStore.RecoverTopics(ctx)
+	if err != nil {
+		t.Fatalf("recover topics restart: %v", err)
+	}
+	ctrl, err = controller.NewSingleNodeController(brokerCfg, recoveredTopics.Topics)
+	if err != nil {
+		t.Fatalf("controller restart: %v", err)
+	}
+	b, err = brokerpkg.NewBroker(brokerCfg, store, offsetStore, metaStore, ctrl)
 	if err != nil {
 		t.Fatalf("broker reopen: %v", err)
 	}

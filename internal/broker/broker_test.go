@@ -32,7 +32,7 @@ func newTestBroker(t *testing.T) (*Broker, func()) {
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore, metaStore)
+	}, store, offsetStore, metaStore, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestOffsetPersistenceAcrossRestart(t *testing.T) {
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore, metaStore)
+	}, store, offsetStore, metaStore, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestOffsetPersistenceAcrossRestart(t *testing.T) {
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore, metaStore)
+	}, store, offsetStore, metaStore, nil)
 	if err != nil {
 		t.Fatalf("broker reopen: %v", err)
 	}

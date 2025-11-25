@@ -39,17 +39,17 @@ func setupTestServer(t *testing.T) (*httptest.Server, *broker.Broker, *storage.M
 		t.Fatalf("recover topics: %v", err)
 	}
 	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 1}
+	ctrl, err := controller.NewSingleNodeController(cfg, recovered.Topics)
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
 	b, err := broker.NewBroker(api.BrokerConfig{
 		BrokerID:          1,
 		DataDir:           dir,
 		ReplicationFactor: 1,
-	}, store, offsetStore, metaStore)
+	}, store, offsetStore, metaStore, ctrl)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
-	}
-	ctrl, err := controller.NewSingleNodeController(cfg, recovered.Topics)
-	if err != nil {
-		t.Fatalf("controller: %v", err)
 	}
 	handler := New(b, cfg, ctrl)
 	mux := http.NewServeMux()
@@ -130,13 +130,13 @@ func TestClusterMetadataEndpoint(t *testing.T) {
 		t.Fatalf("metadata store: %v", err)
 	}
 	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 1}
-	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore)
-	if err != nil {
-		t.Fatalf("broker: %v", err)
-	}
 	ctrl, err := controller.NewSingleNodeController(cfg, map[string]metadata.TopicState{})
 	if err != nil {
 		t.Fatalf("controller: %v", err)
+	}
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
 	}
 	handler := New(b, cfg, ctrl)
 	mux := http.NewServeMux()
