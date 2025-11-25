@@ -35,6 +35,8 @@ func main() {
 		segmentBytes      = flag.Int64("segment-bytes", 64<<20, "max segment size before rotation")
 		retentionBytes    = flag.Int64("retention-bytes", -1, "total retention budget in bytes (-1 for unlimited)")
 		retentionHours    = flag.Int("retention-hours", 0, "retention by age in hours (0 disables time-based retention)")
+		controllerMode    = flag.String("controller", "single", "controller mode: single or raft")
+		raftDir           = flag.String("raft-dir", "", "directory for Raft state (empty = in-memory)")
 	)
 	flag.Parse()
 
@@ -47,6 +49,8 @@ func main() {
 		HTTPAddr:          *httpAddr,
 		MaxSegmentBytes:   *segmentBytes,
 		RetentionBytes:    *retentionBytes,
+		ControllerMode:    *controllerMode,
+		RaftDir:           *raftDir,
 	}
 	if *retentionHours > 0 {
 		cfg.RetentionTime = time.Duration(*retentionHours) * time.Hour
@@ -80,11 +84,12 @@ func main() {
 		logger.Error("metadata recover failed", "err", err)
 		os.Exit(1)
 	}
-	ctrl, err := controller.NewSingleNodeController(cfg, recoveredTopics.Topics)
+	ctrl, err := controller.NewController(cfg, recoveredTopics.Topics)
 	if err != nil {
 		logger.Error("controller init failed", "err", err)
 		os.Exit(1)
 	}
+	logger.Info("controller initialized", "mode", cfg.ControllerMode)
 
 	offsetStore, err := broker.NewOffsetStore(cfg.DataDir)
 	if err != nil {

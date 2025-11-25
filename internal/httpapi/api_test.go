@@ -38,7 +38,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *broker.Broker, *storage.M
 	if err != nil {
 		t.Fatalf("recover topics: %v", err)
 	}
-	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 1}
+	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 1, ControllerMode: "single"}
 	ctrl, err := controller.NewSingleNodeController(cfg, recovered.Topics)
 	if err != nil {
 		t.Fatalf("controller: %v", err)
@@ -79,6 +79,19 @@ func TestCreateTopicEndpoint(t *testing.T) {
 	}
 	if detail.Name != "api-topic" || detail.PartitionCount != 1 {
 		t.Fatalf("unexpected detail: %+v", detail)
+	}
+	// verify controller mode is exposed
+	brokerResp, err := http.Get(server.URL + "/api/broker")
+	if err != nil {
+		t.Fatalf("get broker: %v", err)
+	}
+	var brokerInfo map[string]interface{}
+	if err := json.NewDecoder(brokerResp.Body).Decode(&brokerInfo); err != nil {
+		t.Fatalf("decode broker: %v", err)
+	}
+	_ = brokerResp.Body.Close()
+	if brokerInfo["controllerMode"] != "single" {
+		t.Fatalf("expected controllerMode single, got %v", brokerInfo["controllerMode"])
 	}
 }
 

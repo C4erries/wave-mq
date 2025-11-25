@@ -32,6 +32,8 @@ type BrokerConfig struct {
 	ControllerAddr    string
 	AdvertisedAddr    string
 	StaticCluster     *StaticClusterConfig
+	ControllerMode    string // "single" (default) or "raft"
+	RaftDir           string
 }
 
 // TopicConfig describes how a topic should be created.

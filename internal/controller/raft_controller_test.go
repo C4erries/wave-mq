@@ -18,6 +18,7 @@ func TestRaftControllerAssignTopic(t *testing.T) {
 				{BrokerID: 2, Host: "b2:1"},
 			},
 		},
+		ControllerMode: "raft",
 	}
 	initial := api.ClusterMetadata{
 		ClusterID: cfg.StaticCluster.ClusterID,
@@ -62,6 +63,7 @@ func TestRaftControllerReportReplicaProgress(t *testing.T) {
 				{BrokerID: 2, Host: "b2:1"},
 			},
 		},
+		ControllerMode: "raft",
 	}
 	initial := api.ClusterMetadata{
 		ClusterID: cfg.StaticCluster.ClusterID,

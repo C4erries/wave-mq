@@ -6,7 +6,7 @@ Single-node log-based message broker in Go, ready to grow into a cluster. Provid
 
 - Core single-node broker (storage, binary protocol, MQTT, consumer groups, HTTP UI/API) — implemented and suitable for local experiments and demos.
 - Topic metadata persistence (`metadata.log`) — implemented; topics/partitions survive broker restart.
-- Cluster metadata layer (controller + `/api/cluster`) — implemented in single-node and static multi-broker form; Raft-based controller exists as an experimental alternative, not wired into the default binary yet.
+- Cluster metadata layer (controller + `/api/cluster`) — implemented in single-node and static multi-broker form; Raft-based controller exists as an experimental alternative, selectable via `-controller=raft` (default `single`) and optional `-raft-dir` for state (empty=in-memory).
 - Replication path (leader → follower) — binary client and partition replicator implemented as prototypes; **not** enabled in the default runtime, RF effectively remains 1.
 - Multi-node / Raft-backed controller quorum — design and scaffolding in place, production wiring and operations are future work.
 

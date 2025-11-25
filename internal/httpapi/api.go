@@ -47,6 +47,7 @@ func (h *Handler) handleBroker(w http.ResponseWriter, r *http.Request) {
 		"httpEndpoint":      h.cfg.HTTPAddr,
 		"clusterID":         h.cfg.ClusterID,
 		"replicationFactor": h.cfg.ReplicationFactor,
+		"controllerMode":    h.cfg.ControllerMode,
 	}
 	writeJSON(w, resp)
 }
