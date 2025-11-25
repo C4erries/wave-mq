@@ -370,6 +370,12 @@ func (c *RaftController) RaftPeers() []string {
 	return out
 }
 
+// Close stops the underlying Raft instance.
+func (c *RaftController) Close() error {
+	f := c.raft.Shutdown()
+	return f.Error()
+}
+
 func buildServers(cfg api.BrokerConfig, localID raft.ServerID, localAddr raft.ServerAddress) []raft.Server {
 	seen := make(map[raft.ServerID]struct{})
 	var servers []raft.Server

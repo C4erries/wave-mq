@@ -145,6 +145,32 @@ HTTP‑эндпоинты (по умолчанию `:8090`):
 curl http://localhost:8090/metrics
 ```
 
+### Пример двух брокеров с общим Raft‑контроллером (экспериментально)
+
+Broker 1:
+```sh
+./mbd \
+  -broker-id=1 \
+  -controller=raft \
+  -raft-bind=127.0.0.1:9001 \
+  -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
+  -data-dir=./data1 \
+  -bind=:7912 -http=:8091
+```
+
+Broker 2:
+```sh
+./mbd \
+  -broker-id=2 \
+  -controller=raft \
+  -raft-bind=127.0.0.1:9002 \
+  -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
+  -data-dir=./data2 \
+  -bind=:8912 -http=:8092
+```
+
+Ожидания: один контроллер станет лидером; `/api/cluster` на обоих брокерах со временем покажет одинаковый `ClusterMetadata`, лидеры партиций распределятся по разным BrokerID.
+
 ## Docker Compose (broker + UI)
 
 В корне есть `docker-compose.yml`, который поднимает broker + UI (`wave-ui`):
@@ -208,4 +234,3 @@ docker run --rm \
 - Координация consumer groups локальная; offsets persist’ятся через WAL для offset’ов.
 - MQTT реализован минимально (QoS0/1, без retained/will/shared‑подписок).
 - Storage использует сегментированный WAL со sparse‑индексом и retention по размеру/времени.
-

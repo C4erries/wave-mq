@@ -140,6 +140,36 @@ Example:
 curl http://localhost:8090/metrics
 ```
 
+### Two-broker Raft example (experimental)
+
+Run two brokers sharing one Raft controller cluster:
+
+Broker 1:
+
+```sh
+./mbd \
+  -broker-id=1 \
+  -controller=raft \
+  -raft-bind=127.0.0.1:9001 \
+  -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
+  -data-dir=./data1 \
+  -bind=:7912 -http=:8091
+```
+
+Broker 2:
+
+```sh
+./mbd \
+  -broker-id=2 \
+  -controller=raft \
+  -raft-bind=127.0.0.1:9002 \
+  -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
+  -data-dir=./data2 \
+  -bind=:8912 -http=:8092
+```
+
+Expected behavior: one controller becomes leader; `/api/cluster` on both brokers converges to the same `ClusterMetadata`, and partition leaders are spread across broker IDs.
+
 ## Docker Compose (broker + UI)
 
 В корне репозитория есть `docker-compose.yml`, который поднимает брокер и UI (`wave-ui`):

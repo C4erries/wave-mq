@@ -299,3 +299,87 @@ func TestRaftControllerMultiPeerRegisterBrokerReplicates(t *testing.T) {
 		t.Fatalf("brokers not replicated: %v", err)
 	}
 }
+
+func TestRaftControllerFailoverApplyCommands(t *testing.T) {
+	addr1 := freeAddr(t)
+	addr2 := freeAddr(t)
+	addr3 := freeAddr(t)
+	peers := []string{addr1, addr2, addr3}
+
+	static := &api.StaticClusterConfig{
+		ClusterID: "cluster-raft",
+		Brokers: []api.BrokerInfo{
+			{BrokerID: 1, Host: "b1"},
+			{BrokerID: 2, Host: "b2"},
+			{BrokerID: 3, Host: "b3"},
+		},
+	}
+	cfgs := []api.BrokerConfig{
+		{BrokerID: 1, ControllerMode: "raft", RaftBindAddr: addr1, RaftPeers: peers, StaticCluster: static},
+		{BrokerID: 2, ControllerMode: "raft", RaftBindAddr: addr2, RaftPeers: peers, StaticCluster: static},
+		{BrokerID: 3, ControllerMode: "raft", RaftBindAddr: addr3, RaftPeers: peers, StaticCluster: static},
+	}
+	initial := api.ClusterMetadata{
+		ClusterID: static.ClusterID,
+		Version:   1,
+		Brokers:   static.Brokers,
+	}
+
+	var ctrls []*RaftController
+	for _, cfg := range cfgs {
+		rc, err := NewRaftController(cfg, initial, "")
+		if err != nil {
+			t.Fatalf("controller: %v", err)
+		}
+		ctrls = append(ctrls, rc)
+	}
+	defer func() {
+		for _, c := range ctrls {
+			_ = c.raft.Shutdown()
+		}
+	}()
+
+	leader := waitForLeader(t, ctrls)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := leader.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("assign alpha: %v", err)
+	}
+	if err := waitForMetadata(func() bool {
+		for _, c := range ctrls {
+			m, _ := c.GetClusterMetadata(ctx)
+			if len(m.Partitions) != 1 {
+				return false
+			}
+		}
+		return true
+	}); err != nil {
+		t.Fatalf("metadata did not converge before failover: %v", err)
+	}
+
+	// Simulate leader failure.
+	_ = leader.raft.Shutdown()
+
+	var survivors []*RaftController
+	for _, c := range ctrls {
+		if c != leader {
+			survivors = append(survivors, c)
+		}
+	}
+	newLeader := waitForLeader(t, survivors)
+	if _, err := newLeader.AssignTopic(ctx, "beta", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("assign beta after failover: %v", err)
+	}
+	if err := waitForMetadata(func() bool {
+		for _, c := range survivors {
+			m, _ := c.GetClusterMetadata(ctx)
+			if len(m.Partitions) != 2 {
+				return false
+			}
+		}
+		return true
+	}); err != nil {
+		t.Fatalf("metadata did not converge after failover: %v", err)
+	}
+}
