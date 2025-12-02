@@ -35,6 +35,14 @@ func (s *walSink) ensureLog() error {
 	return nil
 }
 
+// NextOffset returns the next offset to replicate into (high watermark + 1).
+func (s *walSink) NextOffset() (api.Offset, error) {
+	if err := s.ensureLog(); err != nil {
+		return -1, err
+	}
+	return s.log.HighWatermark() + 1, nil
+}
+
 func (s *walSink) ApplyBatch(ctx context.Context, records []api.Record, highWatermark api.Offset) (api.Offset, error) {
 	_ = highWatermark
 	if err := s.ensureLog(); err != nil {

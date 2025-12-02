@@ -13,6 +13,11 @@ type Sink interface {
 	ApplyBatch(ctx context.Context, records []api.Record, highWatermark api.Offset) (api.Offset, error)
 }
 
+// OffsetProvider optionally exposes a starting offset hint for replication.
+type OffsetProvider interface {
+	NextOffset() (api.Offset, error)
+}
+
 // PartitionReplicator pulls records for a single partition from its leader and applies them to a sink.
 type PartitionReplicator struct {
 	rep    Replicator
@@ -46,6 +51,15 @@ func NewPartitionReplicator(rep Replicator, leader api.BrokerInfo, topic string,
 func (p *PartitionReplicator) Run(ctx context.Context) error {
 	if p.rep == nil {
 		return nil
+	}
+	if p.nextOffset == 0 {
+		if prov, ok := p.sink.(OffsetProvider); ok {
+			if off, err := prov.NextOffset(); err == nil {
+				p.nextOffset = off
+			} else {
+				return err
+			}
+		}
 	}
 	for {
 		select {

@@ -195,7 +195,7 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 		return err
 	}
 	b.known[name] = state
-	return b.loadTopicLocked(ctx, state)
+	return b.loadTopicLocked(ctx, state, nil)
 }
 
 func (b *Broker) bootstrapTopicsFromMetadata(ctx context.Context, topics map[string]metadata.TopicState) error {
@@ -220,12 +220,14 @@ func (b *Broker) bootstrapTopicsFromMetadata(ctx context.Context, topics map[str
 	defer b.mu.Unlock()
 	for _, state := range topics {
 		if allowed != nil {
-			parts := state.Partitions[:0]
+			topicParts := allowed[state.Name]
+			if len(topicParts) == 0 {
+				continue
+			}
+			parts := make([]metadata.PartitionSpec, 0, len(topicParts))
 			for _, ps := range state.Partitions {
-				if topicParts, ok := allowed[state.Name]; ok {
-					if _, ok := topicParts[int(ps.ID)]; ok {
-						parts = append(parts, ps)
-					}
+				if _, ok := topicParts[int(ps.ID)]; ok {
+					parts = append(parts, ps)
 				}
 			}
 			if len(parts) == 0 {
@@ -234,14 +236,18 @@ func (b *Broker) bootstrapTopicsFromMetadata(ctx context.Context, topics map[str
 			state.Partitions = parts
 			state.NumPartitions = len(parts)
 		}
-		if err := b.loadTopicLocked(ctx, state); err != nil {
+		var assignments map[int]api.PartitionAssignment
+		if allowed != nil {
+			assignments = allowed[state.Name]
+		}
+		if err := b.loadTopicLocked(ctx, state, assignments); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (b *Broker) loadTopicLocked(ctx context.Context, state metadata.TopicState) error {
+func (b *Broker) loadTopicLocked(ctx context.Context, state metadata.TopicState, assignments map[int]api.PartitionAssignment) error {
 	if _, ok := b.topics[state.Name]; ok {
 		return nil
 	}
@@ -265,14 +271,31 @@ func (b *Broker) loadTopicLocked(ctx context.Context, state metadata.TopicState)
 		if err != nil {
 			return err
 		}
+		assign := api.PartitionAssignment{}
+		if assignments != nil {
+			assign = assignments[int(ps.ID)]
+		}
 		replica := b.replicaForPartition(ps)
+		role := replica.Role
+		epoch := replica.LeaderEpoch
+		if assignments != nil {
+			if assign.Leader == b.cfg.BrokerID {
+				role = api.RoleLeader
+			} else if containsInt(assign.Replicas, b.cfg.BrokerID) {
+				role = api.RoleFollower
+			}
+			if assign.LeaderEpoch != 0 {
+				epoch = assign.LeaderEpoch
+			}
+			replica.BrokerID = int32(b.cfg.BrokerID)
+		}
 		meta := api.PartitionMetadata{
 			Replica: api.PartitionReplica{
 				Topic:       state.Name,
 				Partition:   int(ps.ID),
 				BrokerID:    int(replica.BrokerID),
-				Role:        replica.Role,
-				LeaderEpoch: replica.LeaderEpoch,
+				Role:        role,
+				LeaderEpoch: epoch,
 			},
 			StartOffset:   log.StartOffset(),
 			HighWatermark: log.HighWatermark(),

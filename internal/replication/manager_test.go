@@ -62,6 +62,7 @@ func TestManagerStartsReplicatorsForFollowers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	meta := api.ClusterMetadata{
 		Brokers: []api.BrokerInfo{
 			{BrokerID: 1, Host: "b1"},
@@ -91,5 +92,46 @@ func TestManagerStartsReplicatorsForFollowers(t *testing.T) {
 		if req.Topic == "b" {
 			t.Fatalf("should not replicate leader-owned partition b")
 		}
+	}
+}
+
+func TestManagerStartsReplicatorsForMultipleFollowers(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewManager(storage.Config{DataDir: dir})
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	meta := api.ClusterMetadata{
+		Brokers: []api.BrokerInfo{
+			{BrokerID: 1, Host: "b1"},
+			{BrokerID: 2, Host: "b2"},
+		},
+		Partitions: []api.PartitionAssignment{
+			{Topic: "a", Partition: 0, Leader: 1, Replicas: []int{1, 2}, ISR: []int{1}},
+			{Topic: "a", Partition: 1, Leader: 1, Replicas: []int{1, 2}, ISR: []int{1}},
+			{Topic: "a", Partition: 2, Leader: 2, Replicas: []int{1, 2}, ISR: []int{2}}, // local leader, should be skipped
+		},
+	}
+	ctrl := &fakeMetadataStore{meta: meta}
+	repl := &fakeReplicator{}
+
+	mgr := NewManager(api.BrokerConfig{BrokerID: 2}, store, ctrl, repl)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	go mgr.Run(ctx)
+	time.Sleep(300 * time.Millisecond)
+	repl.mu.Lock()
+	defer repl.mu.Unlock()
+	seen := make(map[int]bool)
+	for _, req := range repl.fetch {
+		seen[req.Partition] = true
+	}
+	if !seen[0] || !seen[1] {
+		t.Fatalf("expected replication for follower partitions 0 and 1, got %+v", seen)
+	}
+	if seen[2] {
+		t.Fatalf("should not replicate locally-led partition 2")
 	}
 }

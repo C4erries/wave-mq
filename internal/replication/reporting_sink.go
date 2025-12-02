@@ -38,3 +38,11 @@ func (s *reportingSink) ApplyBatch(ctx context.Context, records []api.Record, hi
 	}
 	return last, nil
 }
+
+// NextOffset delegates to the inner sink if it can provide an offset hint.
+func (s *reportingSink) NextOffset() (api.Offset, error) {
+	if prov, ok := s.inner.(OffsetProvider); ok {
+		return prov.NextOffset()
+	}
+	return 0, nil
+}
