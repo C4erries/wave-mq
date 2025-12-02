@@ -276,3 +276,126 @@ func TestAssignTopicUpdatesMetadata(t *testing.T) {
 		t.Fatalf("missing topics in metadata: alpha=%v beta=%v", foundAlpha, foundBeta)
 	}
 }
+
+func TestAssignTopicSingleNodeReplicationFactorTruncates(t *testing.T) {
+	cfg := api.BrokerConfig{BrokerID: 1, ReplicationFactor: 1}
+	ctrl, err := NewSingleNodeController(cfg, map[string]metadata.TopicState{})
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
+	meta, err := ctrl.AssignTopic(context.Background(), "alpha", api.TopicConfig{Partitions: 2, ReplicationFactor: 3})
+	if err != nil {
+		t.Fatalf("assign alpha: %v", err)
+	}
+	for _, p := range meta.Partitions {
+		if len(p.Replicas) != 1 || p.Replicas[0] != cfg.BrokerID {
+			t.Fatalf("expected single replica on broker %d, got %+v", cfg.BrokerID, p.Replicas)
+		}
+		if len(p.ISR) != 1 || p.ISR[0] != cfg.BrokerID {
+			t.Fatalf("expected single ISR member, got %+v", p.ISR)
+		}
+		if p.Leader != cfg.BrokerID {
+			t.Fatalf("expected leader %d, got %d", cfg.BrokerID, p.Leader)
+		}
+	}
+}
+
+func TestAssignTopicStaticClusterReplicationFactor(t *testing.T) {
+	cfg := api.BrokerConfig{
+		BrokerID: 1,
+		StaticCluster: &api.StaticClusterConfig{
+			ClusterID: "cluster-rf",
+			Brokers: []api.BrokerInfo{
+				{BrokerID: 1, Host: "b1"},
+				{BrokerID: 2, Host: "b2"},
+				{BrokerID: 3, Host: "b3"},
+			},
+		},
+	}
+	ctrl, err := NewSingleNodeController(cfg, map[string]metadata.TopicState{})
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
+	meta, err := ctrl.AssignTopic(context.Background(), "alpha", api.TopicConfig{Partitions: 3, ReplicationFactor: 3})
+	if err != nil {
+		t.Fatalf("assign alpha: %v", err)
+	}
+	leaders := make(map[int]int)
+	for _, p := range meta.Partitions {
+		leaders[p.Leader]++
+		if len(p.Replicas) != 3 {
+			t.Fatalf("expected 3 replicas, got %+v", p.Replicas)
+		}
+		seen := make(map[int]struct{})
+		for _, id := range p.Replicas {
+			seen[id] = struct{}{}
+		}
+		if len(seen) != len(p.Replicas) {
+			t.Fatalf("replicas must be unique, got %+v", p.Replicas)
+		}
+		if p.Leader != p.Replicas[0] {
+			t.Fatalf("leader must be first replica, got %d with replicas %+v", p.Leader, p.Replicas)
+		}
+		if len(p.ISR) != len(p.Replicas) {
+			t.Fatalf("ISR should match replicas initially, got %+v", p.ISR)
+		}
+	}
+	if len(leaders) < 2 {
+		t.Fatalf("leaders should be distributed, got %+v", leaders)
+	}
+}
+
+func TestRecoveredAssignmentsUseReplicationFactor(t *testing.T) {
+	topics := map[string]metadata.TopicState{
+		"alpha": {
+			Name:              "alpha",
+			NumPartitions:     2,
+			ReplicationFactor: 3,
+			Partitions: []metadata.PartitionSpec{
+				{ID: 0, Replicas: []metadata.ReplicaSpec{
+					{BrokerID: 1, Role: api.RoleLeader, LeaderEpoch: 1},
+					{BrokerID: 2, Role: api.RoleFollower, LeaderEpoch: 1},
+					{BrokerID: 3, Role: api.RoleFollower, LeaderEpoch: 1},
+				}},
+				{ID: 1, Replicas: []metadata.ReplicaSpec{
+					{BrokerID: 2, Role: api.RoleLeader, LeaderEpoch: 1},
+					{BrokerID: 3, Role: api.RoleFollower, LeaderEpoch: 1},
+					{BrokerID: 1, Role: api.RoleFollower, LeaderEpoch: 1},
+				}},
+			},
+		},
+	}
+	cfg := api.BrokerConfig{
+		BrokerID: 1,
+		StaticCluster: &api.StaticClusterConfig{
+			ClusterID: "cluster-rf",
+			Brokers: []api.BrokerInfo{
+				{BrokerID: 1},
+				{BrokerID: 2},
+				{BrokerID: 3},
+			},
+		},
+	}
+	ctrl, err := NewSingleNodeController(cfg, topics)
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
+	meta, err := ctrl.GetClusterMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("metadata: %v", err)
+	}
+	if len(meta.Partitions) != 2 {
+		t.Fatalf("expected 2 partitions, got %d", len(meta.Partitions))
+	}
+	for _, p := range meta.Partitions {
+		if len(p.Replicas) != 3 {
+			t.Fatalf("expected 3 replicas, got %+v", p.Replicas)
+		}
+		if p.Leader != p.Replicas[0] {
+			t.Fatalf("leader should be first replica, got %d", p.Leader)
+		}
+		if len(p.ISR) != len(p.Replicas) {
+			t.Fatalf("ISR should include all replicas, got %+v", p.ISR)
+		}
+	}
+}

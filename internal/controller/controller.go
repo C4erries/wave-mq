@@ -96,9 +96,12 @@ func (c *SingleNodeController) AssignTopic(ctx context.Context, name string, cfg
 		cfg.Partitions = 1
 	}
 	if cfg.ReplicationFactor <= 0 {
+		cfg.ReplicationFactor = c.cfg.ReplicationFactor
+	}
+	if cfg.ReplicationFactor <= 0 {
 		cfg.ReplicationFactor = 1
 	}
-	newParts := assignTopicPartitions(c.cfg, c.meta.Brokers, name, cfg.Partitions, c.meta.Partitions)
+	newParts := assignTopicPartitions(c.cfg, c.meta.Brokers, name, cfg.Partitions, cfg.ReplicationFactor, c.meta.Partitions)
 	c.meta.Partitions = append(c.meta.Partitions, newParts...)
 	c.meta.Version++
 	return c.meta, nil
@@ -148,24 +151,21 @@ func buildAssignments(cfg api.BrokerConfig, brokers []api.BrokerInfo, topics map
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	var counter int
 	for _, name := range names {
 		state := topics[name]
 		parts := append([]metadata.PartitionSpec(nil), state.Partitions...)
 		sort.Slice(parts, func(i, j int) bool { return parts[i].ID < parts[j].ID })
-		for _, ps := range parts {
-			leader := brokers[counter%len(brokers)].BrokerID
-			counter++
-			epoch := replicaEpoch(leader, ps.Replicas)
-			res = append(res, api.PartitionAssignment{
-				Topic:       name,
-				Partition:   int(ps.ID),
-				Replicas:    []int{leader},
-				ISR:         []int{leader},
-				Leader:      leader,
-				LeaderEpoch: epoch,
-			})
+		rf := state.ReplicationFactor
+		if rf <= 0 {
+			rf = cfg.ReplicationFactor
 		}
+		// TODO: reuse recovered replica layout when multi-broker placement is persisted.
+		assignments := assignTopicPartitions(cfg, brokers, name, len(parts), rf, res)
+		for i := range assignments {
+			assignments[i].Partition = int(parts[i].ID)
+			assignments[i].LeaderEpoch = replicaEpoch(assignments[i].Leader, parts[i].Replicas)
+		}
+		res = append(res, assignments...)
 	}
 	return res
 }
@@ -215,22 +215,39 @@ func brokerPresent(id int, brokers []api.BrokerInfo) bool {
 	return false
 }
 
-func assignTopicPartitions(cfg api.BrokerConfig, brokers []api.BrokerInfo, name string, partitions int, existing []api.PartitionAssignment) []api.PartitionAssignment {
+func assignTopicPartitions(cfg api.BrokerConfig, brokers []api.BrokerInfo, name string, partitions int, rf int, existing []api.PartitionAssignment) []api.PartitionAssignment {
 	if len(brokers) == 0 {
 		return nil
 	}
 	sort.Slice(brokers, func(i, j int) bool { return brokers[i].BrokerID < brokers[j].BrokerID })
+	if rf <= 0 {
+		rf = cfg.ReplicationFactor
+	}
+	if partitions < 0 {
+		partitions = 0
+	}
+	if rf < 1 {
+		rf = 1
+	}
+	replicaCount := rf
+	if replicaCount > len(brokers) {
+		replicaCount = len(brokers)
+	}
 	counter := len(existing)
 	var res []api.PartitionAssignment
 	for pid := 0; pid < partitions; pid++ {
-		leader := brokers[counter%len(brokers)].BrokerID
+		leaderIdx := counter % len(brokers)
 		counter++
+		replicas := make([]int, 0, replicaCount)
+		for i := 0; i < replicaCount; i++ {
+			replicas = append(replicas, brokers[(leaderIdx+i)%len(brokers)].BrokerID)
+		}
 		res = append(res, api.PartitionAssignment{
 			Topic:       name,
 			Partition:   pid,
-			Replicas:    []int{leader},
-			ISR:         []int{leader},
-			Leader:      leader,
+			Replicas:    replicas,
+			ISR:         append([]int(nil), replicas...),
+			Leader:      replicas[0],
 			LeaderEpoch: 0,
 		})
 	}

@@ -14,17 +14,27 @@ import (
 type fakeBroker struct {
 	topics    map[string]map[int][]api.Record
 	committed map[string]api.Offset
+	defaultRF int
+	lastCfg   api.TopicConfig
 }
 
 func newFakeBroker() *fakeBroker {
 	return &fakeBroker{
 		topics:    make(map[string]map[int][]api.Record),
 		committed: make(map[string]api.Offset),
+		defaultRF: 1,
 	}
 }
 
 func (b *fakeBroker) CreateTopic(ctx context.Context, name string, cfg api.TopicConfig) error {
 	_ = ctx
+	if cfg.ReplicationFactor <= 0 {
+		cfg.ReplicationFactor = b.defaultRF
+	}
+	if cfg.Partitions <= 0 {
+		cfg.Partitions = 1
+	}
+	b.lastCfg = cfg
 	if _, ok := b.topics[name]; ok {
 		return nil
 	}
@@ -132,6 +142,7 @@ var (
 
 func TestServerHandlers(t *testing.T) {
 	b := newFakeBroker()
+	b.defaultRF = 2
 	s, err := NewServer("localhost:0", b)
 	if err != nil {
 		t.Fatalf("server: %v", err)
@@ -155,7 +166,7 @@ func TestServerHandlers(t *testing.T) {
 	}
 
 	// CreateTopic
-	ctReq := &CreateTopicRequest{Topic: "a", Partitions: 1, ReplicationFactor: 1}
+	ctReq := &CreateTopicRequest{Topic: "a", Partitions: 1, ReplicationFactor: 3}
 	ctPayload, _ := encodeCreateTopicRequest(ctReq)
 	respPayload, err := send(api.APIKeyCreateTopic, 1, ctPayload)
 	if err != nil {
@@ -164,6 +175,9 @@ func TestServerHandlers(t *testing.T) {
 	ctResp, err := decodeCreateTopicResponse(respPayload)
 	if err != nil || ctResp.Error != api.ErrNone {
 		t.Fatalf("create-topic resp: %v err=%v", ctResp, err)
+	}
+	if b.lastCfg.ReplicationFactor != 3 {
+		t.Fatalf("expected rf 3 forwarded to broker, got %d", b.lastCfg.ReplicationFactor)
 	}
 
 	// Produce
@@ -212,5 +226,20 @@ func TestServerHandlers(t *testing.T) {
 	fcResp, err := decodeFetchCommittedResponse(fcRespPayload)
 	if err != nil || fcResp.Error != api.ErrNone || fcResp.Offset != 1 {
 		t.Fatalf("fetch committed resp: %+v err=%v", fcResp, err)
+	}
+
+	// CreateTopic default RF
+	ctReq2 := &CreateTopicRequest{Topic: "b", Partitions: 1, ReplicationFactor: 0}
+	ctPayload2, _ := encodeCreateTopicRequest(ctReq2)
+	respPayload, err = send(api.APIKeyCreateTopic, 6, ctPayload2)
+	if err != nil {
+		t.Fatalf("create-topic default send: %v", err)
+	}
+	ctResp2, err := decodeCreateTopicResponse(respPayload)
+	if err != nil || ctResp2.Error != api.ErrNone {
+		t.Fatalf("create-topic default resp: %v err=%v", ctResp2, err)
+	}
+	if b.lastCfg.ReplicationFactor != b.defaultRF {
+		t.Fatalf("expected rf fallback %d, got %d", b.defaultRF, b.lastCfg.ReplicationFactor)
 	}
 }

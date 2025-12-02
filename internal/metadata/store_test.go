@@ -194,3 +194,48 @@ func TestAppendAfterRecoveryAppendsToEnd(t *testing.T) {
 		t.Fatalf("missing second topic after append")
 	}
 }
+
+func TestStoreRecoverReplicationFactorGreaterThanOne(t *testing.T) {
+	dir := t.TempDir()
+	cfg := api.BrokerConfig{DataDir: dir}
+	store, err := NewStore(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	ctx := context.Background()
+	ev := CreateTopicEvent{
+		Name:              "rf3",
+		NumPartitions:     1,
+		ReplicationFactor: 3,
+		Partitions: []PartitionSpec{
+			{ID: 0, Replicas: []ReplicaSpec{
+				{BrokerID: 1, Role: api.RoleLeader, LeaderEpoch: 2},
+				{BrokerID: 2, Role: api.RoleFollower, LeaderEpoch: 2},
+				{BrokerID: 3, Role: api.RoleFollower, LeaderEpoch: 2},
+			}},
+		},
+	}
+	if err := store.AppendCreateTopic(ctx, ev); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	store.Close()
+	store, err = NewStore(cfg)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer store.Close()
+	recovered, err := store.RecoverTopics(ctx)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	topic, ok := recovered.Topics["rf3"]
+	if !ok {
+		t.Fatalf("topic not recovered")
+	}
+	if topic.ReplicationFactor != 3 {
+		t.Fatalf("expected rf=3, got %d", topic.ReplicationFactor)
+	}
+	if len(topic.Partitions) != 1 || len(topic.Partitions[0].Replicas) != 3 {
+		t.Fatalf("expected 1 partition with 3 replicas, got %+v", topic.Partitions)
+	}
+}

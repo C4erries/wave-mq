@@ -16,6 +16,10 @@ import (
 )
 
 func setupTestServer(t *testing.T) (*httptest.Server, *broker.Broker, *storage.Manager, *broker.OffsetStore, *metadata.Store) {
+	return setupTestServerWithRF(t, 1)
+}
+
+func setupTestServerWithRF(t *testing.T, rf int) (*httptest.Server, *broker.Broker, *storage.Manager, *broker.OffsetStore, *metadata.Store) {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := storage.NewManager(storage.Config{
@@ -38,7 +42,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *broker.Broker, *storage.M
 	if err != nil {
 		t.Fatalf("recover topics: %v", err)
 	}
-	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 1, ControllerMode: "single", ClusterID: "test-cluster"}
+	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: rf, ControllerMode: "single", ClusterID: "test-cluster"}
 	ctrl, err := controller.NewSingleNodeController(cfg, recovered.Topics)
 	if err != nil {
 		t.Fatalf("controller: %v", err)
@@ -46,7 +50,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *broker.Broker, *storage.M
 	b, err := broker.NewBroker(api.BrokerConfig{
 		BrokerID:          1,
 		DataDir:           dir,
-		ReplicationFactor: 1,
+		ReplicationFactor: rf,
 	}, store, offsetStore, metaStore, ctrl)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
@@ -92,6 +96,77 @@ func TestCreateTopicEndpoint(t *testing.T) {
 	_ = brokerResp.Body.Close()
 	if brokerInfo["controllerMode"] != "single" {
 		t.Fatalf("expected controllerMode single, got %v", brokerInfo["controllerMode"])
+	}
+}
+
+func TestCreateTopicEndpointReplicationFactor(t *testing.T) {
+	server, b, store, offsetStore, metaStore := setupTestServer(t)
+	defer server.Close()
+	defer b.Close()
+	defer store.Close()
+	defer offsetStore.Close()
+	defer metaStore.Close()
+
+	body := []byte(`{"name":"rf-topic","partitions":1,"replicationFactor":3}`)
+	resp, err := http.Post(server.URL+"/api/topics", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+	recovered, err := metaStore.RecoverTopics(context.Background())
+	if err != nil {
+		t.Fatalf("recover topics: %v", err)
+	}
+	topic, ok := recovered.Topics["rf-topic"]
+	if !ok {
+		t.Fatalf("rf-topic not found in metadata")
+	}
+	if topic.ReplicationFactor != 3 {
+		t.Fatalf("expected rf 3, got %d", topic.ReplicationFactor)
+	}
+	if len(topic.Partitions) != 1 || len(topic.Partitions[0].Replicas) != 3 {
+		t.Fatalf("expected 1 partition with 3 replicas, got %+v", topic.Partitions)
+	}
+}
+
+func TestCreateTopicEndpointDefaultsReplicationFactor(t *testing.T) {
+	server, b, store, offsetStore, metaStore := setupTestServerWithRF(t, 2)
+	defer server.Close()
+	defer b.Close()
+	defer store.Close()
+	defer offsetStore.Close()
+	defer metaStore.Close()
+
+	body := []byte(`{"name":"rf-default","partitions":1,"replicationFactor":0}`)
+	resp, err := http.Post(server.URL+"/api/topics", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+	recovered, err := metaStore.RecoverTopics(context.Background())
+	if err != nil {
+		t.Fatalf("recover topics: %v", err)
+	}
+	topic, ok := recovered.Topics["rf-default"]
+	if !ok {
+		t.Fatalf("rf-default not found in metadata")
+	}
+	if topic.ReplicationFactor != 2 {
+		t.Fatalf("expected rf 2 from broker default, got %d", topic.ReplicationFactor)
+	}
+	if len(topic.Partitions) != 1 || len(topic.Partitions[0].Replicas) != 2 {
+		t.Fatalf("expected replicas from default rf, got %+v", topic.Partitions)
+	}
+	for _, r := range topic.Partitions[0].Replicas {
+		if r.BrokerID != 1 {
+			t.Fatalf("expected broker 1 in replicas, got %+v", topic.Partitions[0].Replicas)
+		}
 	}
 }
 

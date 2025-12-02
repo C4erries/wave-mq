@@ -149,6 +149,9 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 	if rf <= 0 {
 		rf = b.cfg.ReplicationFactor
 	}
+	if rf <= 0 {
+		rf = 1
+	}
 	state := metadata.TopicState{
 		Name:              name,
 		NumPartitions:     partitions,
@@ -156,13 +159,21 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 		Partitions:        make([]metadata.PartitionSpec, 0, partitions),
 	}
 	for p := 0; p < partitions; p++ {
-		state.Partitions = append(state.Partitions, metadata.PartitionSpec{
-			ID: int32(p),
-			Replicas: []metadata.ReplicaSpec{{
+		replicas := make([]metadata.ReplicaSpec, 0, rf)
+		for i := 0; i < rf; i++ {
+			role := api.RoleLeader
+			if i > 0 {
+				role = api.RoleFollower
+			}
+			replicas = append(replicas, metadata.ReplicaSpec{
 				BrokerID:    int32(b.cfg.BrokerID),
-				Role:        api.RoleLeader,
+				Role:        role,
 				LeaderEpoch: 0,
-			}},
+			})
+		}
+		state.Partitions = append(state.Partitions, metadata.PartitionSpec{
+			ID:       int32(p),
+			Replicas: replicas,
 		})
 	}
 

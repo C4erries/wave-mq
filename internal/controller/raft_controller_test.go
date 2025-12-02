@@ -35,7 +35,7 @@ func TestRaftControllerAssignTopic(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	meta, err := rc.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 2})
+	meta, err := rc.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 2, ReplicationFactor: 2})
 	if err != nil {
 		t.Fatalf("assign topic: %v", err)
 	}
@@ -48,12 +48,45 @@ func TestRaftControllerAssignTopic(t *testing.T) {
 	leaders := make(map[int]int)
 	for _, p := range meta.Partitions {
 		leaders[p.Leader]++
-		if len(p.Replicas) != 1 || p.Replicas[0] != p.Leader {
+		if len(p.Replicas) != 2 {
 			t.Fatalf("replicas mismatch for %s-%d: %+v", p.Topic, p.Partition, p.Replicas)
+		}
+		seen := map[int]struct{}{}
+		for _, id := range p.Replicas {
+			seen[id] = struct{}{}
+		}
+		if len(seen) != len(p.Replicas) {
+			t.Fatalf("replicas must be unique, got %+v", p.Replicas)
+		}
+		if p.Leader != p.Replicas[0] {
+			t.Fatalf("leader should be first replica, got %d", p.Leader)
 		}
 	}
 	if len(leaders) != 2 {
 		t.Fatalf("expected leaders across 2 brokers, got %+v", leaders)
+	}
+	meta, err = rc.AssignTopic(ctx, "beta", api.TopicConfig{Partitions: 1, ReplicationFactor: 3})
+	if err != nil {
+		t.Fatalf("assign topic beta: %v", err)
+	}
+	if meta.Version != 3 {
+		t.Fatalf("expected version 3 after second assignment, got %d", meta.Version)
+	}
+	found := false
+	for _, p := range meta.Partitions {
+		if p.Topic != "beta" {
+			continue
+		}
+		found = true
+		if len(p.Replicas) != 2 {
+			t.Fatalf("expected replicas truncated to 2 brokers, got %+v", p.Replicas)
+		}
+		if p.Leader != p.Replicas[0] {
+			t.Fatalf("leader should be first replica for beta, got %d", p.Leader)
+		}
+	}
+	if !found {
+		t.Fatalf("beta partition not found in metadata")
 	}
 }
 

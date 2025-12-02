@@ -67,7 +67,11 @@ func (f *raftMetadataFSM) Apply(l *raft.Log) interface{} {
 	defer f.mu.Unlock()
 	switch cmd.Type {
 	case cmdAssignTopic:
-		newParts := assignTopicPartitions(f.cfg, f.meta.Brokers, cmd.Topic, cmd.TopicConfig.Partitions, f.meta.Partitions)
+		partitions := cmd.TopicConfig.Partitions
+		if partitions <= 0 {
+			partitions = 1
+		}
+		newParts := assignTopicPartitions(f.cfg, f.meta.Brokers, cmd.Topic, partitions, cmd.TopicConfig.ReplicationFactor, f.meta.Partitions)
 		f.meta.Partitions = append(f.meta.Partitions, newParts...)
 		f.meta.Version++
 	case cmdReportReplicaProgress:
