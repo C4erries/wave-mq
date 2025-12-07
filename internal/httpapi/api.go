@@ -203,8 +203,21 @@ func (h *Handler) partitionMessages(w http.ResponseWriter, r *http.Request, topi
 	offsetParam := q.Get("offset")
 	_, msgs, err := h.b.FetchMessages(r.Context(), topic, partition, offsetParam, limit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		var nle broker.NotLeaderError
+		switch {
+		case errors.As(err, &nle):
+			w.WriteHeader(http.StatusConflict)
+			writeJSON(w, map[string]interface{}{
+				"error":          "not_leader",
+				"leaderBrokerID": nle.Leader,
+				"topic":          topic,
+				"partition":      partition,
+			})
+			return
+		default:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	var resp []map[string]interface{}
 	for _, m := range msgs {
@@ -298,6 +311,17 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 	base, err := h.b.Produce(r.Context(), topic, partition, []api.Record{rec})
 	if err != nil {
 		switch {
+		case errors.As(err, &broker.NotLeaderError{}):
+			var nle broker.NotLeaderError
+			_ = errors.As(err, &nle)
+			w.WriteHeader(http.StatusConflict)
+			writeJSON(w, map[string]interface{}{
+				"error":          "not_leader",
+				"leaderBrokerID": nle.Leader,
+				"topic":          topic,
+				"partition":      partition,
+			})
+			return
 		case errors.Is(err, broker.ErrTopicNotFound), errors.Is(err, broker.ErrPartitionNotFound):
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c4erries/wave-mq/internal/broker"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
 
@@ -16,6 +17,7 @@ type fakeBroker struct {
 	committed map[string]api.Offset
 	defaultRF int
 	lastCfg   api.TopicConfig
+	notLeader map[string]struct{}
 }
 
 func newFakeBroker() *fakeBroker {
@@ -23,6 +25,7 @@ func newFakeBroker() *fakeBroker {
 		topics:    make(map[string]map[int][]api.Record),
 		committed: make(map[string]api.Offset),
 		defaultRF: 1,
+		notLeader: make(map[string]struct{}),
 	}
 }
 
@@ -48,6 +51,9 @@ func (b *fakeBroker) CreateTopic(ctx context.Context, name string, cfg api.Topic
 
 func (b *fakeBroker) Produce(ctx context.Context, topic string, partition int, records []api.Record) (api.Offset, error) {
 	_ = ctx
+	if _, ok := b.notLeader[fmt.Sprintf("%s:%d", topic, partition)]; ok {
+		return -1, broker.NotLeaderError{Topic: topic, Partition: partition, Leader: 99}
+	}
 	t, ok := b.topics[topic]
 	if !ok {
 		return -1, errTopicNotFound
@@ -70,6 +76,9 @@ func (b *fakeBroker) Produce(ctx context.Context, topic string, partition int, r
 
 func (b *fakeBroker) Fetch(ctx context.Context, topic string, partition int, offset api.Offset, maxBytes int32) ([]api.Record, error) {
 	_ = ctx
+	if _, ok := b.notLeader[fmt.Sprintf("%s:%d", topic, partition)]; ok {
+		return nil, broker.NotLeaderError{Topic: topic, Partition: partition, Leader: 99}
+	}
 	t, ok := b.topics[topic]
 	if !ok {
 		return nil, errTopicNotFound
@@ -228,10 +237,31 @@ func TestServerHandlers(t *testing.T) {
 		t.Fatalf("fetch committed resp: %+v err=%v", fcResp, err)
 	}
 
+	// NotLeader handling
+	b.notLeader["a:0"] = struct{}{}
+	pPayload2, _ := encodeProduceRequest(&ProduceRequest{Topic: "a", Partition: 0, Records: []api.Record{{Value: []byte("v2")}}})
+	notLeaderPayload, err := send(api.APIKeyProduce, 6, pPayload2)
+	if err != nil {
+		t.Fatalf("produce notleader send: %v", err)
+	}
+	pResp2, err := decodeProduceResponse(notLeaderPayload)
+	if err != nil || pResp2.Error != api.ErrNotLeader {
+		t.Fatalf("expected not leader error, got %+v err=%v", pResp2, err)
+	}
+	fetchPayload, _ := encodeFetchRequest(&FetchRequest{Topic: "a", Partition: 0, Offset: 0, MaxBytes: 0})
+	notLeaderFetchPayload, err := send(api.APIKeyFetch, 7, fetchPayload)
+	if err != nil {
+		t.Fatalf("fetch notleader send: %v", err)
+	}
+	fResp2, err := decodeFetchResponse(notLeaderFetchPayload)
+	if err != nil || fResp2.Error != api.ErrNotLeader {
+		t.Fatalf("expected fetch not leader error, got %+v err=%v", fResp2, err)
+	}
+
 	// CreateTopic default RF
 	ctReq2 := &CreateTopicRequest{Topic: "b", Partitions: 1, ReplicationFactor: 0}
 	ctPayload2, _ := encodeCreateTopicRequest(ctReq2)
-	respPayload, err = send(api.APIKeyCreateTopic, 6, ctPayload2)
+	respPayload, err = send(api.APIKeyCreateTopic, 8, ctPayload2)
 	if err != nil {
 		t.Fatalf("create-topic default send: %v", err)
 	}

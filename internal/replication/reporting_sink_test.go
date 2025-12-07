@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"github.com/c4erries/wave-mq/internal/storage"
+	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/pkg/api"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 type fakeController struct {
@@ -50,6 +52,8 @@ func (f *fakeController) RegisterBroker(ctx context.Context, info api.BrokerInfo
 }
 
 func TestReportingSinkReportsProgress(t *testing.T) {
+	observability.ReplicationApplied.Reset()
+	observability.ReplicationLag.Reset()
 	dir := t.TempDir()
 	store, err := storage.NewManager(storage.Config{DataDir: dir})
 	if err != nil {
@@ -74,4 +78,13 @@ func TestReportingSinkReportsProgress(t *testing.T) {
 	}
 	log, _ := store.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
 	_ = log.Close()
+
+	applied := testutil.ToFloat64(observability.ReplicationApplied.WithLabelValues("alpha", "0", "2"))
+	if applied != 1 {
+		t.Fatalf("expected applied counter 1, got %f", applied)
+	}
+	lag := testutil.ToFloat64(observability.ReplicationLag.WithLabelValues("alpha", "0", "2"))
+	if lag != 5 {
+		t.Fatalf("expected lag 5, got %f", lag)
+	}
 }

@@ -272,6 +272,10 @@ func mapError(err error) api.ErrorCode {
 		return api.ErrPartitionNotFound
 	case errors.Is(err, broker.ErrTopicExists):
 		return api.ErrTopicExists
+	case errors.Is(err, broker.ErrNotLeader):
+		return api.ErrNotLeader
+	case errors.As(err, &broker.NotLeaderError{}):
+		return api.ErrNotLeader
 	default:
 		return api.ErrInternal
 	}

@@ -61,6 +61,180 @@ func setupTestServerWithRF(t *testing.T, rf int) (*httptest.Server, *broker.Brok
 	return httptest.NewServer(mux), b, store, offsetStore, metaStore
 }
 
+type followerCtrl struct {
+	meta api.ClusterMetadata
+}
+
+func (f *followerCtrl) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
+	return f.meta, nil
+}
+func (f *followerCtrl) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
+	ch := make(chan api.ClusterMetadata, 1)
+	ch <- f.meta
+	close(ch)
+	return ch, nil
+}
+func (f *followerCtrl) RegisterBroker(ctx context.Context, info api.BrokerInfo) error { return nil }
+func (f *followerCtrl) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
+	return f.meta, nil
+}
+func (f *followerCtrl) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+	return f.meta, nil
+}
+
+func TestHTTPProduceNotLeader(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1 << 20,
+		IndexInterval:   1,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	offsetStore, err := broker.NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
+	ev := metadata.CreateTopicEvent{
+		Name:              "alpha",
+		NumPartitions:     1,
+		ReplicationFactor: 2,
+		Partitions: []metadata.PartitionSpec{
+			{ID: 0, Replicas: []metadata.ReplicaSpec{
+				{BrokerID: 1, Role: api.RoleFollower, LeaderEpoch: 0},
+				{BrokerID: 2, Role: api.RoleLeader, LeaderEpoch: 0},
+			}},
+		},
+	}
+	if err := metaStore.AppendCreateTopic(context.Background(), ev); err != nil {
+		t.Fatalf("append create topic: %v", err)
+	}
+	meta := api.ClusterMetadata{
+		Brokers: []api.BrokerInfo{
+			{BrokerID: 1, Host: "b1"},
+			{BrokerID: 2, Host: "b2"},
+		},
+		Partitions: []api.PartitionAssignment{
+			{Topic: "alpha", Partition: 0, Replicas: []int{1, 2}, Leader: 2, ISR: []int{2}},
+		},
+	}
+	ctrl := &followerCtrl{meta: meta}
+	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 2, ControllerMode: "raft"}
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+	handler := New(b, cfg, ctrl)
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer func() {
+		server.Close()
+		b.Close()
+		store.Close()
+		offsetStore.Close()
+		metaStore.Close()
+	}()
+
+	body := []byte(`{"value":"hello"}`)
+	resp, err := http.Post(server.URL+"/api/topics/alpha/partitions/0/messages", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+	var out map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out["error"] != "not_leader" || int(out["leaderBrokerID"].(float64)) != 2 {
+		t.Fatalf("unexpected response: %+v", out)
+	}
+}
+
+func TestHTTPFetchNotLeader(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1 << 20,
+		IndexInterval:   1,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	offsetStore, err := broker.NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
+	ev := metadata.CreateTopicEvent{
+		Name:              "alpha",
+		NumPartitions:     1,
+		ReplicationFactor: 2,
+		Partitions: []metadata.PartitionSpec{
+			{ID: 0, Replicas: []metadata.ReplicaSpec{
+				{BrokerID: 1, Role: api.RoleFollower, LeaderEpoch: 0},
+				{BrokerID: 2, Role: api.RoleLeader, LeaderEpoch: 0},
+			}},
+		},
+	}
+	if err := metaStore.AppendCreateTopic(context.Background(), ev); err != nil {
+		t.Fatalf("append create topic: %v", err)
+	}
+	meta := api.ClusterMetadata{
+		Brokers: []api.BrokerInfo{
+			{BrokerID: 1, Host: "b1"},
+			{BrokerID: 2, Host: "b2"},
+		},
+		Partitions: []api.PartitionAssignment{
+			{Topic: "alpha", Partition: 0, Replicas: []int{1, 2}, Leader: 2, ISR: []int{2}},
+		},
+	}
+	ctrl := &followerCtrl{meta: meta}
+	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 2, ControllerMode: "raft"}
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+	handler := New(b, cfg, ctrl)
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer func() {
+		server.Close()
+		b.Close()
+		store.Close()
+		offsetStore.Close()
+		metaStore.Close()
+	}()
+
+	resp, err := http.Get(server.URL + "/api/topics/alpha/partitions/0/messages")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+	var out map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out["error"] != "not_leader" || int(out["leaderBrokerID"].(float64)) != 2 {
+		t.Fatalf("unexpected response: %+v", out)
+	}
+}
+
 func TestCreateTopicEndpoint(t *testing.T) {
 	server, b, store, offsetStore, metaStore := setupTestServer(t)
 	defer server.Close()

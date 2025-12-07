@@ -45,6 +45,22 @@ var (
 		},
 		[]string{"topic", "partition"},
 	)
+	ReplicationLag = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "wavemq",
+			Name:      "replication_lag_offsets",
+			Help:      "Follower replication lag in offsets (leader high watermark - last applied).",
+		},
+		[]string{"topic", "partition", "broker"},
+	)
+	ReplicationApplied = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "wavemq",
+			Name:      "replication_applied_total",
+			Help:      "Total number of records applied on follower replication.",
+		},
+		[]string{"topic", "partition", "broker"},
+	)
 )
 
 func init() {
@@ -54,5 +70,7 @@ func init() {
 		RequestErrors,
 		ProduceLatency,
 		FetchLatency,
+		ReplicationLag,
+		ReplicationApplied,
 	)
 }

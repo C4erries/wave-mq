@@ -25,7 +25,26 @@ var (
 	ErrTopicExists       = errors.New("topic already exists")
 	ErrTopicNotFound     = errors.New("topic not found")
 	ErrPartitionNotFound = errors.New("partition not found")
+	ErrNotLeader         = errors.New("not leader for partition")
 )
+
+// NotLeaderError conveys leader info to callers when hitting a follower.
+type NotLeaderError struct {
+	Topic     string
+	Partition int
+	Leader    int
+}
+
+func (e NotLeaderError) Error() string {
+	if e.Leader != 0 {
+		return fmt.Sprintf("not leader for %s/%d, leader=%d", e.Topic, e.Partition, e.Leader)
+	}
+	return fmt.Sprintf("not leader for %s/%d", e.Topic, e.Partition)
+}
+
+func (e NotLeaderError) Is(target error) bool {
+	return target == ErrNotLeader
+}
 
 // Broker owns topics, partitions, consumer groups and access to local storage.
 type Broker struct {
@@ -359,6 +378,11 @@ func (b *Broker) Produce(ctx context.Context, topic string, partition int, recor
 		observability.RequestErrors.WithLabelValues("broker", "produce").Inc()
 		return -1, fmt.Errorf("%w", ErrPartitionNotFound)
 	}
+	if b.isClustered() && p.Metadata.Replica.Role != api.RoleLeader {
+		leader := b.leaderFor(topic, partition)
+		observability.RequestErrors.WithLabelValues("broker", "produce").Inc()
+		return -1, NotLeaderError{Topic: topic, Partition: partition, Leader: leader}
+	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -406,6 +430,11 @@ func (b *Broker) Fetch(ctx context.Context, topic string, partition int, offset 
 	if !ok {
 		observability.RequestErrors.WithLabelValues("broker", "fetch").Inc()
 		return nil, fmt.Errorf("%w", ErrPartitionNotFound)
+	}
+	if b.isClustered() && p.Metadata.Replica.Role != api.RoleLeader {
+		leader := b.leaderFor(topic, partition)
+		observability.RequestErrors.WithLabelValues("broker", "fetch").Inc()
+		return nil, NotLeaderError{Topic: topic, Partition: partition, Leader: leader}
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -523,6 +552,9 @@ func (b *Broker) Metadata(ctx context.Context, topics []string) ([]api.Partition
 			}
 		}
 		for _, p := range topic.Partitions {
+			if b.isClustered() && p.Metadata.Replica.Role != api.RoleLeader {
+				continue
+			}
 			p.mu.RLock()
 			meta := p.Metadata
 			meta.StartOffset = p.Log.StartOffset()
@@ -567,14 +599,43 @@ func (b *Broker) snapshotOffsetsLocked() map[string]map[string]map[int]api.Offse
 	return out
 }
 
+func (b *Broker) leaderFor(topic string, partition int) int {
+	if b.cluster == nil {
+		return 0
+	}
+	meta, err := b.cluster.GetClusterMetadata(context.Background())
+	if err != nil {
+		return 0
+	}
+	for _, p := range meta.Partitions {
+		if p.Topic == topic && p.Partition == partition {
+			return p.Leader
+		}
+	}
+	return 0
+}
+
+func (b *Broker) isClustered() bool {
+	return b.cluster != nil
+}
+
 // TopicAndPartitionCounts returns counts for summary.
 func (b *Broker) TopicAndPartitionCounts() (int, int) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	topics := len(b.topics)
+	topics := 0
 	partitions := 0
 	for _, t := range b.topics {
-		partitions += len(t.Partitions)
+		leaderParts := 0
+		for _, p := range t.Partitions {
+			if !b.isClustered() || p.Metadata.Replica.Role == api.RoleLeader {
+				leaderParts++
+			}
+		}
+		if leaderParts > 0 || !b.isClustered() {
+			topics++
+		}
+		partitions += leaderParts
 	}
 	return topics, partitions
 }
@@ -624,6 +685,7 @@ type PartitionInfo struct {
 	Leader        int        `json:"leader"`
 	HighWatermark api.Offset `json:"highWatermark"`
 	StartOffset   api.Offset `json:"startOffset"`
+	Replicas      []int      `json:"replicas"`
 }
 
 type TopicDetail struct {
@@ -638,9 +700,18 @@ func (b *Broker) TopicsSnapshot() []TopicSummary {
 	defer b.mu.RUnlock()
 	var res []TopicSummary
 	for _, t := range b.topics {
+		leaderParts := 0
+		for _, p := range t.Partitions {
+			if !b.isClustered() || p.Metadata.Replica.Role == api.RoleLeader {
+				leaderParts++
+			}
+		}
+		if b.isClustered() && leaderParts == 0 {
+			continue
+		}
 		res = append(res, TopicSummary{
 			Name:              t.Name,
-			Partitions:        len(t.Partitions),
+			Partitions:        leaderParts,
 			ReplicationFactor: t.ReplicationFactor,
 		})
 	}
@@ -648,6 +719,7 @@ func (b *Broker) TopicsSnapshot() []TopicSummary {
 }
 
 func (b *Broker) TopicDetail(name string) (TopicDetail, bool) {
+	assignments := b.partitionAssignments(name)
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	t, ok := b.topics[name]
@@ -656,22 +728,48 @@ func (b *Broker) TopicDetail(name string) (TopicDetail, bool) {
 	}
 	var parts []PartitionInfo
 	for pid, p := range t.Partitions {
+		if b.isClustered() && p.Metadata.Replica.Role != api.RoleLeader {
+			continue
+		}
 		p.mu.RLock()
 		info := PartitionInfo{
 			ID:            pid,
 			Leader:        p.Metadata.Replica.BrokerID,
 			HighWatermark: p.Log.HighWatermark(),
 			StartOffset:   p.Log.StartOffset(),
+			Replicas:      []int{p.Metadata.Replica.BrokerID},
+		}
+		if assign, ok := assignments[pid]; ok && len(assign.Replicas) > 0 {
+			info.Leader = assign.Leader
+			info.Replicas = append([]int(nil), assign.Replicas...)
 		}
 		p.mu.RUnlock()
 		parts = append(parts, info)
 	}
 	return TopicDetail{
 		Name:              t.Name,
-		PartitionCount:    len(t.Partitions),
+		PartitionCount:    len(parts),
 		ReplicationFactor: t.ReplicationFactor,
 		Partitions:        parts,
 	}, true
+}
+
+func (b *Broker) partitionAssignments(topic string) map[int]api.PartitionAssignment {
+	if b.cluster == nil {
+		return nil
+	}
+	meta, err := b.cluster.GetClusterMetadata(context.Background())
+	if err != nil {
+		return nil
+	}
+	assignments := make(map[int]api.PartitionAssignment)
+	for _, p := range meta.Partitions {
+		if p.Topic != topic {
+			continue
+		}
+		assignments[p.Partition] = p
+	}
+	return assignments
 }
 
 // FetchMessages fetches up to limit messages ending at offset (if provided) from a partition.
