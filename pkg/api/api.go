@@ -55,10 +55,16 @@ type PartitionReplica struct {
 }
 
 // PartitionMetadata captures per-partition state that is exposed to clients.
+// Leader/Replicas/ISR describe the cluster view for routing, while Replica
+// describes the local replica (leader or follower) owned by the responding
+// broker.
 type PartitionMetadata struct {
 	Replica       PartitionReplica
 	StartOffset   Offset
 	HighWatermark Offset
+	Leader        int
+	Replicas      []int
+	ISR           []int
 }
 
 // BrokerInfo describes a broker in the cluster.

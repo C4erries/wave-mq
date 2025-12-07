@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/c4erries/wave-mq/pkg/api"
@@ -75,6 +76,9 @@ func (p *PartitionReplicator) Run(ctx context.Context) error {
 		})
 		if err != nil {
 			return err
+		}
+		if fetchResp.Error != api.ErrNone {
+			return fmt.Errorf("fetch error: %v", fetchResp.Error)
 		}
 		if len(fetchResp.Records) == 0 {
 			if p.Interval > 0 {

@@ -308,6 +308,20 @@ func (b *Broker) loadTopicLocked(ctx context.Context, state metadata.TopicState,
 			}
 			replica.BrokerID = int32(b.cfg.BrokerID)
 		}
+		leader := int(replica.BrokerID)
+		replicas := []int{int(replica.BrokerID)}
+		isr := []int{int(replica.BrokerID)}
+		if assignments != nil {
+			if assign.Leader != 0 {
+				leader = assign.Leader
+			}
+			if len(assign.Replicas) > 0 {
+				replicas = append([]int(nil), assign.Replicas...)
+			}
+			if len(assign.ISR) > 0 {
+				isr = append([]int(nil), assign.ISR...)
+			}
+		}
 		meta := api.PartitionMetadata{
 			Replica: api.PartitionReplica{
 				Topic:       state.Name,
@@ -318,6 +332,9 @@ func (b *Broker) loadTopicLocked(ctx context.Context, state metadata.TopicState,
 			},
 			StartOffset:   log.StartOffset(),
 			HighWatermark: log.HighWatermark(),
+			Leader:        leader,
+			Replicas:      replicas,
+			ISR:           isr,
 		}
 		topic.Partitions[int(ps.ID)] = &Partition{
 			Metadata: meta,
@@ -536,7 +553,10 @@ func (b *Broker) FetchCommitted(ctx context.Context, group string, topic string,
 
 // Metadata exposes the current topic/partition layout.
 func (b *Broker) Metadata(ctx context.Context, topics []string) ([]api.PartitionMetadata, error) {
-	_ = ctx
+	assignments, err := b.clusterAssignments(ctx)
+	if err != nil {
+		return nil, err
+	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	var res []api.PartitionMetadata
@@ -551,16 +571,45 @@ func (b *Broker) Metadata(ctx context.Context, topics []string) ([]api.Partition
 				continue
 			}
 		}
-		for _, p := range topic.Partitions {
-			if b.isClustered() && p.Metadata.Replica.Role != api.RoleLeader {
-				continue
+		topicAssignments := assignments[name]
+		for pid, p := range topic.Partitions {
+			assign, hasAssign := topicAssignments[pid]
+			// Missing assignments fallback to local view; otherwise include follower metadata too for routing.
+			role := p.Metadata.Replica.Role
+			leader := int(p.Metadata.Replica.BrokerID)
+			replicas := []int{b.cfg.BrokerID}
+			isr := []int{b.cfg.BrokerID}
+			epoch := p.Metadata.Replica.LeaderEpoch
+			if hasAssign {
+				leader = assign.Leader
+				replicas = append([]int(nil), assign.Replicas...)
+				isr = append([]int(nil), assign.ISR...)
+				if assign.Leader == b.cfg.BrokerID {
+					role = api.RoleLeader
+				} else {
+					role = api.RoleFollower
+				}
+				if assign.LeaderEpoch != 0 {
+					epoch = assign.LeaderEpoch
+				}
 			}
 			p.mu.RLock()
-			meta := p.Metadata
-			meta.StartOffset = p.Log.StartOffset()
-			meta.HighWatermark = p.Log.HighWatermark()
-			res = append(res, meta)
+			meta := api.PartitionMetadata{
+				Replica: api.PartitionReplica{
+					Topic:       name,
+					Partition:   pid,
+					BrokerID:    b.cfg.BrokerID,
+					Role:        role,
+					LeaderEpoch: epoch,
+				},
+				StartOffset:   p.Log.StartOffset(),
+				HighWatermark: p.Log.HighWatermark(),
+				Leader:        leader,
+				Replicas:      replicas,
+				ISR:           isr,
+			}
 			p.mu.RUnlock()
+			res = append(res, meta)
 		}
 	}
 	// Missing topics are ignored intentionally to allow partial metadata fetch.
@@ -615,19 +664,46 @@ func (b *Broker) leaderFor(topic string, partition int) int {
 	return 0
 }
 
+func (b *Broker) clusterAssignments(ctx context.Context) (map[string]map[int]api.PartitionAssignment, error) {
+	if b.cluster == nil {
+		return nil, nil
+	}
+	meta, err := b.cluster.GetClusterMetadata(ctx)
+	if err != nil {
+		return nil, err
+	}
+	assignments := make(map[string]map[int]api.PartitionAssignment)
+	for _, p := range meta.Partitions {
+		if _, ok := assignments[p.Topic]; !ok {
+			assignments[p.Topic] = make(map[int]api.PartitionAssignment)
+		}
+		assignments[p.Topic][p.Partition] = p
+	}
+	return assignments, nil
+}
+
 func (b *Broker) isClustered() bool {
 	return b.cluster != nil
 }
 
 // TopicAndPartitionCounts returns counts for summary.
 func (b *Broker) TopicAndPartitionCounts() (int, int) {
+	assignments, _ := b.clusterAssignments(context.Background())
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	topics := 0
 	partitions := 0
 	for _, t := range b.topics {
 		leaderParts := 0
-		for _, p := range t.Partitions {
+		topicAssignments := assignments[t.Name]
+		for pid, p := range t.Partitions {
+			if topicAssignments != nil {
+				if assign, ok := topicAssignments[pid]; ok {
+					if assign.Leader != b.cfg.BrokerID {
+						continue
+					}
+				}
+			}
 			if !b.isClustered() || p.Metadata.Replica.Role == api.RoleLeader {
 				leaderParts++
 			}
@@ -696,12 +772,19 @@ type TopicDetail struct {
 }
 
 func (b *Broker) TopicsSnapshot() []TopicSummary {
+	assignments, _ := b.clusterAssignments(context.Background())
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	var res []TopicSummary
 	for _, t := range b.topics {
 		leaderParts := 0
-		for _, p := range t.Partitions {
+		topicAssignments := assignments[t.Name]
+		for pid, p := range t.Partitions {
+			if topicAssignments != nil {
+				if assign, ok := topicAssignments[pid]; ok && assign.Leader != b.cfg.BrokerID {
+					continue
+				}
+			}
 			if !b.isClustered() || p.Metadata.Replica.Role == api.RoleLeader {
 				leaderParts++
 			}
@@ -728,8 +811,14 @@ func (b *Broker) TopicDetail(name string) (TopicDetail, bool) {
 	}
 	var parts []PartitionInfo
 	for pid, p := range t.Partitions {
-		if b.isClustered() && p.Metadata.Replica.Role != api.RoleLeader {
-			continue
+		assign, hasAssign := assignments[pid]
+		if b.isClustered() {
+			if hasAssign && assign.Leader != b.cfg.BrokerID {
+				continue
+			}
+			if !hasAssign && p.Metadata.Replica.Role != api.RoleLeader {
+				continue
+			}
 		}
 		p.mu.RLock()
 		info := PartitionInfo{
@@ -739,7 +828,7 @@ func (b *Broker) TopicDetail(name string) (TopicDetail, bool) {
 			StartOffset:   p.Log.StartOffset(),
 			Replicas:      []int{p.Metadata.Replica.BrokerID},
 		}
-		if assign, ok := assignments[pid]; ok && len(assign.Replicas) > 0 {
+		if hasAssign && len(assign.Replicas) > 0 {
 			info.Leader = assign.Leader
 			info.Replicas = append([]int(nil), assign.Replicas...)
 		}
@@ -755,21 +844,11 @@ func (b *Broker) TopicDetail(name string) (TopicDetail, bool) {
 }
 
 func (b *Broker) partitionAssignments(topic string) map[int]api.PartitionAssignment {
-	if b.cluster == nil {
-		return nil
-	}
-	meta, err := b.cluster.GetClusterMetadata(context.Background())
+	assignments, err := b.clusterAssignments(context.Background())
 	if err != nil {
 		return nil
 	}
-	assignments := make(map[int]api.PartitionAssignment)
-	for _, p := range meta.Partitions {
-		if p.Topic != topic {
-			continue
-		}
-		assignments[p.Partition] = p
-	}
-	return assignments
+	return assignments[topic]
 }
 
 // FetchMessages fetches up to limit messages ending at offset (if provided) from a partition.

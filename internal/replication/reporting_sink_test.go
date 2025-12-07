@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/internal/observability"
+	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
@@ -51,6 +51,21 @@ func (f *fakeController) RegisterBroker(ctx context.Context, info api.BrokerInfo
 	return nil
 }
 
+type stubSink struct {
+	last api.Offset
+}
+
+func (s *stubSink) ApplyBatch(ctx context.Context, records []api.Record, highWatermark api.Offset) (api.Offset, error) {
+	_ = ctx
+	_ = records
+	_ = highWatermark
+	return s.last, nil
+}
+
+func (s *stubSink) NextOffset() (api.Offset, error) {
+	return s.last + 1, nil
+}
+
 func TestReportingSinkReportsProgress(t *testing.T) {
 	observability.ReplicationApplied.Reset()
 	observability.ReplicationLag.Reset()
@@ -86,5 +101,26 @@ func TestReportingSinkReportsProgress(t *testing.T) {
 	lag := testutil.ToFloat64(observability.ReplicationLag.WithLabelValues("alpha", "0", "2"))
 	if lag != 5 {
 		t.Fatalf("expected lag 5, got %f", lag)
+	}
+}
+
+func TestReportingSinkUpdatesLagWithoutRecords(t *testing.T) {
+	observability.ReplicationApplied.Reset()
+	observability.ReplicationLag.Reset()
+	sink := NewReportingSink(&stubSink{last: 2}, nil, "beta", 1, 3)
+	last, err := sink.ApplyBatch(context.Background(), nil, 7)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if last != 2 {
+		t.Fatalf("unexpected last offset %d", last)
+	}
+	lag := testutil.ToFloat64(observability.ReplicationLag.WithLabelValues("beta", "1", "3"))
+	if lag != 5 {
+		t.Fatalf("expected lag 5, got %f", lag)
+	}
+	applied := testutil.ToFloat64(observability.ReplicationApplied.WithLabelValues("beta", "1", "3"))
+	if applied != 0 {
+		t.Fatalf("expected no applied records, got %f", applied)
 	}
 }

@@ -68,6 +68,7 @@ func (r *BinaryReplicator) FetchFromLeader(ctx context.Context, leader api.Broke
 	if err != nil {
 		return resp, err
 	}
+	resp.Error = fr.Error
 	if fr.Error != api.ErrNone {
 		return resp, fmt.Errorf("leader returned %d", fr.Error)
 	}

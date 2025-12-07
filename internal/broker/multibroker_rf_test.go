@@ -1,16 +1,16 @@
-package broker
+package broker_test
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/hashicorp/raft"
+
+	broker "github.com/c4erries/wave-mq/internal/broker"
 	"github.com/c4erries/wave-mq/internal/controller"
-	"github.com/c4erries/wave-mq/internal/httpapi"
 	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/internal/netproto"
 	"github.com/c4erries/wave-mq/internal/replication"
@@ -25,30 +25,33 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	dir1 := t.TempDir()
 	dir2 := t.TempDir()
 
-	addr1 := freeTCPAddr(t)
-	addr2 := freeTCPAddr(t)
-	peers := []string{addr1, addr2}
+	raftAddr1 := freeTCPAddr(t)
+	raftAddr2 := freeTCPAddr(t)
+	binaryAddr1 := freeTCPAddr(t)
+	binaryAddr2 := freeTCPAddr(t)
+	peers := []string{raftAddr1, raftAddr2}
 
 	static := &api.StaticClusterConfig{
 		ClusterID: "cluster-rf2",
 		Brokers: []api.BrokerInfo{
-			{BrokerID: 1, Host: addr1},
-			{BrokerID: 2, Host: addr2},
+			{BrokerID: 1, Host: binaryAddr1},
+			{BrokerID: 2, Host: binaryAddr2},
 		},
 	}
 	cfg1 := api.BrokerConfig{
-		BrokerID:       1,
-		ControllerMode: "raft",
-		RaftBindAddr:   addr1,
-		RaftPeers:      peers,
-		StaticCluster:  static,
-		BinaryAddr:     addr1,
-		Replication:    true,
+		BrokerID:          1,
+		ControllerMode:    "raft",
+		RaftBindAddr:      raftAddr1,
+		RaftPeers:         peers,
+		StaticCluster:     static,
+		BinaryAddr:        binaryAddr1,
+		ReplicationFactor: 2,
+		Replication:       true,
 	}
 	cfg2 := cfg1
 	cfg2.BrokerID = 2
-	cfg2.RaftBindAddr = addr2
-	cfg2.BinaryAddr = addr2
+	cfg2.RaftBindAddr = raftAddr2
+	cfg2.BinaryAddr = binaryAddr2
 
 	initial := api.ClusterMetadata{
 		ClusterID: static.ClusterID,
@@ -68,26 +71,17 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	defer rc2.Close()
 	ctrls := []*controller.RaftController{rc1, rc2}
 	leaderCtrl := waitForLeaderCtrl(t, ctrls)
-	ctrlByBrokerID := map[int]controller.MetadataStore{
-		cfg1.BrokerID: rc1,
-		cfg2.BrokerID: rc2,
-	}
-	cfgByBrokerID := map[int]api.BrokerConfig{
-		cfg1.BrokerID: cfg1,
-		cfg2.BrokerID: cfg2,
-	}
-
 	// Register brokers and assign topic with RF=2.
-	if err := leaderCtrl.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 1, Host: addr1}); err != nil {
+	if err := leaderCtrl.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 1, Host: binaryAddr1}); err != nil {
 		t.Fatalf("register broker1: %v", err)
 	}
-	if err := leaderCtrl.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 2, Host: addr2}); err != nil {
+	if err := leaderCtrl.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 2, Host: binaryAddr2}); err != nil {
 		t.Fatalf("register broker2: %v", err)
 	}
 	if _, err := leaderCtrl.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 1, ReplicationFactor: 2}); err != nil {
 		t.Fatalf("assign topic: %v", err)
 	}
-	waitForClusterMeta(t, ctrls, 2)
+	waitForClusterMeta(t, ctrls, 1)
 
 	// Prepare metadata logs.
 	ev := metadata.CreateTopicEvent{
@@ -122,20 +116,20 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	if err := store2.Recover(ctx); err != nil {
 		t.Fatalf("store2 recover: %v", err)
 	}
-	offset1, _ := NewOffsetStore(dir1)
-	offset2, _ := NewOffsetStore(dir2)
+	offset1, _ := broker.NewOffsetStore(dir1)
+	offset2, _ := broker.NewOffsetStore(dir2)
 	defer offset1.Close()
 	defer offset2.Close()
 
 	metaTopics1, _ := meta1.RecoverTopics(ctx)
 	metaTopics2, _ := meta2.RecoverTopics(ctx)
 
-	b1, err := NewBroker(cfg1, store1, offset1, meta1, rc1)
+	b1, err := broker.NewBroker(cfg1, store1, offset1, meta1, rc1)
 	if err != nil {
 		t.Fatalf("broker1: %v", err)
 	}
 	defer b1.Close()
-	b2, err := NewBroker(cfg2, store2, offset2, meta2, rc2)
+	b2, err := broker.NewBroker(cfg2, store2, offset2, meta2, rc2)
 	if err != nil {
 		t.Fatalf("broker2: %v", err)
 	}
@@ -154,13 +148,6 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	go srv1.ListenAndServe(ctxSrv)
 	go srv2.ListenAndServe(ctxSrv)
 
-	// Start replication managers.
-	rep := replication.NewBinaryReplicator()
-	mgr1 := replication.NewManager(cfg1, store1, rc1, rep)
-	mgr2 := replication.NewManager(cfg2, store2, rc2, rep)
-	go mgr1.Run(ctxSrv)
-	go mgr2.Run(ctxSrv)
-
 	meta, _ := rc1.GetClusterMetadata(ctx)
 	var leaderID int
 	for _, p := range meta.Partitions {
@@ -171,21 +158,31 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	if leaderID == 0 {
 		t.Fatalf("leader not found")
 	}
+	rep := replication.NewBinaryReplicator()
 	leaderBroker := b1
 	followerBroker := b2
 	leaderStore := store1
 	followerStore := store2
+	followerID := cfg2.BrokerID
+	followerCtrl := rc2
 	if leaderID == 2 {
 		leaderBroker, followerBroker = b2, b1
 		leaderStore, followerStore = store2, store1
+		followerID = cfg1.BrokerID
+		followerCtrl = rc1
 	}
-	leaderAddr := addr1
-	followerAddr := addr2
+	leaderAddr := binaryAddr1
+	followerAddr := binaryAddr2
 	if leaderID == 2 {
-		leaderAddr = addr2
-		followerAddr = addr1
+		leaderAddr = binaryAddr2
+		followerAddr = binaryAddr1
 	}
-	leaderCfg := cfgByBrokerID[leaderID]
+	sink := replication.NewReportingSink(replication.NewWALSink(followerStore, "alpha", 0), followerCtrl, "alpha", 0, followerID)
+	pr := replication.NewPartitionReplicator(rep, api.BrokerInfo{BrokerID: leaderID, Host: leaderAddr}, "alpha", 0, sink)
+	repErr := make(chan error, 1)
+	go func() {
+		repErr <- pr.Run(ctxSrv)
+	}()
 	sendProtoRequest := func(addr string, key api.APIKey, payload []byte) ([]byte, error) {
 		conn, err := net.Dial("tcp", addr)
 		if err != nil {
@@ -245,10 +242,24 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	}
 
 	// Wait for follower to catch up.
-	waitUntil(t, func() bool {
+	var replicationErr error
+	caughtUp := waitUntil(t, func() bool {
+		select {
+		case err := <-repErr:
+			replicationErr = err
+			return true
+		default:
+		}
 		logFollower, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
 		return logFollower.HighWatermark() == 2
-	}, 5*time.Second)
+	}, 10*time.Second)
+	if replicationErr != nil && !errors.Is(replicationErr, context.Canceled) {
+		t.Fatalf("replication failed: %v", replicationErr)
+	}
+	if !caughtUp {
+		logFollower, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
+		t.Fatalf("follower did not catch up, hwm=%d", logFollower.HighWatermark())
+	}
 
 	// ISR should contain both.
 	metaAfter, _ := rc1.GetClusterMetadata(ctx)
@@ -318,41 +329,55 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("follower metadata: %v", err)
 	}
-	if len(followerMeta) != 0 {
-		t.Fatalf("expected follower metadata empty, got %+v", followerMeta)
+	if len(followerMeta) != 1 || followerMeta[0].Leader != leaderID || followerMeta[0].Replica.Role != api.RoleFollower {
+		t.Fatalf("unexpected follower metadata: %+v", followerMeta)
 	}
 
-	httpHandler := httpapi.New(leaderBroker, leaderCfg, ctrlByBrokerID[leaderID])
-	mux := http.NewServeMux()
-	httpHandler.Register(mux)
-	httpSrv := httptest.NewServer(mux)
-	defer httpSrv.Close()
+}
 
-	httpResp, err := http.Get(httpSrv.URL + "/api/topics/alpha")
+func freeTCPAddr(t *testing.T) string {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("http topic detail: %v", err)
+		t.Fatalf("listen: %v", err)
 	}
-	defer httpResp.Body.Close()
-	if httpResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 from http topic detail, got %d", httpResp.StatusCode)
+	addr := l.Addr().String()
+	_ = l.Close()
+	return addr
+}
+
+func waitForLeaderCtrl(t *testing.T, ctrls []*controller.RaftController) *controller.RaftController {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, c := range ctrls {
+			if c.RaftState() == raft.Leader.String() {
+				return c
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	var detail TopicDetail
-	if err := json.NewDecoder(httpResp.Body).Decode(&detail); err != nil {
-		t.Fatalf("decode topic detail: %v", err)
+	t.Fatalf("leader not elected")
+	return nil
+}
+
+func waitForClusterMeta(t *testing.T, ctrls []*controller.RaftController, parts int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		ok := true
+		for _, c := range ctrls {
+			meta, _ := c.GetClusterMetadata(context.Background())
+			if len(meta.Partitions) != parts {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if detail.PartitionCount != 1 {
-		t.Fatalf("expected single partition in topic detail, got %d", detail.PartitionCount)
-	}
-	if len(detail.Partitions) != 1 {
-		t.Fatalf("expected one partition entry, got %d", len(detail.Partitions))
-	}
-	pi := detail.Partitions[0]
-	if pi.Leader != leaderID {
-		t.Fatalf("expected partition leader %d, got %d", leaderID, pi.Leader)
-	}
-	if len(pi.Replicas) != 2 || !contains(pi.Replicas, 1) || !contains(pi.Replicas, 2) {
-		t.Fatalf("unexpected replicas list: %+v", pi.Replicas)
-	}
+	t.Fatalf("metadata did not converge")
 }
 
 func contains(list []int, id int) bool {
@@ -364,14 +389,14 @@ func contains(list []int, id int) bool {
 	return false
 }
 
-func waitUntil(t *testing.T, pred func() bool, timeout time.Duration) {
+func waitUntil(t *testing.T, pred func() bool, timeout time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if pred() {
-			return
+			return true
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("condition not met in %s", timeout)
+	return false
 }

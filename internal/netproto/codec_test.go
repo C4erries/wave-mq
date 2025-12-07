@@ -144,6 +144,9 @@ func TestMetadataCodec(t *testing.T) {
 				},
 				StartOffset:   0,
 				HighWatermark: 5,
+				Leader:        1,
+				Replicas:      []int{1, 2},
+				ISR:           []int{1},
 			},
 		},
 	}
@@ -157,6 +160,9 @@ func TestMetadataCodec(t *testing.T) {
 	}
 	if dr.Error != resp.Error || len(dr.Partitions) != 1 || dr.Partitions[0].Replica.Topic != "a" {
 		t.Fatalf("resp mismatch: %#v", dr)
+	}
+	if dr.Partitions[0].Leader != 1 || len(dr.Partitions[0].Replicas) != 2 || dr.Partitions[0].Replicas[1] != 2 {
+		t.Fatalf("missing cluster metadata in response: %#v", dr.Partitions[0])
 	}
 }
 

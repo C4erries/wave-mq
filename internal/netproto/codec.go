@@ -547,6 +547,25 @@ func encodeMetadataResponse(resp *MetadataResponse) ([]byte, error) {
 		if err := binary.Write(buf, binary.BigEndian, int64(p.HighWatermark)); err != nil {
 			return nil, err
 		}
+		if err := binary.Write(buf, binary.BigEndian, int32(p.Leader)); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.BigEndian, int32(len(p.Replicas))); err != nil {
+			return nil, err
+		}
+		for _, r := range p.Replicas {
+			if err := binary.Write(buf, binary.BigEndian, int32(r)); err != nil {
+				return nil, err
+			}
+		}
+		if err := binary.Write(buf, binary.BigEndian, int32(len(p.ISR))); err != nil {
+			return nil, err
+		}
+		for _, r := range p.ISR {
+			if err := binary.Write(buf, binary.BigEndian, int32(r)); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return buf.Bytes(), nil
 }
@@ -591,6 +610,34 @@ func decodeMetadataResponse(payload []byte) (*MetadataResponse, error) {
 		if err := binary.Read(buf, binary.BigEndian, &hwm); err != nil {
 			return nil, err
 		}
+		var leader int32
+		if err := binary.Read(buf, binary.BigEndian, &leader); err != nil {
+			return nil, err
+		}
+		var replicasN int32
+		if err := binary.Read(buf, binary.BigEndian, &replicasN); err != nil {
+			return nil, err
+		}
+		replicas := make([]int, 0, replicasN)
+		for i := int32(0); i < replicasN; i++ {
+			var rid int32
+			if err := binary.Read(buf, binary.BigEndian, &rid); err != nil {
+				return nil, err
+			}
+			replicas = append(replicas, int(rid))
+		}
+		var isrN int32
+		if err := binary.Read(buf, binary.BigEndian, &isrN); err != nil {
+			return nil, err
+		}
+		isr := make([]int, 0, isrN)
+		for i := int32(0); i < isrN; i++ {
+			var rid int32
+			if err := binary.Read(buf, binary.BigEndian, &rid); err != nil {
+				return nil, err
+			}
+			isr = append(isr, int(rid))
+		}
 		parts = append(parts, api.PartitionMetadata{
 			Replica: api.PartitionReplica{
 				Topic:       topic,
@@ -601,6 +648,9 @@ func decodeMetadataResponse(payload []byte) (*MetadataResponse, error) {
 			},
 			StartOffset:   api.Offset(start),
 			HighWatermark: api.Offset(hwm),
+			Leader:        int(leader),
+			Replicas:      replicas,
+			ISR:           isr,
 		})
 	}
 	return &MetadataResponse{

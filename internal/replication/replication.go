@@ -18,6 +18,7 @@ type FetchRequest struct {
 type FetchResponse struct {
 	Records       []api.Record
 	HighWatermark api.Offset
+	Error         api.ErrorCode
 }
 
 // Replicator abstracts leader-to-follower replication.

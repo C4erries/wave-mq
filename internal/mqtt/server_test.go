@@ -78,6 +78,9 @@ func (b *fakeBroker) Metadata(ctx context.Context, topics []string) ([]api.Parti
 				},
 				StartOffset:   0,
 				HighWatermark: api.Offset(len(parts[pid]) - 1),
+				Leader:        1,
+				Replicas:      []int{1},
+				ISR:           []int{1},
 			})
 		}
 	}
