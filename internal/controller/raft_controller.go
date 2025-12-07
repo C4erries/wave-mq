@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
-	"github.com/hashicorp/raft-boltdb"
+	raftboltdb "github.com/hashicorp/raft-boltdb"
 
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -194,7 +194,7 @@ type RaftController struct {
 	cfg     api.BrokerConfig
 	fsm     *raftMetadataFSM
 	raft    *raft.Raft
-	pub  metadataPublisher
+	pub     *metadataPublisher
 	closers []io.Closer
 }
 
@@ -269,7 +269,7 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 	if err != nil {
 		return nil, err
 	}
-	return &RaftController{cfg: cfg, fsm: fsm, raft: r, pub: pub, closers: closers}, nil
+	return &RaftController{cfg: cfg, fsm: fsm, raft: r, pub: &pub, closers: closers}, nil
 }
 
 func buildStores(raftDir string) (raft.LogStore, raft.StableStore, raft.SnapshotStore, []io.Closer, error) {
