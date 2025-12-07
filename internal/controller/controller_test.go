@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/pkg/api"
@@ -398,4 +399,46 @@ func TestRecoveredAssignmentsUseReplicationFactor(t *testing.T) {
 			t.Fatalf("ISR should include all replicas, got %+v", p.ISR)
 		}
 	}
+}
+
+func TestSingleNodeControllerWatchStreamsUpdates(t *testing.T) {
+	cfg := api.BrokerConfig{BrokerID: 1, ClusterID: "watch-1"}
+	ctrl, err := NewSingleNodeController(cfg, map[string]metadata.TopicState{})
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	updates, err := ctrl.WatchClusterMetadata(ctx, 0)
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+
+	awaitVersion := func(expected int64) api.ClusterMetadata {
+		t.Helper()
+		select {
+		case meta, ok := <-updates:
+			if !ok {
+				t.Fatalf("channel closed before receiving version %d", expected)
+			}
+			if meta.Version != expected {
+				t.Fatalf("expected version %d, got %d", expected, meta.Version)
+			}
+			return meta
+		case <-time.After(time.Second):
+			t.Fatalf("timeout waiting for version %d", expected)
+		}
+		return api.ClusterMetadata{}
+	}
+
+	awaitVersion(1)
+	if _, err := ctrl.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("assign topic: %v", err)
+	}
+	awaitVersion(2)
+	if _, err := ctrl.ReportReplicaProgress(ctx, "alpha", 0, cfg.BrokerID, 1, 1); err != nil {
+		t.Fatalf("report progress: %v", err)
+	}
+	awaitVersion(3)
 }

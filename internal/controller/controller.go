@@ -32,6 +32,7 @@ type SingleNodeController struct {
 	mu   sync.RWMutex
 	meta api.ClusterMetadata
 	cfg  api.BrokerConfig
+	pub  metadataPublisher
 }
 
 // NewSingleNodeController builds a controller view for a single broker or a static multi-broker cluster using recovered topics.
@@ -58,19 +59,10 @@ func (c *SingleNodeController) GetClusterMetadata(ctx context.Context) (api.Clus
 }
 
 func (c *SingleNodeController) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
-	_ = sinceVersion
-	ch := make(chan api.ClusterMetadata, 1)
-	go func() {
-		defer close(ch)
-		c.mu.RLock()
-		meta := c.meta
-		c.mu.RUnlock()
-		select {
-		case <-ctx.Done():
-			return
-		case ch <- meta:
-		}
-	}()
+	c.mu.RLock()
+	meta := c.meta
+	c.mu.RUnlock()
+	ch := c.pub.watch(ctx, sinceVersion, meta)
 	return ch, nil
 }
 
@@ -91,7 +83,6 @@ func (c *SingleNodeController) RegisterBroker(ctx context.Context, info api.Brok
 func (c *SingleNodeController) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
 	_ = ctx
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if cfg.Partitions <= 0 {
 		cfg.Partitions = 1
 	}
@@ -104,14 +95,16 @@ func (c *SingleNodeController) AssignTopic(ctx context.Context, name string, cfg
 	newParts := assignTopicPartitions(c.cfg, c.meta.Brokers, name, cfg.Partitions, cfg.ReplicationFactor, c.meta.Partitions)
 	c.meta.Partitions = append(c.meta.Partitions, newParts...)
 	c.meta.Version++
-	return c.meta, nil
+	meta := c.meta
+	c.mu.Unlock()
+	c.pub.publish(meta)
+	return meta, nil
 }
 
 // ReportReplicaProgress updates ISR based on follower progress relative to leader high watermark.
 func (c *SingleNodeController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
 	_ = ctx
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	idx := -1
 	for i, p := range c.meta.Partitions {
 		if p.Topic == topic && p.Partition == partition {
@@ -120,11 +113,15 @@ func (c *SingleNodeController) ReportReplicaProgress(ctx context.Context, topic 
 		}
 	}
 	if idx == -1 {
-		return c.meta, fmt.Errorf("partition not found")
+		meta := c.meta
+		c.mu.Unlock()
+		return meta, fmt.Errorf("partition not found")
 	}
 	assign := c.meta.Partitions[idx]
 	if !brokerPresent(brokerID, brokersFromInts(assign.Replicas)) {
-		return c.meta, fmt.Errorf("broker %d not in replicas", brokerID)
+		meta := c.meta
+		c.mu.Unlock()
+		return meta, fmt.Errorf("broker %d not in replicas", brokerID)
 	}
 	shouldBeISR := lastOffset >= leaderHighWatermark
 	assign.ISR = ensureLeaderInISR(assign.Leader, assign.ISR)
@@ -137,7 +134,10 @@ func (c *SingleNodeController) ReportReplicaProgress(ctx context.Context, topic 
 	}
 	c.meta.Partitions[idx] = assign
 	c.meta.Version++
-	return c.meta, nil
+	meta := c.meta
+	c.mu.Unlock()
+	c.pub.publish(meta)
+	return meta, nil
 }
 
 func buildAssignments(cfg api.BrokerConfig, brokers []api.BrokerInfo, topics map[string]metadata.TopicState) []api.PartitionAssignment {
