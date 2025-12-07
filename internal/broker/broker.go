@@ -146,10 +146,18 @@ func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore, meta
 	if err != nil {
 		return nil, err
 	}
-	for name, state := range recoveredTopics.Topics {
+	topics := recoveredTopics.Topics
+	var assignments map[string]map[int]api.PartitionAssignment
+	if b.cluster != nil {
+		topics, assignments, err = b.reconcileClusterMetadata(context.Background(), topics)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for name, state := range topics {
 		b.known[name] = state
 	}
-	if err := b.bootstrapTopicsFromMetadata(context.Background(), recoveredTopics.Topics); err != nil {
+	if err := b.bootstrapTopicsFromMetadata(context.Background(), topics, assignments); err != nil {
 		return nil, err
 	}
 	return b, nil
@@ -217,29 +225,12 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 	return b.loadTopicLocked(ctx, state, nil)
 }
 
-func (b *Broker) bootstrapTopicsFromMetadata(ctx context.Context, topics map[string]metadata.TopicState) error {
-	var allowed map[string]map[int]api.PartitionAssignment
-	if b.cluster != nil {
-		meta, err := b.cluster.GetClusterMetadata(ctx)
-		if err != nil {
-			return err
-		}
-		allowed = make(map[string]map[int]api.PartitionAssignment)
-		for _, p := range meta.Partitions {
-			if p.Leader != b.cfg.BrokerID && !containsInt(p.Replicas, b.cfg.BrokerID) {
-				continue
-			}
-			if _, ok := allowed[p.Topic]; !ok {
-				allowed[p.Topic] = make(map[int]api.PartitionAssignment)
-			}
-			allowed[p.Topic][p.Partition] = p
-		}
-	}
+func (b *Broker) bootstrapTopicsFromMetadata(ctx context.Context, topics map[string]metadata.TopicState, assignments map[string]map[int]api.PartitionAssignment) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, state := range topics {
-		if allowed != nil {
-			topicParts := allowed[state.Name]
+		if assignments != nil {
+			topicParts := assignments[state.Name]
 			if len(topicParts) == 0 {
 				continue
 			}
@@ -255,15 +246,74 @@ func (b *Broker) bootstrapTopicsFromMetadata(ctx context.Context, topics map[str
 			state.Partitions = parts
 			state.NumPartitions = len(parts)
 		}
-		var assignments map[int]api.PartitionAssignment
-		if allowed != nil {
-			assignments = allowed[state.Name]
+		var topicAssignments map[int]api.PartitionAssignment
+		if assignments != nil {
+			topicAssignments = assignments[state.Name]
 		}
-		if err := b.loadTopicLocked(ctx, state, assignments); err != nil {
+		if err := b.loadTopicLocked(ctx, state, topicAssignments); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (b *Broker) reconcileClusterMetadata(ctx context.Context, local map[string]metadata.TopicState) (map[string]metadata.TopicState, map[string]map[int]api.PartitionAssignment, error) {
+	meta, err := b.cluster.GetClusterMetadata(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	assignments := make(map[string]map[int]api.PartitionAssignment)
+	topics := make(map[string]metadata.TopicState)
+	for _, p := range meta.Partitions {
+		if p.Leader != b.cfg.BrokerID && !containsInt(p.Replicas, b.cfg.BrokerID) {
+			continue
+		}
+		if _, ok := assignments[p.Topic]; !ok {
+			assignments[p.Topic] = make(map[int]api.PartitionAssignment)
+		}
+		assignments[p.Topic][p.Partition] = p
+		state := topics[p.Topic]
+		if state.Name == "" {
+			state = metadata.TopicState{Name: p.Topic}
+		}
+		ps := partitionSpecFromAssignment(p)
+		state.Partitions = upsertPartitionSpec(state.Partitions, ps)
+		state.NumPartitions = len(state.Partitions)
+		if rf := len(ps.Replicas); rf > state.ReplicationFactor {
+			state.ReplicationFactor = rf
+		}
+		if localState, ok := local[p.Topic]; ok && localState.ReplicationFactor > state.ReplicationFactor {
+			state.ReplicationFactor = localState.ReplicationFactor
+		}
+		topics[p.Topic] = state
+	}
+	return topics, assignments, nil
+}
+
+func upsertPartitionSpec(parts []metadata.PartitionSpec, ps metadata.PartitionSpec) []metadata.PartitionSpec {
+	for i, existing := range parts {
+		if existing.ID == ps.ID {
+			parts[i] = ps
+			return parts
+		}
+	}
+	return append(parts, ps)
+}
+
+func partitionSpecFromAssignment(assign api.PartitionAssignment) metadata.PartitionSpec {
+	replicas := make([]metadata.ReplicaSpec, 0, len(assign.Replicas))
+	for _, id := range assign.Replicas {
+		role := api.RoleFollower
+		if id == assign.Leader {
+			role = api.RoleLeader
+		}
+		replicas = append(replicas, metadata.ReplicaSpec{
+			BrokerID:    int32(id),
+			Role:        role,
+			LeaderEpoch: assign.LeaderEpoch,
+		})
+	}
+	return metadata.PartitionSpec{ID: int32(assign.Partition), Replicas: replicas}
 }
 
 func (b *Broker) loadTopicLocked(ctx context.Context, state metadata.TopicState, assignments map[int]api.PartitionAssignment) error {

@@ -126,3 +126,78 @@ func TestLocalPartitionsSnapshotFiltersByLeader(t *testing.T) {
 		}
 	}
 }
+
+func TestClusterMetadataOverridesLocalCache(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1024,
+		SyncOnAppend:    true,
+	})
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	offsetStore, _ := NewOffsetStore(dir)
+	metaStore, _ := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	ctx := context.Background()
+	if err := metaStore.AppendCreateTopic(ctx, metadata.CreateTopicEvent{
+		Name:              "stale",
+		NumPartitions:     1,
+		ReplicationFactor: 1,
+		Partitions: []metadata.PartitionSpec{{
+			ID:       0,
+			Replicas: []metadata.ReplicaSpec{{BrokerID: 1, Role: api.RoleLeader}},
+		}},
+	}); err != nil {
+		t.Fatalf("append topic: %v", err)
+	}
+	cluster := fakeCluster{meta: api.ClusterMetadata{
+		ClusterID: "c1",
+		Version:   1,
+		Brokers: []api.BrokerInfo{
+			{BrokerID: 1, Host: "b1"},
+			{BrokerID: 2, Host: "b2"},
+		},
+		Partitions: []api.PartitionAssignment{{
+			Topic:       "fresh",
+			Partition:   0,
+			Replicas:    []int{2, 1},
+			ISR:         []int{2, 1},
+			Leader:      2,
+			LeaderEpoch: 3,
+		}},
+	}}
+	b, err := NewBroker(api.BrokerConfig{
+		BrokerID:          1,
+		ReplicationFactor: 1,
+		DataDir:           dir,
+	}, store, offsetStore, metaStore, cluster)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+	defer func() {
+		b.Close()
+		store.Close()
+		offsetStore.Close()
+		metaStore.Close()
+	}()
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if len(b.topics) != 1 {
+		t.Fatalf("expected only cluster topic, got %d", len(b.topics))
+	}
+	topic := b.topics["fresh"]
+	if topic == nil {
+		t.Fatalf("expected fresh topic to be loaded")
+	}
+	part := topic.Partitions[0]
+	if part == nil {
+		t.Fatalf("expected partition 0 for topic fresh")
+	}
+	if part.Metadata.Replica.Role != api.RoleFollower {
+		t.Fatalf("expected follower role, got %v", part.Metadata.Replica.Role)
+	}
+	if part.Metadata.Leader != 2 {
+		t.Fatalf("expected leader 2, got %d", part.Metadata.Leader)
+	}
+}
