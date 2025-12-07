@@ -161,6 +161,14 @@ In the MVP:
 
 This ensures that later, when a real cluster is introduced, you can add replicas and followers **without rewriting storage and broker APIs**.
 
+### 5.3 Controller as source of truth
+
+In clustered or multi-broker modes, the **controller is the single source of truth** for cluster metadata (which topics exist, how many partitions у каждого топика, какие брокеры являются лидерами/репликами, состав ISR и т.п.).
+
+* Локальный `metadata.log` на брокере рассматривается как **кэш для ускорения рестартов**, а не как авторитетный источник.
+* Брокер должен уметь при старте полностью материализовать своё локальное состояние топиков и партиций **только по данным контроллера**, даже если локальный `metadata.log` отсутствует или повреждён.
+* При расхождении локальных метаданных и данных из контроллера приоритет всегда за контроллером; локальное состояние должно быть приведено к виду, описанному в `ClusterMetadata`.
+
 ---
 
 ## 6. Implementation Roadmap

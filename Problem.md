@@ -347,4 +347,6 @@ Not required for the course deliverable, but the design should make these natura
 * Kafka bridge or connector.
 * Exactly-once semantics and idempotent producers.
 
+In this clustered future, the controller becomes the **authoritative source of cluster metadata**, while any per-broker metadata logs act only as local caches for faster restarts. Brokers must be able to reconstruct their local topic/partition set purely from controller metadata and reconcile any local state to match the controller’s `ClusterMetadata`.
+
 The current single-node broker should be implemented in such a way that going from `ReplicationFactor = 1` to `ReplicationFactor > 1` is primarily a matter of **adding new components and protocols**, not of rewriting storage or core APIs.

@@ -5,10 +5,10 @@ Single-node log-based message broker in Go, designed to grow into a small but re
 ## Project Status
 
 - Core single-node broker (storage, binary protocol, MQTT, consumer groups, HTTP UI/API) - implemented and suitable for local experiments and demos.
-- Topic metadata persistence (`metadata.log`) - implemented; topics and partitions survive broker restart and are recovered on startup.
-- Cluster metadata layer (controller + `/api/cluster`) - implemented for single-node and multi-broker clusters. A Raft-based controller is available via `-controller=raft` (single-node or multi-peer) and is the recommended mode for clustered deployments; `-controller=single` keeps the legacy in-memory controller.
-- Replication path (leader <-> follower) - binary client (`BinaryReplicator`) and partition replicator (`PartitionReplicator` + WAL sink + ISR reporting) are implemented and exercised with RF=2 scenarios. RF>1 is now treated as supported: clients should write/read to leaders (followers return `ErrNotLeader` / HTTP 409 with `leaderBrokerID`), metadata exposes leader/replica layout for routing, and replication metrics (`wavemq_replication_lag_offsets`, `wavemq_replication_applied_total`) track follower progress.
-- Multi-node / Raft-backed controller quorum - supported for local multi-broker clusters. Basic failover and rolling restart scenarios have tests; further operational hardening and tooling are ongoing.
+- Topic metadata persistence (`metadata.log`) - implemented; topics and partitions survive broker restart and are recovered on startup. In clustered modes `metadata.log` should be viewed as a **local cache**; the controller’s view of the cluster is authoritative.
+- Cluster metadata layer (controller + `/api/cluster`) - implemented for single-node and small multi-broker clusters. A Raft-based controller is available via `-controller=raft` (single-node or multi-peer) and is currently an **experimental** clustered mode; `-controller=single` keeps the simpler in-memory controller.
+- Replication path (leader <-> follower) - binary client (`BinaryReplicator`) and partition replicator (`PartitionReplicator` + WAL sink + ISR reporting) are implemented and exercised with RF=2 scenarios. RF>1 clustering is **intended for lab and demo use**, not production; clients should write/read to leaders (followers return `ErrNotLeader` / HTTP 409 with `leaderBrokerID`), metadata exposes leader/replica layout for routing, and replication metrics (`wavemq_replication_lag_offsets`, `wavemq_replication_applied_total`) track follower progress.
+- Multi-node / Raft-backed controller quorum - available for local multi-broker clusters as an experimental feature. Basic failover and rolling restart scenarios have tests; further operational hardening, durable Raft state on disk, and stronger guarantees are ongoing work.
 
 ## Roadmap
 
