@@ -19,6 +19,11 @@ type OffsetProvider interface {
 	NextOffset() (api.Offset, error)
 }
 
+// HighWatermarkAligner optionally reconciles local progress with the leader's high watermark.
+type HighWatermarkAligner interface {
+	EnsureLeaderHighWatermark(ctx context.Context, leaderHighWatermark api.Offset) (api.Offset, error)
+}
+
 // PartitionReplicator pulls records for a single partition from its leader and applies them to a sink.
 type PartitionReplicator struct {
 	rep    Replicator
@@ -80,6 +85,20 @@ func (p *PartitionReplicator) Run(ctx context.Context) error {
 		if fetchResp.Error != api.ErrNone {
 			return fmt.Errorf("fetch error: %v", fetchResp.Error)
 		}
+		nextOffset := p.nextOffset
+		if fetchResp.HighWatermark+1 < nextOffset || nextOffset == 0 {
+			nextOffset = fetchResp.HighWatermark + 1
+		}
+		if aligner, ok := p.sink.(HighWatermarkAligner); ok {
+			next, err := aligner.EnsureLeaderHighWatermark(ctx, fetchResp.HighWatermark)
+			if err != nil {
+				return err
+			}
+			if nextOffset == 0 || next < nextOffset {
+				nextOffset = next
+			}
+		}
+		p.nextOffset = nextOffset
 		if len(fetchResp.Records) == 0 {
 			if p.Interval > 0 {
 				select {
