@@ -225,6 +225,55 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 	return b.loadTopicLocked(ctx, state, nil)
 }
 
+// CreateTopicWithAssignments initializes local partitions based on controller assignments.
+// If assignments are empty or the broker is not clustered, it falls back to CreateTopic.
+func (b *Broker) CreateTopicWithAssignments(ctx context.Context, name string, cfg api.TopicConfig, assignments map[int]api.PartitionAssignment) error {
+	if b.cluster == nil || len(assignments) == 0 {
+		return b.CreateTopic(ctx, name, cfg)
+	}
+	state := metadata.TopicState{Name: name}
+	filtered := make(map[int]api.PartitionAssignment)
+	for pid, assign := range assignments {
+		if assign.Topic != "" && assign.Topic != name {
+			continue
+		}
+		if assign.Leader != b.cfg.BrokerID && !containsInt(assign.Replicas, b.cfg.BrokerID) {
+			continue
+		}
+		filtered[pid] = assign
+		ps := partitionSpecFromAssignment(assign)
+		state.Partitions = append(state.Partitions, ps)
+		if len(ps.Replicas) > state.ReplicationFactor {
+			state.ReplicationFactor = len(ps.Replicas)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	sort.Slice(state.Partitions, func(i, j int) bool { return state.Partitions[i].ID < state.Partitions[j].ID })
+	state.NumPartitions = len(state.Partitions)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.topics[name]; ok {
+		return ErrTopicExists
+	}
+	if _, ok := b.known[name]; ok {
+		return ErrTopicExists
+	}
+	event := metadata.CreateTopicEvent{
+		Name:              state.Name,
+		NumPartitions:     state.NumPartitions,
+		ReplicationFactor: state.ReplicationFactor,
+		Partitions:        state.Partitions,
+	}
+	if err := b.meta.AppendCreateTopic(ctx, event); err != nil {
+		return err
+	}
+	b.known[name] = state
+	return b.loadTopicLocked(ctx, state, filtered)
+}
+
 func (b *Broker) bootstrapTopicsFromMetadata(ctx context.Context, topics map[string]metadata.TopicState, assignments map[string]map[int]api.PartitionAssignment) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -281,9 +330,6 @@ func (b *Broker) reconcileClusterMetadata(ctx context.Context, local map[string]
 		state.NumPartitions = len(state.Partitions)
 		if rf := len(ps.Replicas); rf > state.ReplicationFactor {
 			state.ReplicationFactor = rf
-		}
-		if localState, ok := local[p.Topic]; ok && localState.ReplicationFactor > state.ReplicationFactor {
-			state.ReplicationFactor = localState.ReplicationFactor
 		}
 		topics[p.Topic] = state
 	}

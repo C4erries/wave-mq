@@ -265,19 +265,30 @@ func (h *Handler) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 		Partitions:        req.Partitions,
 		ReplicationFactor: req.ReplicationFactor,
 	}
-	if err := h.b.CreateTopic(r.Context(), req.Name, cfg); err != nil {
+	ctx := r.Context()
+	assignments := map[int]api.PartitionAssignment{}
+	if h.ctrl != nil {
+		meta, err := h.ctrl.AssignTopic(ctx, req.Name, cfg)
+		if err != nil {
+			http.Error(w, "cluster metadata update failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, p := range meta.Partitions {
+			if p.Topic != req.Name {
+				continue
+			}
+			if p.Leader == h.cfg.BrokerID || containsInt(p.Replicas, h.cfg.BrokerID) {
+				assignments[p.Partition] = p
+			}
+		}
+	}
+	if err := h.b.CreateTopicWithAssignments(ctx, req.Name, cfg, assignments); err != nil {
 		if errors.Is(err, broker.ErrTopicExists) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
-	}
-	if h.ctrl != nil {
-		if _, err := h.ctrl.AssignTopic(r.Context(), req.Name, cfg); err != nil {
-			http.Error(w, "cluster metadata update failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
 	}
 	detail, _ := h.b.TopicDetail(req.Name)
 	w.WriteHeader(http.StatusCreated)
@@ -344,6 +355,15 @@ func encodeMaybeBase64(b []byte) interface{} {
 		return string(b)
 	}
 	return "base64:" + base64.StdEncoding.EncodeToString(b)
+}
+
+func containsInt(list []int, id int) bool {
+	for _, v := range list {
+		if v == id {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
