@@ -4,6 +4,8 @@ Single-node log-based message broker in Go, designed to grow into a small but re
 
 ## Project Status
 
+> ⚠️ Clustering, Raft, and follower replication are **experimental**. Expect breaking changes, resets during development, and behavior suitable only for demos/labs. Run with replication disabled (`-replication=false`) if you need a stable single-node broker.
+
 - Core single-node broker (storage, binary protocol, MQTT, consumer groups, HTTP UI/API) - implemented and suitable for local experiments and demos.
 - Topic metadata persistence (`metadata.log`) - implemented; topics and partitions survive broker restart and are recovered on startup. In clustered modes `metadata.log` should be viewed as a **local cache**; the controller’s view of the cluster is authoritative.
 - Cluster metadata layer (controller + `/api/cluster`) - implemented for single-node and small multi-broker clusters. A Raft-based controller is available via `-controller=raft` (single-node or multi-peer) and is currently an **experimental** clustered mode; `-controller=single` keeps the simpler in-memory controller.
@@ -165,39 +167,55 @@ Example:
 curl http://localhost:8090/metrics
 ```
 
-### Two-broker Raft example
+### Experimental multi-broker (Raft) quickstart
 
-Run two brokers sharing one Raft controller cluster:
+Run 2–3 brokers with a shared Raft controller quorum. All nodes participate in Raft by default; replication must be enabled explicitly.
 
-Broker 1:
+1) Pick Raft addresses (example): `127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003`. Use two peers if you only want a 2-node demo.
+2) Start broker/controller 1:
 
 ```sh
 ./mbd \
   -broker-id=1 \
   -controller=raft \
   -raft-bind=127.0.0.1:9001 \
-  -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
+  -raft-peer=127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003 \
   -data-dir=./data1 \
-  -bind=:7912 -http=:8091
+  -bind=:7912 -http=:8091 \
+  -replication=true
 ```
 
-Broker 2:
+3) Start broker/controller 2 (adjust ports/paths):
 
 ```sh
 ./mbd \
   -broker-id=2 \
   -controller=raft \
   -raft-bind=127.0.0.1:9002 \
-  -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
+  -raft-peer=127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003 \
   -data-dir=./data2 \
-  -bind=:8912 -http=:8092
+  -bind=:8912 -http=:8092 \
+  -replication=true
 ```
 
-Expected behavior:
+4) (Optional) Start broker/controller 3:
 
-- one controller becomes leader;
-- `/api/controller` on both brokers shows `mode="raft"`, current `raftState`/`term`, peers, `clusterID` and metadata `version`;
-- `/api/cluster` on both brokers converges to the same `ClusterMetadata`, and partition leaders are spread across broker IDs.
+```sh
+./mbd \
+  -broker-id=3 \
+  -controller=raft \
+  -raft-bind=127.0.0.1:9003 \
+  -raft-peer=127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003 \
+  -data-dir=./data3 \
+  -bind=:9912 -http=:8093 \
+  -replication=true
+```
+
+5) Create a topic with RF=2 or RF=3 (via HTTP or `mbctl`), then check:
+
+- `/api/controller` for `mode`, Raft `raftState`/`term`, and peer list;
+- `/api/cluster` for leader/replica/ISR assignments per partition;
+- `/api/topics/<name>` to see which node is leader vs follower for each partition.
 
 #### Operating a Raft cluster
 

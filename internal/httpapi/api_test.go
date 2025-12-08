@@ -297,6 +297,22 @@ func TestCreateTopicEndpoint(t *testing.T) {
 	if detail.Name != "api-topic" || detail.PartitionCount != 1 {
 		t.Fatalf("unexpected detail: %+v", detail)
 	}
+	if len(detail.Partitions) != 1 {
+		t.Fatalf("expected 1 partition detail, got %d", len(detail.Partitions))
+	}
+	part := detail.Partitions[0]
+	if part.Role != "leader" {
+		t.Fatalf("expected leader role, got %+v", part)
+	}
+	if len(part.ISR) != 1 || part.ISR[0] != 1 {
+		t.Fatalf("unexpected ISR: %+v", part)
+	}
+	if part.LeaderEpoch < 0 {
+		t.Fatalf("expected non-negative leader epoch, got %+v", part)
+	}
+	if len(part.Replicas) != 1 || part.Replicas[0] != 1 {
+		t.Fatalf("unexpected replicas: %+v", part.Replicas)
+	}
 	// verify controller mode is exposed
 	brokerResp, err := http.Get(server.URL + "/api/broker")
 	if err != nil {

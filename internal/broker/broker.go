@@ -855,9 +855,12 @@ type TopicSummary struct {
 type PartitionInfo struct {
 	ID            int        `json:"id"`
 	Leader        int        `json:"leader"`
+	Role          string     `json:"role"`
 	HighWatermark api.Offset `json:"highWatermark"`
 	StartOffset   api.Offset `json:"startOffset"`
 	Replicas      []int      `json:"replicas"`
+	ISR           []int      `json:"isr"`
+	LeaderEpoch   int32      `json:"leaderEpoch"`
 }
 
 type TopicDetail struct {
@@ -909,10 +912,11 @@ func (b *Broker) TopicDetail(name string) (TopicDetail, bool) {
 	for pid, p := range t.Partitions {
 		assign, hasAssign := assignments[pid]
 		if b.isClustered() {
-			if hasAssign && assign.Leader != b.cfg.BrokerID {
-				continue
-			}
-			if !hasAssign && p.Metadata.Replica.Role != api.RoleLeader {
+			if hasAssign {
+				if !containsBroker(assign.Replicas, b.cfg.BrokerID) {
+					continue
+				}
+			} else if p.Metadata.Replica.BrokerID != b.cfg.BrokerID {
 				continue
 			}
 		}
@@ -920,13 +924,18 @@ func (b *Broker) TopicDetail(name string) (TopicDetail, bool) {
 		info := PartitionInfo{
 			ID:            pid,
 			Leader:        p.Metadata.Replica.BrokerID,
+			Role:          roleString(p.Metadata.Replica.Role),
 			HighWatermark: p.Log.HighWatermark(),
 			StartOffset:   p.Log.StartOffset(),
 			Replicas:      []int{p.Metadata.Replica.BrokerID},
+			ISR:           []int{p.Metadata.Replica.BrokerID},
+			LeaderEpoch:   p.Metadata.Replica.LeaderEpoch,
 		}
 		if hasAssign && len(assign.Replicas) > 0 {
 			info.Leader = assign.Leader
 			info.Replicas = append([]int(nil), assign.Replicas...)
+			info.ISR = append([]int(nil), assign.ISR...)
+			info.LeaderEpoch = assign.LeaderEpoch
 		}
 		p.mu.RUnlock()
 		parts = append(parts, info)
@@ -937,6 +946,26 @@ func (b *Broker) TopicDetail(name string) (TopicDetail, bool) {
 		ReplicationFactor: t.ReplicationFactor,
 		Partitions:        parts,
 	}, true
+}
+
+func containsBroker(brokers []int, id int) bool {
+	for _, b := range brokers {
+		if b == id {
+			return true
+		}
+	}
+	return false
+}
+
+func roleString(role api.PartitionRole) string {
+	switch role {
+	case api.RoleLeader:
+		return "leader"
+	case api.RoleFollower:
+		return "follower"
+	default:
+		return "unknown"
+	}
 }
 
 func (b *Broker) partitionAssignments(topic string) map[int]api.PartitionAssignment {
