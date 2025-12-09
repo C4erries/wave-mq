@@ -1,13 +1,15 @@
-��# wave-mq
+# wave-mq
 
 Single-node log-based message broker in Go, designed to grow into a small but realistic Kafka-like cluster. It provides a custom binary protocol, a minimal MQTT 3.1.1/5.0 frontend (QoS0/1), consumer groups with broker-side offsets, and segmented WAL storage with sparse indexes and retention.
+
+For a detailed architectural overview (in Russian) see: `docs/architecture.md`.
 
 ## Project Status
 
 > ⚠️ Clustering, Raft, and follower replication are **experimental**. Expect breaking changes, resets during development, and behavior suitable only for demos/labs. Run with replication disabled (`-replication=false`) if you need a stable single-node broker.
 
 - Core single-node broker (storage, binary protocol, MQTT, consumer groups, HTTP UI/API) - implemented and suitable for local experiments and demos.
-- Topic metadata persistence (`metadata.log`) - implemented; topics and partitions survive broker restart and are recovered on startup. In clustered modes `metadata.log` should be viewed as a **local cache**; the controller’s view of the cluster is authoritative.
+- Topic metadata persistence (`metadata.log`) - implemented; topics and partitions survive broker restart and are recovered on startup. In clustered modes `metadata.log` should be viewed as a **local cache**; the controller's view of the cluster is authoritative.
 - Cluster metadata layer (controller + `/api/cluster`) - implemented for single-node and small multi-broker clusters. A Raft-based controller is available via `-controller=raft` (single-node or multi-peer) and is currently an **experimental** clustered mode; `-controller=single` keeps the simpler in-memory controller.
 - Replication path (leader <-> follower) - binary client (`BinaryReplicator`) and partition replicator (`PartitionReplicator` + WAL sink + ISR reporting) are implemented and exercised with RF=2 scenarios. RF>1 clustering is **intended for lab and demo use**, not production; clients should write/read to leaders (followers return `ErrNotLeader` / HTTP 409 with `leaderBrokerID`), metadata exposes leader/replica layout for routing, and replication metrics (`wavemq_replication_lag_offsets`, `wavemq_replication_applied_total`) track follower progress.
 - Multi-node / Raft-backed controller quorum - available for local multi-broker clusters as an experimental feature. Basic failover and rolling restart scenarios have tests; further operational hardening, durable Raft state on disk, and stronger guarantees are ongoing work.
@@ -54,7 +56,7 @@ This stage is largely implemented and focuses on practical cluster behavior.
   - tracks last applied offset.
 - Replication manager:
   - derives follower assignments from `ClusterMetadata` (roles/replicas);
-  - for each follower partition, runs a `PartitionReplicator` pointing at the leaderB)s `BrokerInfo`
+  - for each follower partition, runs a `PartitionReplicator` pointing at the leader's `BrokerInfo`
     (via the binary protocol).
   - uses `ReportReplicaProgress` to maintain ISR:
     - reports follower progress (last applied offset + leader HighWatermark) back to the controller;
@@ -94,7 +96,7 @@ This stage is largely implemented and focuses on practical cluster behavior.
 - In-process tests exercising broker + storage + controller + HTTP:
   - topic/partition lifecycle, restart recovery, `/api/topics`, `/api/cluster` consistency.
 - Cluster-aware tests for metadata:
-  - static multi-broker layouts, RaftController command application, ISR updates, brokerB)s awareness of B,itsB- partitions.
+  - static multi-broker layouts, RaftController command application, ISR updates, broker's awareness of its partitions.
 
 #### 3.2 End-to-End (E2E) tests
 
@@ -106,7 +108,7 @@ This stage is largely implemented and focuses on practical cluster behavior.
 
 #### 3.3 Large E2E scenario fuzzing
 
-- Scripted B,big testB- that runs many randomized scenarios to shake out edge cases:
+- Scripted "big test" that runs many randomized scenarios to shake out edge cases:
   - random topic/partition creation, consumer group joins/leaves, produces/fetches, restarts;
   - invariants: no lost acknowledged messages, offsets monotonically increasing per partition, ISR never empty, etc.
 - Designed to run for a long time and cover many combinations, closer to system-level fuzzing.
@@ -149,86 +151,67 @@ Create topic and produce/fetch via CLI:
 
 MQTT usage: connect any MQTT 3.1.1/5.0 client to `:1883`, SUBSCRIBE to a topic, PUBLISH messages (QoS0/1). MQTT topics map directly to broker topics; partitions are chosen via hash.
 
-## Observability
-
-HTTP endpoints (default `:8090`):
-
-- `/metrics` B$ Prometheus metrics.
-- `/healthz` B$ readiness probe.
-- `/debug/pprof/*` B$ pprof handlers.
-
-Replication metrics:
-- `wavemq_replication_lag_offsets` measures the follower lag per topic/partition/broker (leader HWM minus last applied).
-- `wavemq_replication_applied_total` counts how many records each follower has applied while replicating.
-
-Example:
-
-```sh
-curl http://localhost:8090/metrics
-```
-
-### Experimental multi-broker (Raft) quickstart
+## Cluster / experimental mode
 
 Raft-backed clustering (`-controller=raft`) and RF>1 replication are **experimental** features that shine in labs, demos, and controlled multi-broker testbeds rather than production deployments. The controller stores `ClusterMetadata` on disk (`-raft-dir`), brokers bootstrap partitions strictly from `ClusterMetadata`, and follower replication is opt-in via `-replication=true`. The script `scripts/raft-cluster-demo.sh` automates a 2-broker RF=2 scenario including topic creation, leader writes, follower rejections (HTTP 409 with `leaderBrokerID`), and a follower restart that shows replication catching up.
 
-1) Pick Raft addresses (example `127.0.0.1:9001` and `127.0.0.1:9002`). Both brokers must use the same `-raft-peer` list; two peers suffice for RF=2 demos, three for RF=3.
-2) Start broker/controller 1:
+Quickstart outline:
 
-```sh
-./mbd \
-  -broker-id=1 \
-  -controller=raft \
-  -raft-bind=127.0.0.1:9001 \
-  -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
-  -raft-dir=./data1/raft \
-  -data-dir=./data1 \
-  -bind=:7912 -http=:8091 \
-  -replication=true
-```
+1. Build the binaries:
 
-3) Start broker/controller 2 (adjust ports/paths):
+   ```sh
+   go build ./cmd/mbd
+   go build ./cmd/mbctl
+   ```
 
-```sh
-./mbd \
-  -broker-id=2 \
-  -controller=raft \
-  -raft-bind=127.0.0.1:9002 \
-  -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
-  -raft-dir=./data2/raft \
-  -data-dir=./data2 \
-  -bind=:8912 -http=:8092 \
-  -replication=true
-```
+2. Pick Raft peer addresses and directories; for a 2-broker RF=2 demo, you can use:
 
-4) (Optional) Start broker/controller 3 if you want RF=3:
+   - `127.0.0.1:9001`, data `./data1`, HTTP `:8091`, binary `:7912`
+   - `127.0.0.1:9002`, data `./data2`, HTTP `:8092`, binary `:8912`
 
-```sh
-./mbd \
-  -broker-id=3 \
-  -controller=raft \
-  -raft-bind=127.0.0.1:9003 \
-  -raft-peer=127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003 \
-  -raft-dir=./data3/raft \
-  -data-dir=./data3 \
-  -bind=:9912 -http=:8093 \
-  -replication=true
-```
+3. Start broker/controller 1:
 
-5) Create a topic with `replicationFactor=2` via HTTP or `mbctl`, produce and fetch records through the leader, and then watch the cluster:
+   ```sh
+   ./mbd \
+     -broker-id=1 \
+     -controller=raft \
+     -raft-bind=127.0.0.1:9001 \
+     -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
+     -raft-dir=./data1/raft \
+     -data-dir=./data1 \
+     -bind=:7912 -http=:8091 \
+     -replication=true
+   ```
+
+4. Start broker/controller 2:
+
+   ```sh
+   ./mbd \
+     -broker-id=2 \
+     -controller=raft \
+     -raft-bind=127.0.0.1:9002 \
+     -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
+     -raft-dir=./data2/raft \
+     -data-dir=./data2 \
+     -bind=:8912 -http=:8092 \
+     -replication=true
+   ```
+
+5. Create a topic with `replicationFactor=2` via HTTP or `mbctl`, produce and fetch records through the leader, and then inspect the cluster:
 
 - use `/api/controller` to inspect `mode`, Raft `raftState`, `term`, `clusterID`, and metadata `version`;
 - use `/api/cluster` to see per-partition leaders, replica sets, and ISR tracked by the controller;
 - hit `/api/topics/<name>` (or the binary metadata API) to discover which broker owns each partition;
 - expect followers to reply with `ErrNotLeader` (binary) or HTTP 409 plus `leaderBrokerID`; retry those requests against the reported leader.
 
-`scripts/raft-cluster-demo.sh` exercises this flow end-to-end, restarts a follower, and proves that replication manager restarts bring the follower up to date with no duplicate writes.
+The `scripts/raft-cluster-demo.sh` script orchestrates this flow end-to-end, including a follower restart to demonstrate that replication catches up from `WALSink.NextOffset()` without duplicate writes.
 
 #### Client expectations & restart behavior
 
 - **Leader-only traffic**: clients should write/read to the leader returned by metadata (`/api/topics` or `/api/cluster`). Followers reject produce/fetch with the standard leader hint, so drivers should retry against `leaderBrokerID`.
 - **Durable controller state**: `NewRaftController` persists initial `ClusterMetadata` in `-raft-dir` and reuses it on restart so controller restarts continue from the same view without resetting leaders/replicas.
 - **Broker bootstrap**: each broker opens partitions only where it is listed as a replica; the local `metadata.log` is just a cache, so the controller remains the source of truth.
-- **Replication resilience**: the replication manager watches `ClusterMetadata` (via `/api/controller` + `/api/cluster`), starts/stops `PartitionReplicator`s, and reports ISR progress back to the controller. After a restart, followers use `WALSink.NextOffset()` to resume exactly where they left off.
+- **Replication resilience**: the replication manager watches `ClusterMetadata`, starts/stops `PartitionReplicator`s, and reports ISR progress back to the controller. After a restart, followers use `WALSink.NextOffset()` to resume exactly where they left off.
 
 #### Operating a Raft cluster
 
