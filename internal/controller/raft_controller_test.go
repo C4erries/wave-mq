@@ -4,13 +4,95 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/raft"
+	raftboltdb "github.com/hashicorp/raft-boltdb"
 
 	"github.com/c4erries/wave-mq/pkg/api"
 )
+
+func TestRaftControllerPersistsInitialMetadata(t *testing.T) {
+	dir := t.TempDir()
+	cfg := api.BrokerConfig{
+		BrokerID:       1,
+		ControllerMode: "raft",
+	}
+	initial := api.ClusterMetadata{
+		ClusterID: "persist-cluster",
+		Version:   1,
+		Brokers: []api.BrokerInfo{
+			{BrokerID: 1, Host: "leader"},
+		},
+	}
+	rc, err := NewRaftController(cfg, initial, dir)
+	if err != nil {
+		t.Fatalf("new raft controller: %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("close raft controller: %v", err)
+	}
+	store, err := raftboltdb.NewBoltStore(filepath.Join(dir, "raft.bolt"))
+	if err != nil {
+		t.Fatalf("open bolt store: %v", err)
+	}
+	defer store.Close()
+	persisted, err := loadInitialMetadata(store)
+	if err != nil {
+		t.Fatalf("load initial metadata: %v", err)
+	}
+	if persisted == nil || !reflect.DeepEqual(*persisted, initial) {
+		t.Fatalf("expected persisted initial metadata to match %v, got %v", initial, persisted)
+	}
+}
+
+func TestRaftControllerRestoresInitialMetadataOnRestart(t *testing.T) {
+	dir := t.TempDir()
+	cfg := api.BrokerConfig{
+		BrokerID:       1,
+		ControllerMode: "raft",
+	}
+	initial := api.ClusterMetadata{
+		ClusterID: "restart-cluster",
+		Version:   1,
+		Brokers: []api.BrokerInfo{
+			{BrokerID: 1, Host: "leader"},
+		},
+	}
+	rc, err := NewRaftController(cfg, initial, dir)
+	if err != nil {
+		t.Fatalf("new raft controller: %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("close raft controller: %v", err)
+	}
+
+	override := api.ClusterMetadata{
+		ClusterID: "override-cluster",
+		Version:   99,
+	}
+	rc2, err := NewRaftController(cfg, override, dir)
+	if err != nil {
+		t.Fatalf("restart raft controller: %v", err)
+	}
+	defer rc2.Close()
+	restored, err := rc2.GetClusterMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("get cluster metadata after restart: %v", err)
+	}
+	if restored.ClusterID != initial.ClusterID {
+		t.Fatalf("expected cluster id %s after restart, got %s", initial.ClusterID, restored.ClusterID)
+	}
+	if restored.Version != initial.Version {
+		t.Fatalf("expected version %d after restart, got %d", initial.Version, restored.Version)
+	}
+	if len(restored.Brokers) != len(initial.Brokers) {
+		t.Fatalf("expected brokers %+v after restart, got %+v", initial.Brokers, restored.Brokers)
+	}
+}
 
 func TestRaftControllerAssignTopic(t *testing.T) {
 	cfg := api.BrokerConfig{
@@ -183,6 +265,52 @@ func TestRaftControllerRegisterBrokerSingleNode(t *testing.T) {
 	}
 	if meta.Version != firstVersion+1 {
 		t.Fatalf("expected version to increment on new broker")
+	}
+}
+
+func TestRaftControllerRestartsWithPersistentState(t *testing.T) {
+	dir := t.TempDir()
+	cfg := api.BrokerConfig{BrokerID: 1, ControllerMode: "raft"}
+	initial := api.ClusterMetadata{ClusterID: "c1", Version: 1}
+
+	rc, err := NewRaftController(cfg, initial, dir)
+	if err != nil {
+		t.Fatalf("new raft controller: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	meta, err := rc.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 2})
+	if err != nil {
+		t.Fatalf("assign topic: %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("shutdown raft: %v", err)
+	}
+
+	rc, err = NewRaftController(cfg, api.ClusterMetadata{}, dir)
+	if err != nil {
+		t.Fatalf("restart raft controller: %v", err)
+	}
+	defer rc.Close()
+
+	if err := rc.waitForLeader(ctx); err != nil {
+		t.Fatalf("wait for leader after restart: %v", err)
+	}
+
+	if err := waitForMetadata(func() bool {
+		restored, _ := rc.GetClusterMetadata(ctx)
+		return len(restored.Partitions) == len(meta.Partitions) && restored.Version == meta.Version
+	}); err != nil {
+		t.Fatalf("metadata not restored: %v", err)
+	}
+	restored, _ := rc.GetClusterMetadata(ctx)
+	if restored.ClusterID != meta.ClusterID {
+		t.Fatalf("cluster id mismatch after restart: got %s want %s", restored.ClusterID, meta.ClusterID)
+	}
+	if len(restored.Partitions) != len(meta.Partitions) {
+		t.Fatalf("partition count mismatch after restart: got %d want %d", len(restored.Partitions), len(meta.Partitions))
 	}
 }
 
@@ -415,4 +543,54 @@ func TestRaftControllerFailoverApplyCommands(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("metadata did not converge after failover: %v", err)
 	}
+}
+
+func TestRaftControllerWatchStreamsUpdates(t *testing.T) {
+	cfg := api.BrokerConfig{
+		BrokerID: 1,
+		StaticCluster: &api.StaticClusterConfig{
+			ClusterID: "raft-watch",
+			Brokers:   []api.BrokerInfo{{BrokerID: 1, Host: "b1"}},
+		},
+		ControllerMode: "raft",
+	}
+	initial := api.ClusterMetadata{ClusterID: cfg.StaticCluster.ClusterID, Version: 1, Brokers: cfg.StaticCluster.Brokers}
+	rc, err := NewRaftController(cfg, initial, "")
+	if err != nil {
+		t.Fatalf("new raft controller: %v", err)
+	}
+	defer rc.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	updates, err := rc.WatchClusterMetadata(ctx, 0)
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+
+	awaitVersion := func(expected int64) {
+		t.Helper()
+		select {
+		case meta, ok := <-updates:
+			if !ok {
+				t.Fatalf("channel closed before receiving version %d", expected)
+			}
+			if meta.Version != expected {
+				t.Fatalf("expected version %d, got %d", expected, meta.Version)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for version %d", expected)
+		}
+	}
+
+	awaitVersion(1)
+	if _, err := rc.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("assign topic: %v", err)
+	}
+	awaitVersion(2)
+	if _, err := rc.ReportReplicaProgress(ctx, "alpha", 0, cfg.BrokerID, 1, 1); err != nil {
+		t.Fatalf("report progress: %v", err)
+	}
+	awaitVersion(3)
 }

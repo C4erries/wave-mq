@@ -20,6 +20,15 @@ func NewWALSink(store *storage.Manager, topic string, part int) Sink {
 	return &walSink{store: store, topic: topic, part: part}
 }
 
+// EnsureLeaderHighWatermark ensures the local log is opened and returns the next offset to fetch
+// from the leader based on the current high watermark.
+func (s *walSink) EnsureLeaderHighWatermark(ctx context.Context, leaderHighWatermark api.Offset) (api.Offset, error) {
+	if err := s.ensureLog(); err != nil {
+		return -1, err
+	}
+	return s.log.HighWatermark() + 1, nil
+}
+
 func (s *walSink) ensureLog() error {
 	if s.log != nil {
 		return nil
@@ -44,7 +53,6 @@ func (s *walSink) NextOffset() (api.Offset, error) {
 }
 
 func (s *walSink) ApplyBatch(ctx context.Context, records []api.Record, highWatermark api.Offset) (api.Offset, error) {
-	_ = highWatermark
 	if err := s.ensureLog(); err != nil {
 		return -1, err
 	}

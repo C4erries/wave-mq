@@ -51,7 +51,7 @@ func setupTestServerWithRF(t *testing.T, rf int) (*httptest.Server, *broker.Brok
 		BrokerID:          1,
 		DataDir:           dir,
 		ReplicationFactor: rf,
-	}, store, offsetStore, metaStore, ctrl)
+	}, store, offsetStore, metaStore, ctrl, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -80,6 +80,45 @@ func (f *followerCtrl) AssignTopic(ctx context.Context, name string, cfg api.Top
 }
 func (f *followerCtrl) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
 	return f.meta, nil
+}
+
+type assignmentController struct {
+	meta           api.ClusterMetadata
+	topicPlans     map[string][]api.PartitionAssignment
+	assignRequests int
+}
+
+func (a *assignmentController) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
+	return a.meta, nil
+}
+
+func (a *assignmentController) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
+	_ = sinceVersion
+	ch := make(chan api.ClusterMetadata, 1)
+	ch <- a.meta
+	close(ch)
+	return ch, nil
+}
+
+func (a *assignmentController) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
+	_ = ctx
+	a.meta.Brokers = append(a.meta.Brokers, info)
+	return nil
+}
+
+func (a *assignmentController) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = cfg
+	if plans, ok := a.topicPlans[name]; ok {
+		a.meta.Partitions = append(a.meta.Partitions, plans...)
+		a.assignRequests++
+		a.meta.Version++
+	}
+	return a.meta, nil
+}
+
+func (a *assignmentController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+	return a.meta, nil
 }
 
 func TestHTTPProduceNotLeader(t *testing.T) {
@@ -125,7 +164,7 @@ func TestHTTPProduceNotLeader(t *testing.T) {
 	}
 	ctrl := &followerCtrl{meta: meta}
 	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 2, ControllerMode: "raft"}
-	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl)
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -202,7 +241,7 @@ func TestHTTPFetchNotLeader(t *testing.T) {
 	}
 	ctrl := &followerCtrl{meta: meta}
 	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 2, ControllerMode: "raft"}
-	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl)
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -258,6 +297,22 @@ func TestCreateTopicEndpoint(t *testing.T) {
 	if detail.Name != "api-topic" || detail.PartitionCount != 1 {
 		t.Fatalf("unexpected detail: %+v", detail)
 	}
+	if len(detail.Partitions) != 1 {
+		t.Fatalf("expected 1 partition detail, got %d", len(detail.Partitions))
+	}
+	part := detail.Partitions[0]
+	if part.Role != "leader" {
+		t.Fatalf("expected leader role, got %+v", part)
+	}
+	if len(part.ISR) != 1 || part.ISR[0] != 1 {
+		t.Fatalf("unexpected ISR: %+v", part)
+	}
+	if part.LeaderEpoch < 0 {
+		t.Fatalf("expected non-negative leader epoch, got %+v", part)
+	}
+	if len(part.Replicas) != 1 || part.Replicas[0] != 1 {
+		t.Fatalf("unexpected replicas: %+v", part.Replicas)
+	}
 	// verify controller mode is exposed
 	brokerResp, err := http.Get(server.URL + "/api/broker")
 	if err != nil {
@@ -298,11 +353,11 @@ func TestCreateTopicEndpointReplicationFactor(t *testing.T) {
 	if !ok {
 		t.Fatalf("rf-topic not found in metadata")
 	}
-	if topic.ReplicationFactor != 3 {
-		t.Fatalf("expected rf 3, got %d", topic.ReplicationFactor)
+	if topic.ReplicationFactor != 1 {
+		t.Fatalf("expected rf 1 from controller assignments, got %d", topic.ReplicationFactor)
 	}
-	if len(topic.Partitions) != 1 || len(topic.Partitions[0].Replicas) != 3 {
-		t.Fatalf("expected 1 partition with 3 replicas, got %+v", topic.Partitions)
+	if len(topic.Partitions) != 1 || len(topic.Partitions[0].Replicas) != 1 {
+		t.Fatalf("expected 1 partition with 1 replica, got %+v", topic.Partitions)
 	}
 }
 
@@ -331,16 +386,15 @@ func TestCreateTopicEndpointDefaultsReplicationFactor(t *testing.T) {
 	if !ok {
 		t.Fatalf("rf-default not found in metadata")
 	}
-	if topic.ReplicationFactor != 2 {
-		t.Fatalf("expected rf 2 from broker default, got %d", topic.ReplicationFactor)
+	if topic.ReplicationFactor != 1 {
+		t.Fatalf("expected rf 1 from controller assignments, got %d", topic.ReplicationFactor)
 	}
-	if len(topic.Partitions) != 1 || len(topic.Partitions[0].Replicas) != 2 {
-		t.Fatalf("expected replicas from default rf, got %+v", topic.Partitions)
+	if len(topic.Partitions) != 1 || len(topic.Partitions[0].Replicas) != 1 {
+		t.Fatalf("expected replicas from controller assignments, got %+v", topic.Partitions)
 	}
-	for _, r := range topic.Partitions[0].Replicas {
-		if r.BrokerID != 1 {
-			t.Fatalf("expected broker 1 in replicas, got %+v", topic.Partitions[0].Replicas)
-		}
+	r := topic.Partitions[0].Replicas[0]
+	if r.BrokerID != 1 {
+		t.Fatalf("expected broker 1 in replicas, got %+v", topic.Partitions[0].Replicas)
 	}
 }
 
@@ -413,7 +467,7 @@ func TestControllerStatusEndpointRaft(t *testing.T) {
 		BrokerID:          1,
 		DataDir:           dir,
 		ReplicationFactor: 1,
-	}, store, offsetStore, metaStore, ctrl)
+	}, store, offsetStore, metaStore, ctrl, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -506,7 +560,7 @@ func TestClusterMetadataEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("controller: %v", err)
 	}
-	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl)
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -566,5 +620,105 @@ func TestClusterMetadataEndpoint(t *testing.T) {
 		if len(p.Replicas) != 1 || p.Replicas[0] != cfg.BrokerID {
 			t.Fatalf("unexpected replicas for %s-%d: %+v", p.Topic, p.Partition, p.Replicas)
 		}
+	}
+}
+
+func TestCreateTopicRespectsControllerAssignmentsAcrossBrokers(t *testing.T) {
+	assignments := []api.PartitionAssignment{
+		{Topic: "alpha", Partition: 0, Replicas: []int{1}, ISR: []int{1}, Leader: 1},
+		{Topic: "alpha", Partition: 1, Replicas: []int{2}, ISR: []int{2}, Leader: 2},
+	}
+	ctrl := &assignmentController{
+		meta: api.ClusterMetadata{
+			ClusterID: "cluster-assign",
+			Version:   1,
+			Brokers:   []api.BrokerInfo{{BrokerID: 1}, {BrokerID: 2}},
+		},
+		topicPlans: map[string][]api.PartitionAssignment{"alpha": assignments},
+	}
+
+	dir1 := t.TempDir()
+	store1, err := storage.NewManager(storage.Config{DataDir: dir1})
+	if err != nil {
+		t.Fatalf("store1: %v", err)
+	}
+	t.Cleanup(func() { _ = store1.Close() })
+	offset1, err := broker.NewOffsetStore(dir1)
+	if err != nil {
+		t.Fatalf("offset1: %v", err)
+	}
+	t.Cleanup(func() { _ = offset1.Close() })
+	meta1, err := metadata.NewStore(api.BrokerConfig{DataDir: dir1})
+	if err != nil {
+		t.Fatalf("meta1: %v", err)
+	}
+	t.Cleanup(func() { _ = meta1.Close() })
+
+	cfg1 := api.BrokerConfig{BrokerID: 1, DataDir: dir1, ReplicationFactor: 1, ControllerMode: "raft"}
+	b1, err := broker.NewBroker(cfg1, store1, offset1, meta1, ctrl, nil)
+	if err != nil {
+		t.Fatalf("broker1: %v", err)
+	}
+	t.Cleanup(func() { _ = b1.Close() })
+	handler := New(b1, cfg1, ctrl)
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	body := map[string]interface{}{
+		"name":              "alpha",
+		"partitions":        2,
+		"replicationFactor": 1,
+	}
+	data, _ := json.Marshal(body)
+	resp, err := http.Post(srv.URL+"/api/topics", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+	if ctrl.assignRequests != 1 {
+		t.Fatalf("expected controller assign once, got %d", ctrl.assignRequests)
+	}
+
+	parts1 := b1.TopicsSnapshot()
+	if len(parts1) != 1 || parts1[0].Name != "alpha" || parts1[0].Partitions != 1 {
+		t.Fatalf("broker1 should have one local partition, got %+v", parts1)
+	}
+	if _, ok := b1.TopicDetail("alpha"); !ok {
+		t.Fatalf("broker1 missing topic detail")
+	}
+
+	dir2 := t.TempDir()
+	store2, err := storage.NewManager(storage.Config{DataDir: dir2})
+	if err != nil {
+		t.Fatalf("store2: %v", err)
+	}
+	t.Cleanup(func() { _ = store2.Close() })
+	offset2, err := broker.NewOffsetStore(dir2)
+	if err != nil {
+		t.Fatalf("offset2: %v", err)
+	}
+	t.Cleanup(func() { _ = offset2.Close() })
+	meta2, err := metadata.NewStore(api.BrokerConfig{DataDir: dir2})
+	if err != nil {
+		t.Fatalf("meta2: %v", err)
+	}
+	t.Cleanup(func() { _ = meta2.Close() })
+	cfg2 := api.BrokerConfig{BrokerID: 2, DataDir: dir2, ReplicationFactor: 1, ControllerMode: "raft"}
+	b2, err := broker.NewBroker(cfg2, store2, offset2, meta2, ctrl, nil)
+	if err != nil {
+		t.Fatalf("broker2: %v", err)
+	}
+	t.Cleanup(func() { _ = b2.Close() })
+	parts2 := b2.TopicsSnapshot()
+	if len(parts2) != 1 || parts2[0].Partitions != 1 {
+		t.Fatalf("broker2 should have one local partition, got %+v", parts2)
+	}
+	if detail, ok := b2.TopicDetail("alpha"); !ok || detail.PartitionCount != 1 {
+		t.Fatalf("broker2 expected one local partition, got %+v", detail)
 	}
 }

@@ -3,6 +3,7 @@ package replication
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/c4erries/wave-mq/internal/controller"
@@ -17,7 +18,12 @@ type Manager struct {
 	repl  Replicator
 
 	mu      sync.Mutex
-	running map[string]context.CancelFunc
+	running map[string]runningReplicator
+}
+
+type runningReplicator struct {
+	cancel     context.CancelFunc
+	assignment api.PartitionAssignment
 }
 
 // NewManager prepares a replication manager.
@@ -27,7 +33,7 @@ func NewManager(cfg api.BrokerConfig, store *storage.Manager, ctrl controller.Me
 		store:   store,
 		ctrl:    ctrl,
 		repl:    repl,
-		running: make(map[string]context.CancelFunc),
+		running: make(map[string]runningReplicator),
 	}
 }
 
@@ -67,10 +73,11 @@ func (m *Manager) applyMetadata(ctx context.Context, meta api.ClusterMetadata) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Stop replicators no longer needed.
-	for key, cancel := range m.running {
-		if _, ok := desired[key]; !ok {
-			cancel()
+	// Stop replicators no longer needed or whose assignments changed.
+	for key, running := range m.running {
+		desiredAssign, ok := desired[key]
+		if !ok || !sameAssignment(running.assignment, desiredAssign) {
+			running.cancel()
 			delete(m.running, key)
 		}
 	}
@@ -87,20 +94,33 @@ func (m *Manager) applyMetadata(ctx context.Context, meta api.ClusterMetadata) {
 		sink := NewWALSink(m.store, p.Topic, p.Partition)
 		sink = NewReportingSink(sink, m.ctrl, p.Topic, p.Partition, m.cfg.BrokerID)
 		pr := NewPartitionReplicator(m.repl, *leaderInfo, p.Topic, p.Partition, sink)
-		go func() {
+		go func(repKey string, assign api.PartitionAssignment) {
 			_ = pr.Run(ctxRep)
-		}()
-		m.running[key] = cancel
+			// Once the replicator exits, clean up the reference if still present.
+			m.mu.Lock()
+			if current, ok := m.running[repKey]; ok && sameAssignment(current.assignment, assign) {
+				delete(m.running, repKey)
+			}
+			m.mu.Unlock()
+		}(key, p)
+		m.running[key] = runningReplicator{cancel: cancel, assignment: p}
 	}
 }
 
 func (m *Manager) stopAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for key, cancel := range m.running {
-		cancel()
+	for key, running := range m.running {
+		running.cancel()
 		delete(m.running, key)
 	}
+}
+
+func sameAssignment(a, b api.PartitionAssignment) bool {
+	if a.Topic != b.Topic || a.Partition != b.Partition || a.Leader != b.Leader {
+		return false
+	}
+	return slices.Equal(a.Replicas, b.Replicas)
 }
 
 func findBroker(list []api.BrokerInfo, id int) *api.BrokerInfo {

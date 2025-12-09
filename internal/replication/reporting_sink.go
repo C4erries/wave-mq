@@ -56,3 +56,14 @@ func (s *reportingSink) NextOffset() (api.Offset, error) {
 	}
 	return 0, nil
 }
+
+// EnsureLeaderHighWatermark delegates to the inner sink when available.
+func (s *reportingSink) EnsureLeaderHighWatermark(ctx context.Context, leaderHighWatermark api.Offset) (api.Offset, error) {
+	if align, ok := s.inner.(HighWatermarkAligner); ok {
+		return align.EnsureLeaderHighWatermark(ctx, leaderHighWatermark)
+	}
+	if prov, ok := s.inner.(OffsetProvider); ok {
+		return prov.NextOffset()
+	}
+	return 0, nil
+}

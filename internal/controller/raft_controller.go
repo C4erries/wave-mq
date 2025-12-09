@@ -3,13 +3,17 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/hashicorp/raft"
+	raftboltdb "github.com/hashicorp/raft-boltdb"
 
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -52,10 +56,11 @@ type raftMetadataFSM struct {
 	mu   sync.Mutex
 	meta api.ClusterMetadata
 	cfg  api.BrokerConfig
+	pub  *metadataPublisher
 }
 
-func newRaftMetadataFSM(cfg api.BrokerConfig, initial api.ClusterMetadata) *raftMetadataFSM {
-	return &raftMetadataFSM{meta: initial, cfg: cfg}
+func newRaftMetadataFSM(cfg api.BrokerConfig, initial api.ClusterMetadata, pub *metadataPublisher) *raftMetadataFSM {
+	return &raftMetadataFSM{meta: initial, cfg: cfg, pub: pub}
 }
 
 func (f *raftMetadataFSM) Apply(l *raft.Log) interface{} {
@@ -64,7 +69,8 @@ func (f *raftMetadataFSM) Apply(l *raft.Log) interface{} {
 		return err
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	startVersion := f.meta.Version
+	changed := false
 	switch cmd.Type {
 	case cmdAssignTopic:
 		partitions := cmd.TopicConfig.Partitions
@@ -84,6 +90,13 @@ func (f *raftMetadataFSM) Apply(l *raft.Log) interface{} {
 		}
 	default:
 		err = fmt.Errorf("unknown command type %d", cmd.Type)
+	}
+	meta := f.meta
+	changed = changed || meta.Version != startVersion
+	f.mu.Unlock()
+
+	if err == nil && changed && f.pub != nil {
+		f.pub.publish(meta)
 	}
 	return err
 }
@@ -156,6 +169,9 @@ func (f *raftMetadataFSM) Restore(r io.ReadCloser) error {
 	f.mu.Lock()
 	f.meta = meta
 	f.mu.Unlock()
+	if f.pub != nil {
+		f.pub.publish(meta)
+	}
 	return nil
 }
 
@@ -175,9 +191,11 @@ func (s *metadataSnapshot) Release() {}
 
 // RaftController replicates cluster metadata through a Raft log.
 type RaftController struct {
-	cfg  api.BrokerConfig
-	fsm  *raftMetadataFSM
-	raft *raft.Raft
+	cfg     api.BrokerConfig
+	fsm     *raftMetadataFSM
+	raft    *raft.Raft
+	pub     *metadataPublisher
+	closers []io.Closer
 }
 
 // NewRaftController bootstraps a Raft instance with given initial metadata.
@@ -201,9 +219,10 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 	rCfg.LeaderLeaseTimeout = 50 * time.Millisecond
 	rCfg.CommitTimeout = 10 * time.Millisecond
 
-	logStore := raft.NewInmemStore()
-	stableStore := raft.NewInmemStore()
-	snapStore := raft.NewInmemSnapshotStore()
+	logStore, stableStore, snapStore, closers, err := buildStores(raftDir)
+	if err != nil {
+		return nil, err
+	}
 	var transport raft.Transport
 	if useInmem {
 		addr, inmem := raft.NewInmemTransport(raft.ServerAddress(rCfg.LocalID))
@@ -218,22 +237,99 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 		localAddr = raft.ServerAddress(cfg.RaftBindAddr)
 	}
 
-	if len(cfg.RaftPeers) == 0 {
-		cfg.RaftPeers = []string{string(localAddr)}
-	}
-	config := raft.Configuration{
-		Servers: buildServers(cfg, rCfg.LocalID, localAddr),
-	}
-	if err := raft.BootstrapCluster(rCfg, logStore, stableStore, snapStore, transport, config); err != nil && err != raft.ErrCantBootstrap {
+	stored, err := loadInitialMetadata(stableStore)
+	if err != nil {
 		return nil, err
 	}
+	initial := initialMeta
+	if stored != nil {
+		initial = *stored
+	} else {
+		if err := persistInitialMetadata(stableStore, initial); err != nil {
+			return nil, err
+		}
+	}
 
-	fsm := newRaftMetadataFSM(cfg, initialMeta)
+	hasState, err := raft.HasExistingState(logStore, stableStore, snapStore)
+	if err != nil {
+		return nil, err
+	}
+	if !hasState {
+		if len(cfg.RaftPeers) == 0 {
+			cfg.RaftPeers = []string{string(localAddr)}
+		}
+		config := raft.Configuration{
+			Servers: buildServers(cfg, rCfg.LocalID, localAddr),
+		}
+		if err := persistInitialMetadata(stableStore, initial); err != nil {
+			return nil, err
+		}
+		if err := raft.BootstrapCluster(rCfg, logStore, stableStore, snapStore, transport, config); err != nil && err != raft.ErrCantBootstrap {
+			return nil, err
+		}
+	}
+
+	pub := metadataPublisher{}
+	fsm := newRaftMetadataFSM(cfg, initial, &pub)
 	r, err := raft.NewRaft(rCfg, fsm, logStore, stableStore, snapStore, transport)
 	if err != nil {
 		return nil, err
 	}
-	return &RaftController{cfg: cfg, fsm: fsm, raft: r}, nil
+	return &RaftController{cfg: cfg, fsm: fsm, raft: r, pub: &pub, closers: closers}, nil
+}
+
+func buildStores(raftDir string) (raft.LogStore, raft.StableStore, raft.SnapshotStore, []io.Closer, error) {
+	if raftDir == "" {
+		store := raft.NewInmemStore()
+		return store, store, raft.NewInmemSnapshotStore(), nil, nil
+	}
+	if err := os.MkdirAll(raftDir, 0o755); err != nil {
+		return nil, nil, nil, nil, err
+	}
+	dbPath := filepath.Join(raftDir, "raft.bolt")
+	logStore, err := raftboltdb.NewBoltStore(dbPath)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	snapStore, err := raft.NewFileSnapshotStore(raftDir, 2, io.Discard)
+	if err != nil {
+		return nil, nil, nil, []io.Closer{logStore}, err
+	}
+	return logStore, logStore, snapStore, []io.Closer{logStore}, nil
+}
+
+var initialMetadataKey = []byte("metadata/initial")
+
+func persistInitialMetadata(store raft.StableStore, meta api.ClusterMetadata) error {
+	if store == nil {
+		return nil
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return store.Set(initialMetadataKey, b)
+}
+
+func loadInitialMetadata(store raft.StableStore) (*api.ClusterMetadata, error) {
+	if store == nil {
+		return nil, nil
+	}
+	b, err := store.Get(initialMetadataKey)
+	if err != nil {
+		if errors.Is(err, raftboltdb.ErrKeyNotFound) || err.Error() == "not found" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(b) == 0 {
+		return nil, nil
+	}
+	var meta api.ClusterMetadata
+	if err := json.Unmarshal(b, &meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
 }
 
 func (c *RaftController) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
@@ -244,16 +340,8 @@ func (c *RaftController) GetClusterMetadata(ctx context.Context) (api.ClusterMet
 }
 
 func (c *RaftController) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
-	_ = sinceVersion
-	ch := make(chan api.ClusterMetadata, 1)
-	go func() {
-		defer close(ch)
-		meta, _ := c.GetClusterMetadata(ctx)
-		select {
-		case <-ctx.Done():
-		case ch <- meta:
-		}
-	}()
+	meta, _ := c.GetClusterMetadata(ctx)
+	ch := c.pub.watch(ctx, sinceVersion, meta)
 	return ch, nil
 }
 
@@ -377,7 +465,11 @@ func (c *RaftController) RaftPeers() []PeerInfo {
 // Close stops the underlying Raft instance.
 func (c *RaftController) Close() error {
 	f := c.raft.Shutdown()
-	return f.Error()
+	err := f.Error()
+	for _, cl := range c.closers {
+		_ = cl.Close()
+	}
+	return err
 }
 
 func buildServers(cfg api.BrokerConfig, localID raft.ServerID, localAddr raft.ServerAddress) []raft.Server {

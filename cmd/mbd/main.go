@@ -135,13 +135,20 @@ func main() {
 	}
 	logger.Info("broker registered in controller", "brokerID", bInfo.BrokerID, "host", bInfo.Host)
 
+	metaSnapshot, err := ctrl.GetClusterMetadata(context.Background())
+	if err != nil {
+		logger.Error("cluster metadata fetch failed", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("fetched initial cluster metadata", "version", metaSnapshot.Version, "partitions", len(metaSnapshot.Partitions))
+
 	offsetStore, err := broker.NewOffsetStore(cfg.DataDir)
 	if err != nil {
 		logger.Error("offset store init failed", "err", err)
 		os.Exit(1)
 	}
 
-	b, err := broker.NewBroker(cfg, store, offsetStore, metadataStore, ctrl)
+	b, err := broker.NewBroker(cfg, store, offsetStore, metadataStore, ctrl, &metaSnapshot)
 	if err != nil {
 		logger.Error("broker init failed", "err", err)
 		os.Exit(1)
@@ -161,6 +168,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if err := b.StartClusterMetadataWatcher(ctx); err != nil {
+		logger.Error("cluster metadata watcher init failed", "err", err)
+		os.Exit(1)
+	}
 	if cfg.Replication {
 		rep := replication.NewBinaryReplicator()
 		replMgr := replication.NewManager(cfg, store, ctrl, rep)
