@@ -1,6 +1,6 @@
 # План доработки wave-mq
 
-## 1. Single-node ядро (брокер, storage, протоколы) — сделано
+## 1. Single-node ядро (broker, storage, протоколы) — сделано
 
 - Segmented WAL + индекс + recovery (`internal/storage`).
 - Broker API: topics/partitions, produce/fetch, consumer groups и offset‑WAL (`internal/broker`).
@@ -9,69 +9,72 @@
 
 ## 2. Контроллер и долговечность метаданных кластера
 
-### 2.1 Raft‑контроллер: реальная персистентность
+### 2.1 Raft‑контроллер: персистентность — **частично готово**
 
-- Использовать `raftDir` для дисковых `logStore`/`stableStore`/`snapshotStore` (через `hashicorp/raft`), вместо всегда in‑memory.
-- Развести режимы:
-  - dev/test: полностью in‑memory (как сейчас),
-  - cluster: при указанном `-raft-dir` — устойчивое состояние кластера на диске.
-- Тест: остановить и поднять кластер заново, убедиться, что `ClusterMetadata` (topics, partitions, leaders/replicas, ISR) восстановлен.
+- Используется `raftDir` для дисковых `LogStore`/`StableStore`/`SnapshotStore` (через `hashicorp/raft` и `raft-boltdb`) вместо чисто in‑memory — сделано в `internal/controller/raft_controller.go`.
+- In‑memory режим по‑прежнему используется для dev/test при пустом `raftDir` — сделано.
+- TODO: дожать использование `persistInitialMetadata` / `loadInitialMetadata`, чтобы initial `ClusterMetadata` гарантированно восстанавливался при bootstrap без потери информации.
 
-### 2.2 Единая семантика `WatchClusterMetadata` (стриминг, а не один снапшот)
+### 2.2 Стримящий `WatchClusterMetadata` — **сделано**
 
-- Обновить контракт `MetadataStore.WatchClusterMetadata`: канал должен выдавать **последовательность снапшотов** при росте `Version`, пока не отменён `ctx`.
+- Контракт `MetadataStore.WatchClusterMetadata` реализован как поток снапшотов при росте `Version`.
 - `SingleNodeController`:
-  - хранить список подписчиков;
-  - после каждого `AssignTopic`/`ReportReplicaProgress` отправлять обновлённый `ClusterMetadata` всем активным watcher’ам.
+  - хранит подписчиков через `metadataPublisher`;
+  - публикует обновлённый `ClusterMetadata` в `AssignTopic` и `ReportReplicaProgress`.
 - `RaftController`:
-  - после применения команды (в `Apply` или через наблюдатель за `fsm.meta.Version`) пушить свежий снапшот в каналы watcher’ов.
+  - `raftMetadataFSM.Apply` и `Restore` вызывают `pub.publish` при изменении метаданных;
+  - `WatchClusterMetadata` использует `pub.watch(ctx, sinceVersion, meta)`.
 
-## 3. Брокер: контроллер как source of truth и материализация топиков
+## 3. Брокер: контроллер как source of truth и материализация топиков — **TODO**
 
 ### 3.1 Старт брокера от контроллера (cluster‑mode)
 
 - В `cmd/mbd` / `broker.NewBroker`:
-  - после инициализации контроллера получить `ClusterMetadata`;
-  - вместо чистой опоры на `metadata.log` пройти по `meta.Partitions` и:
-    - для каждой партиции, где текущий брокер в `Replicas`, открыть/создать локальный WAL через `storage.Manager.OpenLog`;
-    - при несоответствии локального `metadata.TopicState` и `ClusterMetadata` приводить локальное состояние к виду контроллера.
-- В single‑node режиме сохранить оптимизацию: старт от `metadata.log`, но контроллер всё равно должен отражать то же состояние.
+  - после инициализации контроллера получать `ClusterMetadata`;
+  - на его основе создавать локальные `Topic`/`Partition` для всех `PartitionAssignment`, где `BrokerID` текущего брокера входит в `Replicas`, даже если `metadata.log` пустой;
+  - при расхождении локального `metadata.TopicState` и `ClusterMetadata` приводить локальное состояние к виду контроллера (контроллер — источник правды, `metadata.log` — кэш).
+- В single‑node режиме можно по‑прежнему начинать с `metadata.log`, но контроллер всё равно должен отражать то же состояние.
 
 ### 3.2 Создание топика через контроллер (cluster‑mode)
 
-- Перестроить поток `HTTP /api/topics` → `CreateTopic`, чтобы:
-  - в cluster‑mode сначала вызывать `ctrl.AssignTopic(name, cfg)` и получать распределение реплик;
-  - затем на затронутых брокерах материализовать локальные партиции.
+- Перестроить поток `HTTP /api/topics` → `CreateTopic` так, чтобы в cluster‑mode:
+  - сначала вызывать `ctrl.AssignTopic(name, cfg)` и получать распределение реплик;
+  - затем материализовывать локальные партиции на текущем брокере (минимум — для лидера; по возможности — и для фолловеров).
 - `metadata.Store` на брокере использовать как кэш локальных событий; при расхождении с `ClusterMetadata` — игнорировать локальный лог и восстанавливать состояние по контроллеру.
 
 ### 3.3 Фолловеры: bootstrap только по контроллеру
 
-- При приходе нового `PartitionAssignment` через `WatchClusterMetadata`, где брокер в `Replicas`:
+- При получении нового `PartitionAssignment` через `WatchClusterMetadata`, где брокер входит в `Replicas`:
   - при отсутствии локального лога создавать `storage.Log` для `(topic, partition)`;
-  - инициализировать локальный `Partition` с ролью `RoleFollower`.
+  - инициализировать локальный `Partition` в `Broker` с ролью `RoleFollower`.
 
 ## 4. Репликация: привязка к стримящимся метаданным
 
-### 4.1 Replication Manager поверх стриминга `ClusterMetadata`
+### 4.1 Replication Manager поверх стриминга `ClusterMetadata` — **сделано**
 
-- `internal/replication.Manager.Run` должен:
-  - обрабатывать **последовательность** снапшотов из `WatchClusterMetadata`;
-  - при каждом новом снапшоте вызывать `applyMetadata` и корректно останавливать/запускать репликаторы.
+- `internal/replication.Manager.Run`:
+  - слушает последовательность снапшотов из `WatchClusterMetadata(ctx, 0)`;
+  - при каждом новом снапшоте вызывает `applyMetadata`, останавливая/запуская репликаторы при изменении `PartitionAssignment`;
+  - чистит `running` при завершении репликатора.
 
-### 4.2 Устойчивый bootstrap репликатора
+### 4.2 Устойчивый bootstrap репликатора — **TODO**
 
 - Убедиться, что:
   - `WALSink.NextOffset` корректно даёт позицию после рестарта брокера;
-  - `PartitionReplicator` всегда читает начальный offset через `OffsetProvider` и догоняет лидера.
-- Тест: лидер + follower с RF=2, несколько перезапусков follower’а и контроллера без потери подтверждённых сообщений.
+  - `PartitionReplicator` всегда берёт начальный offset через `OffsetProvider` и догоняет лидера без пропусков/дубликатов подтверждённых сообщений.
+- Добавить тест(ы) (unit/integration/e2e):
+  - лидер + follower с RF=2;
+  - несколько рестартов follower’а и контроллера;
+  - проверка, что подтверждённые записи не теряются и ISR обновляется корректно.
 
-## 5. Операционный слой и «экспериментальный» кластерный режим
+## 5. Операционный слой и «экспериментальный» кластерный режим — **частично/TODO**
 
-- Обновить/расширить `/api/controller` и `/api/cluster` (при необходимости) для удобного отображения роли брокера (leader/follower, ISR) и режима контроллера (`single`/`raft`, experimental).
-- В `README.md` и учебных материалах явно описать:
-  - что Raft‑состояние изначально может быть in‑memory,
-  - что кластерный режим и репликация — **экспериментальны**, без строгих гарантий при сетевых разделениях и сложных отказах.
-- Подготовить 1–2 сценарных теста/скрипта:
-  - запуск 2–3 брокеров с Raft‑контроллером, создание топика с RF=2, проверка чтения/записи только к лидеру;
-  - рестарт брокера и контроллера с проверкой восстановления `ClusterMetadata` и продолжения репликации.
+- Обновить/расширить `/api/controller` и `/api/cluster` (при необходимости) для удобного отображения ролей брокеров (leader/follower, ISR) и режима контроллера (`single`/`raft`, experimental).
+- В `README.md`:
+  - явно описать, что Raft‑режим с replication — экспериментальный (для демо/лабораторий, не прод);
+  - показать типичный сценарий запуска 2–3 брокеров с Raft‑контроллером и включённой репликацией;
+  - описать сценарий восстановления после рестартов кластера.
+- Подготовить сценарные тесты/скрипты:
+  - запуск 2–3 брокеров с RF=2, проверка записи/чтения только на лидера и корректных ошибок на follower’ах;
+  - рестарт брокеров и контроллера с проверкой, что `ClusterMetadata` восстанавливается, репликация продолжает работу, а ISR остаётся ненулевым.
 
