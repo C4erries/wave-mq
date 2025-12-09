@@ -341,3 +341,104 @@ func TestCreateTopicUsesControllerAssignments(t *testing.T) {
 		t.Fatalf("expected topic detail with two partitions, got %+v", detail)
 	}
 }
+
+func TestBrokerUpdatesPartitionsOnClusterMetadataChange(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := storage.NewManager(storage.Config{
+		DataDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	if err := store.Recover(ctx); err != nil {
+		t.Fatalf("storage recover: %v", err)
+	}
+	offsetStore, err := NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
+	defer func() {
+		store.Close()
+		offsetStore.Close()
+		metaStore.Close()
+	}()
+	cfg := api.BrokerConfig{BrokerID: 1, ReplicationFactor: 1, DataDir: dir}
+	ctrl := &trackingController{
+		meta: api.ClusterMetadata{Brokers: []api.BrokerInfo{{BrokerID: 1}, {BrokerID: 2}}},
+	}
+	b, err := NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+	defer b.Close()
+
+	meta1 := api.ClusterMetadata{
+		Version: 1,
+		Brokers: []api.BrokerInfo{{BrokerID: 1}, {BrokerID: 2}},
+		Partitions: []api.PartitionAssignment{{
+			Topic:       "alpha",
+			Partition:   0,
+			Replicas:    []int{1, 2},
+			ISR:         []int{1},
+			Leader:      1,
+			LeaderEpoch: 1,
+		}},
+	}
+	if err := b.handleClusterMetadataUpdate(ctx, meta1); err != nil {
+		t.Fatalf("apply meta1: %v", err)
+	}
+	topic, ok := b.topics["alpha"]
+	if !ok {
+		t.Fatalf("expected topic alpha after meta1")
+	}
+	part0, ok := topic.Partitions[0]
+	if !ok {
+		t.Fatalf("expected partition 0 for alpha")
+	}
+	if part0.Metadata.Leader != 1 || part0.Metadata.Replica.Role != api.RoleLeader {
+		t.Fatalf("unexpected initial metadata %+v", part0.Metadata)
+	}
+
+	meta2 := api.ClusterMetadata{
+		Version: 2,
+		Brokers: []api.BrokerInfo{{BrokerID: 1}, {BrokerID: 2}},
+		Partitions: []api.PartitionAssignment{
+			{
+				Topic:       "alpha",
+				Partition:   0,
+				Replicas:    []int{1, 2},
+				ISR:         []int{1, 2},
+				Leader:      2,
+				LeaderEpoch: 2,
+			},
+			{
+				Topic:       "alpha",
+				Partition:   1,
+				Replicas:    []int{1, 2},
+				ISR:         []int{2},
+				Leader:      2,
+				LeaderEpoch: 1,
+			},
+		},
+	}
+	if err := b.handleClusterMetadataUpdate(ctx, meta2); err != nil {
+		t.Fatalf("apply meta2: %v", err)
+	}
+	topic = b.topics["alpha"]
+	part0 = topic.Partitions[0]
+	if part0.Metadata.Leader != 2 || part0.Metadata.Replica.Role != api.RoleFollower {
+		t.Fatalf("expected follower metadata after meta2, got %+v", part0.Metadata)
+	}
+	part1, ok := topic.Partitions[1]
+	if !ok {
+		t.Fatalf("expected new partition1 for alpha")
+	}
+	if part1.Metadata.Leader != 2 || part1.Metadata.Replica.Role != api.RoleFollower {
+		t.Fatalf("unexpected metadata for partition1: %+v", part1.Metadata)
+	}
+}

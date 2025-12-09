@@ -168,6 +168,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if err := b.StartClusterMetadataWatcher(ctx); err != nil {
+		logger.Error("cluster metadata watcher init failed", "err", err)
+		os.Exit(1)
+	}
 	if cfg.Replication {
 		rep := replication.NewBinaryReplicator()
 		replMgr := replication.NewManager(cfg, store, ctrl, rep)
