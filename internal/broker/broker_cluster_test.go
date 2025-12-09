@@ -103,7 +103,7 @@ func TestLocalPartitionsSnapshotFiltersByLeader(t *testing.T) {
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore, metaStore, cluster)
+	}, store, offsetStore, metaStore, cluster, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestClusterMetadataOverridesLocalCache(t *testing.T) {
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore, metaStore, cluster)
+	}, store, offsetStore, metaStore, cluster, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -199,5 +199,145 @@ func TestClusterMetadataOverridesLocalCache(t *testing.T) {
 	}
 	if part.Metadata.Leader != 2 {
 		t.Fatalf("expected leader 2, got %d", part.Metadata.Leader)
+	}
+}
+
+type trackingController struct {
+	meta           api.ClusterMetadata
+	assignRequests int
+}
+
+func (t *trackingController) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
+	_ = ctx
+	return t.meta, nil
+}
+
+func (t *trackingController) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
+	_ = ctx
+	_ = sinceVersion
+	ch := make(chan api.ClusterMetadata, 1)
+	ch <- t.meta
+	close(ch)
+	return ch, nil
+}
+
+func (t *trackingController) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
+	_ = ctx
+	_ = info
+	return nil
+}
+
+func (t *trackingController) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
+	_ = ctx
+	t.assignRequests++
+	parts := make([]api.PartitionAssignment, 0, cfg.Partitions)
+	for pid := 0; pid < cfg.Partitions; pid++ {
+		leader := 1
+		if pid%2 == 1 {
+			leader = 2
+		}
+		parts = append(parts, api.PartitionAssignment{
+			Topic:       name,
+			Partition:   pid,
+			Replicas:    []int{1, 2},
+			ISR:         []int{1, 2},
+			Leader:      leader,
+			LeaderEpoch: 0,
+		})
+	}
+	t.meta.Partitions = append(t.meta.Partitions, parts...)
+	t.meta.Version++
+	return t.meta, nil
+}
+
+func (t *trackingController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = topic
+	_ = partition
+	_ = brokerID
+	_ = lastOffset
+	_ = leaderHighWatermark
+	return t.meta, nil
+}
+
+func TestCreateTopicUsesControllerAssignments(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewManager(storage.Config{
+		DataDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	if err := store.Recover(context.Background()); err != nil {
+		t.Fatalf("storage recover: %v", err)
+	}
+	offsetStore, err := NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
+	defer func() {
+		_ = store.Close()
+		_ = offsetStore.Close()
+		_ = metaStore.Close()
+	}()
+	ctrl := &trackingController{
+		meta: api.ClusterMetadata{
+			ClusterID: "cluster-track",
+			Version:   1,
+			Brokers:   []api.BrokerInfo{{BrokerID: 1}, {BrokerID: 2}},
+		},
+	}
+	cfg := api.BrokerConfig{
+		BrokerID:          1,
+		ReplicationFactor: 2,
+		DataDir:           dir,
+		ControllerMode:    "raft",
+	}
+	b, err := NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+	defer b.Close()
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "alpha", api.TopicConfig{Partitions: 2, ReplicationFactor: 2}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	if ctrl.assignRequests != 1 {
+		t.Fatalf("expected one assign request, got %d", ctrl.assignRequests)
+	}
+	recovered, err := metaStore.RecoverTopics(ctx)
+	if err != nil {
+		t.Fatalf("recover topics: %v", err)
+	}
+	topic, ok := recovered.Topics["alpha"]
+	if !ok {
+		t.Fatalf("expected alpha metadata")
+	}
+	if len(topic.Partitions) != 2 {
+		t.Fatalf("expected broker to log two partitions, got %d", len(topic.Partitions))
+	}
+	for _, part := range topic.Partitions {
+		if len(part.Replicas) != 2 {
+			t.Fatalf("expected two replicas in metadata, got %d", len(part.Replicas))
+		}
+		found1, found2 := false, false
+		for _, r := range part.Replicas {
+			if int(r.BrokerID) == 1 {
+				found1 = true
+			}
+			if int(r.BrokerID) == 2 {
+				found2 = true
+			}
+		}
+		if !found1 || !found2 {
+			t.Fatalf("unexpected replicas %v", part.Replicas)
+		}
+	}
+	if detail, ok := b.TopicDetail("alpha"); !ok || detail.PartitionCount != 2 {
+		t.Fatalf("expected topic detail with two partitions, got %+v", detail)
 	}
 }

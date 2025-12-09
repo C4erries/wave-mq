@@ -97,7 +97,7 @@ type GroupMember struct {
 }
 
 // NewBroker wires together configuration and the storage backend.
-func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore, meta *metadata.Store, cluster controller.MetadataStore) (*Broker, error) {
+func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore, meta *metadata.Store, cluster controller.MetadataStore, initialMeta *api.ClusterMetadata) (*Broker, error) {
 	if storage == nil {
 		return nil, fmt.Errorf("storage is required")
 	}
@@ -149,7 +149,7 @@ func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore, meta
 	topics := recoveredTopics.Topics
 	var assignments map[string]map[int]api.PartitionAssignment
 	if b.cluster != nil {
-		topics, assignments, err = b.reconcileClusterMetadata(context.Background(), topics)
+		topics, assignments, err = b.reconcileClusterMetadata(context.Background(), topics, initialMeta)
 		if err != nil {
 			return nil, err
 		}
@@ -179,6 +179,13 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 	if rf <= 0 {
 		rf = 1
 	}
+	cfg.Partitions = partitions
+	cfg.ReplicationFactor = rf
+
+	if b.cluster != nil {
+		return b.createTopicFromClusterAssignments(ctx, name, cfg)
+	}
+
 	state := metadata.TopicState{
 		Name:              name,
 		NumPartitions:     partitions,
@@ -223,6 +230,25 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 	}
 	b.known[name] = state
 	return b.loadTopicLocked(ctx, state, nil)
+}
+
+func (b *Broker) createTopicFromClusterAssignments(ctx context.Context, name string, cfg api.TopicConfig) error {
+	exists, err := b.topicExistsInCluster(ctx, name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return ErrTopicExists
+	}
+	meta, err := b.cluster.AssignTopic(ctx, name, cfg)
+	if err != nil {
+		return err
+	}
+	assignments := assignmentsForBroker(meta, name, b.cfg.BrokerID)
+	if len(assignments) == 0 {
+		return nil
+	}
+	return b.CreateTopicWithAssignments(ctx, name, cfg, assignments)
 }
 
 // CreateTopicWithAssignments initializes local partitions based on controller assignments.
@@ -306,10 +332,16 @@ func (b *Broker) bootstrapTopicsFromMetadata(ctx context.Context, topics map[str
 	return nil
 }
 
-func (b *Broker) reconcileClusterMetadata(ctx context.Context, local map[string]metadata.TopicState) (map[string]metadata.TopicState, map[string]map[int]api.PartitionAssignment, error) {
-	meta, err := b.cluster.GetClusterMetadata(ctx)
-	if err != nil {
-		return nil, nil, err
+func (b *Broker) reconcileClusterMetadata(ctx context.Context, local map[string]metadata.TopicState, initial *api.ClusterMetadata) (map[string]metadata.TopicState, map[string]map[int]api.PartitionAssignment, error) {
+	var meta api.ClusterMetadata
+	if initial != nil {
+		meta = *initial
+	} else {
+		var err error
+		meta, err = b.cluster.GetClusterMetadata(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	assignments := make(map[string]map[int]api.PartitionAssignment)
 	topics := make(map[string]metadata.TopicState)
@@ -360,6 +392,37 @@ func partitionSpecFromAssignment(assign api.PartitionAssignment) metadata.Partit
 		})
 	}
 	return metadata.PartitionSpec{ID: int32(assign.Partition), Replicas: replicas}
+}
+
+func assignmentsForBroker(meta api.ClusterMetadata, topic string, brokerID int) map[int]api.PartitionAssignment {
+	result := make(map[int]api.PartitionAssignment)
+	for _, p := range meta.Partitions {
+		if p.Topic != topic {
+			continue
+		}
+		if p.Leader != brokerID && !containsInt(p.Replicas, brokerID) {
+			continue
+		}
+		result[p.Partition] = p
+	}
+	return result
+}
+
+func (b *Broker) topicExistsInCluster(ctx context.Context, name string) (bool, error) {
+	meta, err := b.cluster.GetClusterMetadata(ctx)
+	if err != nil {
+		return false, err
+	}
+	return topicExists(meta, name), nil
+}
+
+func topicExists(meta api.ClusterMetadata, name string) bool {
+	for _, p := range meta.Partitions {
+		if p.Topic == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *Broker) loadTopicLocked(ctx context.Context, state metadata.TopicState, assignments map[int]api.PartitionAssignment) error {

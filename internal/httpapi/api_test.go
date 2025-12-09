@@ -51,7 +51,7 @@ func setupTestServerWithRF(t *testing.T, rf int) (*httptest.Server, *broker.Brok
 		BrokerID:          1,
 		DataDir:           dir,
 		ReplicationFactor: rf,
-	}, store, offsetStore, metaStore, ctrl)
+	}, store, offsetStore, metaStore, ctrl, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestHTTPProduceNotLeader(t *testing.T) {
 	}
 	ctrl := &followerCtrl{meta: meta}
 	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 2, ControllerMode: "raft"}
-	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl)
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestHTTPFetchNotLeader(t *testing.T) {
 	}
 	ctrl := &followerCtrl{meta: meta}
 	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 2, ControllerMode: "raft"}
-	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl)
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -467,7 +467,7 @@ func TestControllerStatusEndpointRaft(t *testing.T) {
 		BrokerID:          1,
 		DataDir:           dir,
 		ReplicationFactor: 1,
-	}, store, offsetStore, metaStore, ctrl)
+	}, store, offsetStore, metaStore, ctrl, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -560,7 +560,7 @@ func TestClusterMetadataEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("controller: %v", err)
 	}
-	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl)
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -624,10 +624,10 @@ func TestClusterMetadataEndpoint(t *testing.T) {
 }
 
 func TestCreateTopicRespectsControllerAssignmentsAcrossBrokers(t *testing.T) {
-        assignments := []api.PartitionAssignment{
-                {Topic: "alpha", Partition: 0, Replicas: []int{1}, ISR: []int{1}, Leader: 1},
-                {Topic: "alpha", Partition: 1, Replicas: []int{2}, ISR: []int{2}, Leader: 2},
-        }
+	assignments := []api.PartitionAssignment{
+		{Topic: "alpha", Partition: 0, Replicas: []int{1}, ISR: []int{1}, Leader: 1},
+		{Topic: "alpha", Partition: 1, Replicas: []int{2}, ISR: []int{2}, Leader: 2},
+	}
 	ctrl := &assignmentController{
 		meta: api.ClusterMetadata{
 			ClusterID: "cluster-assign",
@@ -655,7 +655,7 @@ func TestCreateTopicRespectsControllerAssignmentsAcrossBrokers(t *testing.T) {
 	t.Cleanup(func() { _ = meta1.Close() })
 
 	cfg1 := api.BrokerConfig{BrokerID: 1, DataDir: dir1, ReplicationFactor: 1, ControllerMode: "raft"}
-	b1, err := broker.NewBroker(cfg1, store1, offset1, meta1, ctrl)
+	b1, err := broker.NewBroker(cfg1, store1, offset1, meta1, ctrl, nil)
 	if err != nil {
 		t.Fatalf("broker1: %v", err)
 	}
@@ -709,7 +709,7 @@ func TestCreateTopicRespectsControllerAssignmentsAcrossBrokers(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = meta2.Close() })
 	cfg2 := api.BrokerConfig{BrokerID: 2, DataDir: dir2, ReplicationFactor: 1, ControllerMode: "raft"}
-	b2, err := broker.NewBroker(cfg2, store2, offset2, meta2, ctrl)
+	b2, err := broker.NewBroker(cfg2, store2, offset2, meta2, ctrl, nil)
 	if err != nil {
 		t.Fatalf("broker2: %v", err)
 	}

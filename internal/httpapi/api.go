@@ -266,23 +266,7 @@ func (h *Handler) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 		ReplicationFactor: req.ReplicationFactor,
 	}
 	ctx := r.Context()
-	assignments := map[int]api.PartitionAssignment{}
-	if h.ctrl != nil {
-		meta, err := h.ctrl.AssignTopic(ctx, req.Name, cfg)
-		if err != nil {
-			http.Error(w, "cluster metadata update failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		for _, p := range meta.Partitions {
-			if p.Topic != req.Name {
-				continue
-			}
-			if p.Leader == h.cfg.BrokerID || containsInt(p.Replicas, h.cfg.BrokerID) {
-				assignments[p.Partition] = p
-			}
-		}
-	}
-	if err := h.b.CreateTopicWithAssignments(ctx, req.Name, cfg, assignments); err != nil {
+	if err := h.b.CreateTopic(ctx, req.Name, cfg); err != nil {
 		if errors.Is(err, broker.ErrTopicExists) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return

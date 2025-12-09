@@ -148,7 +148,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	b, err := broker.NewBroker(cfg, store, offsetStore, metadataStore, ctrl)
+	b, err := broker.NewBroker(cfg, store, offsetStore, metadataStore, ctrl, &metaSnapshot)
 	if err != nil {
 		logger.Error("broker init failed", "err", err)
 		os.Exit(1)

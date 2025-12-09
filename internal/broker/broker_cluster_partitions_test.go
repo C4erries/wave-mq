@@ -94,7 +94,7 @@ func TestBrokerFiltersNonLocalPartitionsOnBootstrap(t *testing.T) {
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore, metaStore, cluster)
+	}, store, offsetStore, metaStore, cluster, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestBrokerLoadsLeaderAndFollowerReplicas(t *testing.T) {
 			BrokerID:          brokerID,
 			ReplicationFactor: 1,
 			DataDir:           dir,
-		}, store, offsetStore, metaStore, cluster)
+		}, store, offsetStore, metaStore, cluster, nil)
 		if err != nil {
 			t.Fatalf("broker: %v", err)
 		}

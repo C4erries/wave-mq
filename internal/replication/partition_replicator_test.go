@@ -115,7 +115,7 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 		BrokerID:          1,
 		DataDir:           leaderDir,
 		ReplicationFactor: 1,
-	}, leaderStore, leaderOffset, leaderMeta, nil)
+	}, leaderStore, leaderOffset, leaderMeta, nil, nil)
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}

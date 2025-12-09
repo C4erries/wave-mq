@@ -246,7 +246,7 @@ func startBrokerNodes(t *testing.T, ctx context.Context, cfgs []api.BrokerConfig
 			t.Fatalf("offset store nil")
 		}
 
-		b, err := broker.NewBroker(cfg, store, offsets, meta, ctrls[idx])
+		b, err := broker.NewBroker(cfg, store, offsets, meta, ctrls[idx], nil)
 		if err != nil {
 			t.Fatalf("broker init: %v", err)
 		}

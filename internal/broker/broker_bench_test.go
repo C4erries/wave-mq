@@ -32,7 +32,7 @@ func BenchmarkBrokerProduce(b *testing.B) {
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore, metaStore, nil)
+	}, store, offsetStore, metaStore, nil, nil)
 	if err != nil {
 		b.Fatalf("broker: %v", err)
 	}
@@ -78,7 +78,7 @@ func BenchmarkBrokerFetch(b *testing.B) {
 		BrokerID:          1,
 		ReplicationFactor: 1,
 		DataDir:           dir,
-	}, store, offsetStore, metaStore, nil)
+	}, store, offsetStore, metaStore, nil, nil)
 	if err != nil {
 		b.Fatalf("broker: %v", err)
 	}

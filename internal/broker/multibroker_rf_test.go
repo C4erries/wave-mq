@@ -125,12 +125,12 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	metaTopics1, _ := meta1.RecoverTopics(ctx)
 	metaTopics2, _ := meta2.RecoverTopics(ctx)
 
-	b1, err := broker.NewBroker(cfg1, store1, offset1, meta1, rc1)
+	b1, err := broker.NewBroker(cfg1, store1, offset1, meta1, rc1, nil)
 	if err != nil {
 		t.Fatalf("broker1: %v", err)
 	}
 	defer b1.Close()
-	b2, err := broker.NewBroker(cfg2, store2, offset2, meta2, rc2)
+	b2, err := broker.NewBroker(cfg2, store2, offset2, meta2, rc2, nil)
 	if err != nil {
 		t.Fatalf("broker2: %v", err)
 	}
@@ -445,12 +445,12 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 		t.Fatalf("topics not recovered")
 	}
 
-	b1, err := broker.NewBroker(cfg1, store1, offset1, meta1, rc1)
+	b1, err := broker.NewBroker(cfg1, store1, offset1, meta1, rc1, nil)
 	if err != nil {
 		t.Fatalf("broker1: %v", err)
 	}
 	defer b1.Close()
-	b2, err := broker.NewBroker(cfg2, store2, offset2, meta2, rc2)
+	b2, err := broker.NewBroker(cfg2, store2, offset2, meta2, rc2, nil)
 	if err != nil {
 		t.Fatalf("broker2: %v", err)
 	}

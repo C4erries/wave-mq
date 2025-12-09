@@ -130,12 +130,12 @@ func TestMultiBrokerIntegrationWithRaftController(t *testing.T) {
 	}
 	defer offset2.Close()
 
-	b1, err := NewBroker(cfg1, store1, offset1, meta1, rc1)
+	b1, err := NewBroker(cfg1, store1, offset1, meta1, rc1, nil)
 	if err != nil {
 		t.Fatalf("broker1: %v", err)
 	}
 	defer b1.Close()
-	b2, err := NewBroker(cfg2, store2, offset2, meta2, rc2)
+	b2, err := NewBroker(cfg2, store2, offset2, meta2, rc2, nil)
 	if err != nil {
 		t.Fatalf("broker2: %v", err)
 	}
