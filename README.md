@@ -169,9 +169,9 @@ curl http://localhost:8090/metrics
 
 ### Experimental multi-broker (Raft) quickstart
 
-Run 2–3 brokers with a shared Raft controller quorum. All nodes participate in Raft by default; replication must be enabled explicitly.
+Raft-backed clustering (`-controller=raft`) and RF>1 replication are **experimental** features that shine in labs, demos, and controlled multi-broker testbeds rather than production deployments. The controller stores `ClusterMetadata` on disk (`-raft-dir`), brokers bootstrap partitions strictly from `ClusterMetadata`, and follower replication is opt-in via `-replication=true`. The script `scripts/raft-cluster-demo.sh` automates a 2-broker RF=2 scenario including topic creation, leader writes, follower rejections (HTTP 409 with `leaderBrokerID`), and a follower restart that shows replication catching up.
 
-1) Pick Raft addresses (example): `127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003`. Use two peers if you only want a 2-node demo.
+1) Pick Raft addresses (example `127.0.0.1:9001` and `127.0.0.1:9002`). Both brokers must use the same `-raft-peer` list; two peers suffice for RF=2 demos, three for RF=3.
 2) Start broker/controller 1:
 
 ```sh
@@ -179,7 +179,8 @@ Run 2–3 brokers with a shared Raft controller quorum. All nodes participate in
   -broker-id=1 \
   -controller=raft \
   -raft-bind=127.0.0.1:9001 \
-  -raft-peer=127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003 \
+  -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
+  -raft-dir=./data1/raft \
   -data-dir=./data1 \
   -bind=:7912 -http=:8091 \
   -replication=true
@@ -192,13 +193,14 @@ Run 2–3 brokers with a shared Raft controller quorum. All nodes participate in
   -broker-id=2 \
   -controller=raft \
   -raft-bind=127.0.0.1:9002 \
-  -raft-peer=127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003 \
+  -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
+  -raft-dir=./data2/raft \
   -data-dir=./data2 \
   -bind=:8912 -http=:8092 \
   -replication=true
 ```
 
-4) (Optional) Start broker/controller 3:
+4) (Optional) Start broker/controller 3 if you want RF=3:
 
 ```sh
 ./mbd \
@@ -206,27 +208,33 @@ Run 2–3 brokers with a shared Raft controller quorum. All nodes participate in
   -controller=raft \
   -raft-bind=127.0.0.1:9003 \
   -raft-peer=127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003 \
+  -raft-dir=./data3/raft \
   -data-dir=./data3 \
   -bind=:9912 -http=:8093 \
   -replication=true
 ```
 
-5) Create a topic with RF=2 or RF=3 (via HTTP or `mbctl`), then check:
+5) Create a topic with `replicationFactor=2` via HTTP or `mbctl`, produce and fetch records through the leader, and then watch the cluster:
 
-- `/api/controller` for `mode`, Raft `raftState`/`term`, and peer list;
-- `/api/cluster` for leader/replica/ISR assignments per partition;
-- `/api/topics/<name>` to see which node is leader vs follower for each partition.
+- use `/api/controller` to inspect `mode`, Raft `raftState`, `term`, `clusterID`, and metadata `version`;
+- use `/api/cluster` to see per-partition leaders, replica sets, and ISR tracked by the controller;
+- hit `/api/topics/<name>` (or the binary metadata API) to discover which broker owns each partition;
+- expect followers to reply with `ErrNotLeader` (binary) or HTTP 409 plus `leaderBrokerID`; retry those requests against the reported leader.
+
+`scripts/raft-cluster-demo.sh` exercises this flow end-to-end, restarts a follower, and proves that replication manager restarts bring the follower up to date with no duplicate writes.
+
+#### Client expectations & restart behavior
+
+- **Leader-only traffic**: clients should write/read to the leader returned by metadata (`/api/topics` or `/api/cluster`). Followers reject produce/fetch with the standard leader hint, so drivers should retry against `leaderBrokerID`.
+- **Durable controller state**: `NewRaftController` persists initial `ClusterMetadata` in `-raft-dir` and reuses it on restart so controller restarts continue from the same view without resetting leaders/replicas.
+- **Broker bootstrap**: each broker opens partitions only where it is listed as a replica; the local `metadata.log` is just a cache, so the controller remains the source of truth.
+- **Replication resilience**: the replication manager watches `ClusterMetadata` (via `/api/controller` + `/api/cluster`), starts/stops `PartitionReplicator`s, and reports ISR progress back to the controller. After a restart, followers use `WALSink.NextOffset()` to resume exactly where they left off.
 
 #### Operating a Raft cluster
 
-- Bootstrap:
-  - start the first broker with the full `-raft-peer` list;
-  - ensure `/api/controller` reports a leader and a correct `clusterID`.
-- Join:
-  - start additional brokers with the same `-raft-peer` list;
-  - verify they appear in `/api/controller` peers and `/api/cluster` brokers.
-- Rolling restart:
-  - restart brokers one by one, checking `/api/controller` after each restart to ensure a leader exists and metadata `version` continues to increase.
+- **Bootstrap**: start the first broker with the full `-raft-peer` list, then confirm `/api/controller` reports a leader and stable `clusterID`.
+- **Join**: launch additional brokers with the same peer list, and make sure they appear in `/api/controller` peers and `/api/cluster` brokers before sending traffic.
+- **Rolling restart**: restart brokers one by one, watching `/api/controller` metadata `version` to see it keep increasing, and use `/api/cluster` to confirm ISR updates and leader elections.
 
 ## Docker Compose (broker + UI)
 
