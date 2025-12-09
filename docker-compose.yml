@@ -1,0 +1,59 @@
+version: "3.8"
+
+services:
+  broker1:
+    build: .
+    container_name: wave-broker1
+    command:
+      - "-data-dir=/data"
+      - "-bind=:7912"
+      - "-mqtt=:1883"
+      - "-http=:8090"
+      - "-controller=raft"
+      - "-raft-bind=broker1:9001"
+      - "-raft-peer=broker1:9001,broker2:9001"
+      - "-raft-dir=/raft"
+      - "-replication=true"
+    volumes:
+      - wave_data1:/data
+      - wave_raft1:/raft
+    ports:
+      - "7912:7912"
+      - "1883:1883"
+      - "8090:8090"
+    networks:
+      - wave-net
+
+  broker2:
+    build: .
+    container_name: wave-broker2
+    command:
+      - "-data-dir=/data"
+      - "-bind=:7912"
+      - "-mqtt=:1883"
+      - "-http=:8090"
+      - "-controller=raft"
+      - "-raft-bind=broker2:9001"
+      - "-raft-peer=broker1:9001,broker2:9001"
+      - "-raft-dir=/raft"
+      - "-replication=true"
+    volumes:
+      - wave_data2:/data
+      - wave_raft2:/raft
+    ports:
+      - "8912:7912"
+      - "2883:1883"
+      - "8091:8090"
+    networks:
+      - wave-net
+
+networks:
+  wave-net:
+    driver: bridge
+
+volumes:
+  wave_data1:
+  wave_raft1:
+  wave_data2:
+  wave_raft2:
+

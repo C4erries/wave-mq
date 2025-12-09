@@ -171,35 +171,31 @@ Quickstart outline:
 
 3. Start broker/controller 1:
 
-   ```sh
-   ./mbd \
-     -broker-id=1 \
-     -controller=raft \
-     -raft-bind=127.0.0.1:9001 \
-     -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
-     -raft-dir=./data1/raft \
-     -data-dir=./data1 \
-     -bind=:7912 -http=:8091 \
-     -replication=true \
-     -cluster-id=wave \
-     -static-cluster=1@127.0.0.1:7912,2@127.0.0.1:8912
-   ```
+```sh
+./mbd \
+  -broker-id=1 \
+  -controller=raft \
+  -raft-bind=127.0.0.1:9001 \
+  -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
+  -raft-dir=./data1/raft \
+  -data-dir=./data1 \
+  -bind=:7912 -http=:8091 \
+  -replication=true
+```
 
 4. Start broker/controller 2:
 
-   ```sh
-   ./mbd \
-     -broker-id=2 \
-     -controller=raft \
-     -raft-bind=127.0.0.1:9002 \
-     -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
-     -raft-dir=./data2/raft \
-     -data-dir=./data2 \
-     -bind=:8912 -http=:8092 \
-     -replication=true \
-     -cluster-id=wave \
-     -static-cluster=1@127.0.0.1:7912,2@127.0.0.1:8912
-   ```
+```sh
+./mbd \
+  -broker-id=2 \
+  -controller=raft \
+  -raft-bind=127.0.0.1:9002 \
+  -raft-peer=127.0.0.1:9001,127.0.0.1:9002 \
+  -raft-dir=./data2/raft \
+  -data-dir=./data2 \
+  -bind=:8912 -http=:8092 \
+  -replication=true
+```
 
 5. Create a topic with `replicationFactor=2` via HTTP or `mbctl`, produce and fetch records through the leader, and then inspect the cluster:
 
@@ -208,10 +204,13 @@ Quickstart outline:
 - hit `/api/topics/<name>` (or the binary metadata API) to discover which broker owns each partition;
 - expect followers to reply with `ErrNotLeader` (binary) or HTTP 409 plus `leaderBrokerID`; retry those requests against the reported leader.
 
+On startup each broker waits for the Raft leader exposed by `/api/controller`; the leader applies `RegisterBroker` directly, and followers forward the same info to `POST /api/controller/brokers` so the leader can append the registration. You can watch `raftState`, `term`, `peers`, and `leader` in `/api/controller` to understand elections or diagnose `leader not elected`.
+
 The `scripts/raft-cluster-demo.sh` script orchestrates this flow end-to-end, including a follower restart to demonstrate that replication catches up from `WALSink.NextOffset()` without duplicate writes.
 
 #### Client expectations & restart behavior
 
+- **Broker registration**: on startup each `mbd` instance waits for a Raft leader via `/api/controller`; if it is the leader it applies a `RegisterBroker` command directly through Raft, and if it is a follower it POSTs to the leader’s `POST /api/controller/brokers` endpoint so that the leader appends and replicates the registration in `ClusterMetadata`.
 - **Leader-only traffic**: clients should write/read to the leader returned by metadata (`/api/topics` or `/api/cluster`). Followers reject produce/fetch with the standard leader hint, so drivers should retry against `leaderBrokerID`.
 - **Durable controller state**: `NewRaftController` persists initial `ClusterMetadata` in `-raft-dir` and reuses it on restart so controller restarts continue from the same view without resetting leaders/replicas.
 - **Broker bootstrap**: each broker opens partitions only where it is listed as a replica; the local `metadata.log` is just a cache, so the controller remains the source of truth.
@@ -223,20 +222,11 @@ The `scripts/raft-cluster-demo.sh` script orchestrates this flow end-to-end, inc
 - **Join**: launch additional brokers with the same peer list, and make sure they appear in `/api/controller` peers and `/api/cluster` brokers before sending traffic.
 - **Rolling restart**: restart brokers one by one, watching `/api/controller` metadata `version` to see it keep increasing, and use `/api/cluster` to confirm ISR updates and leader elections.
 
-## Docker Compose (broker + UI)
+## Docker Compose (Raft demo cluster)
 
-There is a `docker-compose.yml` in the repo which brings up the broker and the UI (`wave-ui`):
+`docker compose up --build` brings up two brokers (`broker1`, `broker2`) and the UI on a shared network. Each broker runs with `-controller=raft`, `-raft-bind=brokerN:9001`, the shared `-raft-peer` list, `-raft-dir=/data/raft`, `-replication=true`, and the usual `-data-dir`, `-bind`, `-mqtt`, `-http` flags. Inside the cluster each `mbd` waits for the Raft leader via `/api/controller`; the leader applies `RegisterBroker` through Raft, while followers POST to `http://<leader-host>:<http-port>/api/controller/brokers` so the leader can append the registration.
 
-```sh
-docker compose up --build
-```
-
-Ports:
-
-- broker: `7912` (binary), `1883` (MQTT), `8090` (HTTP/metrics)
-- UI: `8080` (nginx with Vite-built static assets)
-
-Broker data is persisted in the `wave_data` volume. The UI can be built with `VITE_USE_MOCKS=false` to talk to the real HTTP API at `http://broker:8090`.
+Check `http://localhost:8090/api/controller` or `http://localhost:8091/api/controller` for `mode`, `raftState`, `term`, `peers`, `leader`, `clusterID`, `version`, and `http://localhost:8090/api/cluster` (or `8091`) for the current `ClusterMetadata`.
 
 ## Benchmarks & Load
 
