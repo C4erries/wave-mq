@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -129,7 +134,7 @@ func main() {
 		BrokerID: cfg.BrokerID,
 		Host:     brokerHost,
 	}
-	if err := ctrl.RegisterBroker(context.Background(), bInfo); err != nil {
+	if err := registerBrokerWithRaft(context.Background(), logger, ctrl, cfg, bInfo); err != nil {
 		logger.Error("broker registration failed", "err", err)
 		os.Exit(1)
 	}
@@ -226,4 +231,96 @@ func waitForSignal() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh
+}
+
+func registerBrokerWithRaft(ctx context.Context, logger *slog.Logger, ctrl controller.MetadataStore, cfg api.BrokerConfig, info api.BrokerInfo) error {
+	if cfg.ControllerMode != "raft" {
+		return ctrl.RegisterBroker(ctx, info)
+	}
+	type raftStatus interface {
+		ControllerMode() string
+		RaftState() string
+		RaftLeader() string
+	}
+	rs, ok := ctrl.(raftStatus)
+	if !ok {
+		return ctrl.RegisterBroker(ctx, info)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		state := strings.ToLower(rs.RaftState())
+		leaderAddr := rs.RaftLeader()
+		switch state {
+		case "leader":
+			if err := ctrl.RegisterBroker(ctx, info); err != nil {
+				lastErr = err
+				logger.Warn("register broker via local raft failed", "err", err)
+			} else {
+				return nil
+			}
+		default:
+			if leaderAddr != "" {
+				if err := postRegisterBrokerToLeader(ctx, logger, leaderAddr, cfg.HTTPAddr, info); err != nil {
+					lastErr = err
+					logger.Warn("register broker via leader http failed", "leader", leaderAddr, "err", err)
+				} else {
+					return nil
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("broker registration timed out waiting for raft leader")
+	}
+	return lastErr
+}
+
+func postRegisterBrokerToLeader(ctx context.Context, logger *slog.Logger, leaderAddr, localHTTP string, info api.BrokerInfo) error {
+	host, _, err := net.SplitHostPort(leaderAddr)
+	if err != nil {
+		return fmt.Errorf("invalid raft leader address %q: %w", leaderAddr, err)
+	}
+	port := ""
+	if strings.HasPrefix(localHTTP, ":") {
+		port = localHTTP[1:]
+	} else {
+		if h, p, err := net.SplitHostPort(localHTTP); err == nil {
+			_ = h
+			port = p
+		}
+	}
+	if port == "" {
+		return fmt.Errorf("cannot derive http port from %q", localHTTP)
+	}
+	url := fmt.Sprintf("http://%s:%s/api/controller/brokers", host, port)
+	payload := struct {
+		BrokerID int    `json:"brokerID"`
+		Host     string `json:"host"`
+		Port     int    `json:"port,omitempty"`
+	}{
+		BrokerID: info.BrokerID,
+		Host:     info.Host,
+		Port:     info.Port,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("leader register broker http status %d", resp.StatusCode)
+	}
+	logger.Info("broker registered via raft leader", "leader", host, "brokerID", info.BrokerID)
+	return nil
 }

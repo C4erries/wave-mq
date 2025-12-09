@@ -1,28 +1,133 @@
-# wave-mq
+# wave-mq (русский обзор)
 
-wave-mq — это учебный лог-ориентированный (log-based) брокер сообщений на Go, задуманный как маленькое, но реалистичное ядро Kafka‑подобного кластера. Он реализует кастомный бинарный протокол, минимальный MQTT 3.1.1/5.0 фронтенд (QoS0/1), consumer groups с хранением offset’ов на брокере и сегментированное WAL‑хранилище с индексами и retention‑политиками.
+wave-mq — это log-based брокер сообщений на Go. Основной режим — single-node, но есть экспериментальная поддержка кластерного режима с контроллером и репликацией.
 
-Подробный архитектурный обзор (на русском) см. в `docs/architecture.md`.
+Подробности архитектуры описаны в `docs/architecture.md`.
 
-## Текущее состояние проекта
+## Статус проекта и кластера
 
-> ⚠️ Clustering, Raft и репликация фолловеров — **экспериментальные** функции. Они предназначены для демо и лабораторных стендов, а не для production. Для стабильной single-node работы включайте брокер без репликации (`-replication=false`).
+> Важно: режимы **Clustering / Raft / репликация** считаются **экспериментальными** и предназначены для демо и лабораторных сценариев, а не для продакшена. Для стабильной работы используйте single-node конфигурацию (`-replication=false`, `-controller=single`).
 
-- Single-node брокер (storage, бинарный протокол, MQTT, consumer groups, HTTP UI/API) реализован и подходит для локальных экспериментов и демонстраций.
-- Персистентность метаданных топиков (`metadata.log`) реализована; топики и партиции переживают рестарт брокера и восстанавливаются при старте. В кластерном режиме `metadata.log` следует считать **локальным кэшем**, а истинное состояние хранится в контроллере.
-- Слой метаданных кластера (контроллер + `/api/cluster`) реализован для single-node и небольших multi-broker кластеров. Raft‑контроллер (`-controller=raft`) поддерживает single-node и multi-peer режимы, но остаётся **экспериментальным**; режим `-controller=single` использует упрощённый in-memory контроллер.
-- Репликационный путь (leader <-> follower) реализован: бинарный клиент (`BinaryReplicator`), `PartitionReplicator` + WAL‑sink + отчёт в ISR‑слой контроллера. RF>1 рассматривается как режим для лабораторного использования: записывать/читать следует в лидеров (followers возвращают `ErrNotLeader` / HTTP 409 с `leaderBrokerID`), а метрики (`wavemq_replication_lag_offsets`, `wavemq_replication_applied_total`) показывают лаг и прогресс репликации.
-- Multi-node / Raft‑контроллер доступен для локальных multi-broker кластеров, но без production‑гарантий; реализованы базовые сценарии failover и rolling‑restart, дальнейший hardening и tooling остаются задачами будущей работы.
+- Single-node брокер (хранилище, бинарный протокол, MQTT, consumer groups, HTTP UI/API) реализован и подходит для локальных экспериментов.
+- Метаданные топиков (`metadata.log`) хранятся на диске; топики/партиции восстанавливаются после рестарта брокера. В кластерном режиме локальный `metadata.log` — это **кэш**, а source of truth — контроллер.
+- Контроллер кластера (`internal/controller`):
+  - `SingleNodeController` — простой in‑memory контроллер для single-node и упрощённых сценариев.
+  - `RaftController` — контроллер на базе Hashicorp Raft, который хранит `ClusterMetadata` (список брокеров, лидеры/реплики/ISR) в Raft‑журнале; снапшоты и восстановление также реализованы.
+- Репликация (`internal/replication`):
+  - `BinaryReplicator` использует существующий Fetch по бинарному протоколу.
+  - `PartitionReplicator` + WAL‑sink + reporting‑sink реплицируют данные с лидера на follower‑партиции и отправляют прогресс в контроллер (`ReportReplicaProgress`), поддерживая ISR.
+  - RF>1 (репликационный фактор >1) рассматривается как лабораторный режим: писать/читать нужно в лидера; followers возвращают `ErrNotLeader` / HTTP 409 с `leaderBrokerID`. Метрики (`wavemq_replication_lag_offsets`, `wavemq_replication_applied_total`) показывают лаг и прогресс репликации.
 
-## Обзор возможностей
+## Основные компоненты
 
-- Сегментированный WAL с индексами и retention‑политикой по размеру/времени.
-- Бинарный протокол (`internal/netproto`) и CLI‑клиент (`cmd/mbctl`) для create-topic / produce / fetch и управления метаданными.
-- Минимальный MQTT‑фронтенд (`internal/mqtt`): CONNECT/SUBSCRIBE/PUBLISH QoS0/1, маппинг MQTT‑топиков на внутренние топики и партиции.
-- HTTP‑админка (`internal/httpapi`) + UI (`wave-ui`): обзор топиков, партиций, потребителей, кластера и контроллера.
-- Контроллер кластера (`internal/controller`): SingleNodeController и RaftController, которые хранят и реплицируют `ClusterMetadata` (leaders/replicas/ISR).
-- Репликация (`internal/replication`): BinaryReplicator, PartitionReplicator, WAL‑sink, Reporting‑sink и менеджер репликации, который слушает `WatchClusterMetadata` и запускает/останавливает репликаторы.
-- Набор метрик Prometheus (`internal/observability`) + `/metrics`, `/healthz`, `pprof`‑эндпоинты.
+- `internal/storage` — сегментированный WAL, индексы, ретеншн и recovery.
+- `internal/broker` — топики, партиции, локальные реплики, consumer groups, смещения.
+- `internal/netproto` + `cmd/mbctl` — бинарный протокол и CLI (`create-topic`, `produce`, `fetch`).
+- `internal/mqtt` — минимальный MQTT 3.1.1/5.0 frontend (QoS0/1) поверх брокера.
+- `internal/httpapi` + `wave-ui` — HTTP API и UI для администрирования / мониторинга.
+- `internal/controller` — SingleNodeController и RaftController, которые управляют `ClusterMetadata` (leaders/replicas/ISR).
+- `internal/replication` — клиент репликации, PartitionReplicator, WAL‑sink и reporting‑sink.
+- `internal/observability` — Prometheus‑метрики (`/metrics`), `/healthz`, pprof.
 
-Для более подробного описания архитектуры см. `docs/architecture.md`.
+Подробности по форматам данных и API — в `docs/architecture.md`.
+
+## Экспериментальный Raft‑кластер (2–3 брокера)
+
+Режим `-controller=raft` и репликация с `-replication=true` позволяют поднять небольшой кластер из нескольких брокеров. Этот режим пока не предназначен для продакшена, но подходит для локальных сценариев RF=2.
+
+### Требования
+
+- Каждый брокер имеет уникальный `-broker-id`.
+- Все брокеры используют один и тот же список Raft‑пиров:
+
+```sh
+-controller=raft \
+-raft-peer=broker1:9001,broker2:9001
+```
+
+- Для каждого брокера задаётся свой `-raft-bind` (адрес Raft‑транспорта), попадающий в общий список `-raft-peer`.
+- HTTP‑порты обычно одинаковые (например, `-http=:8090`) и доступны по тем же host‑именам, что и Raft‑пиры (в docker‑compose это имена сервисов `broker1`, `broker2`).
+
+### Пример запуска двух брокеров с RF=2
+
+Брокер 1:
+
+```sh
+./mbd \
+  -broker-id=1 \
+  -controller=raft \
+  -raft-bind=broker1:9001 \
+  -raft-peer=broker1:9001,broker2:9001 \
+  -raft-dir=./data1/raft \
+  -data-dir=./data1 \
+  -bind=:7912 \
+  -http=:8090 \
+  -replication=true
+```
+
+Брокер 2:
+
+```sh
+./mbd \
+  -broker-id=2 \
+  -controller=raft \
+  -raft-bind=broker2:9001 \
+  -raft-peer=broker1:9001,broker2:9001 \
+  -raft-dir=./data2/raft \
+  -data-dir=./data2 \
+  -bind=:8912 \
+  -http=:8090 \
+  -replication=true
+```
+
+При старте:
+
+- оба брокера поднимают свой RaftController и подключаются к кластеру;
+- каждый `mbd` регистрирует себя через `RegisterBroker` (команда идёт через Raft: лидер применяет запись и реплицирует обновлённый `ClusterMetadata`);
+- брокер и менеджер репликации подписываются на `WatchClusterMetadata` и поднимают только те партиции/реплики, которые закреплены за данным брокером.
+
+### Диагностика кластера
+
+- `GET /api/controller`:
+  - `mode` — режим контроллера (`single` или `raft`);
+  - `raftState` — состояние Raft (`leader`, `follower`, `candidate`);
+  - `term` — текущий термин;
+  - `peers` — список Raft‑пиров;
+  - `leader` — адрес текущего лидера;
+  - `clusterID`, `version` — идентификатор кластера и версия `ClusterMetadata`.
+- `GET /api/cluster` — полный `ClusterMetadata` (список брокеров, топики, партиции, лидеры, реплики, ISR).
+
+Если при запуске видите ошибку `leader not elected` или проблемы с регистрацией брокера:
+
+- убедитесь, что `-raft-peer` на всех узлах совпадает и содержит их `-raft-bind`;
+- запросите `/api/controller` на каждом брокере и дождитесь, пока один из них покажет `raftState=leader` и ненулевой `term`;
+- проверьте, что с других контейнеров/хостов можно сходить на `http://<broker-name>:<http-port>/api/controller`.
+
+## Single-node запуск
+
+Для одиночного брокера без кластера и репликации достаточно:
+
+```sh
+go build ./cmd/mbd
+
+./mbd \
+  -data-dir=./data \
+  -bind=:7912 \
+  -mqtt=:1883 \
+  -http=:8090 \
+  -controller=single \
+  -replication=false
+```
+
+Создание топика и produce/fetch через CLI:
+
+```sh
+go build ./cmd/mbctl
+
+./mbctl create-topic -topic test -partitions 1
+./mbctl produce -topic test -partition 0 -value "hello"
+./mbctl fetch -topic test -partition 0 -offset 0
+```
+
+Остальные детали (MQTT, HTTP API/UI, observability) совпадают с описанием в основном `README.md`.
 

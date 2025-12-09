@@ -37,6 +37,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/api/consumers", withCORS(http.HandlerFunc(h.handleConsumers)))
 	mux.Handle("/api/cluster", withCORS(http.HandlerFunc(h.handleClusterMetadata)))
 	mux.Handle("/api/controller", withCORS(http.HandlerFunc(h.handleControllerStatus)))
+	mux.Handle("/api/controller/brokers", withCORS(http.HandlerFunc(h.handleControllerRegisterBroker)))
 	mux.Handle("/api/topics/", withCORS(http.HandlerFunc(h.handleTopicPaths)))
 }
 
@@ -65,6 +66,7 @@ func (h *Handler) handleControllerStatus(w http.ResponseWriter, r *http.Request)
 	raftState := "none"
 	term := uint64(0)
 	peers := []controller.PeerInfo{}
+	leader := ""
 	if rc, ok := h.ctrl.(interface {
 		ControllerMode() string
 		RaftState() string
@@ -76,6 +78,11 @@ func (h *Handler) handleControllerStatus(w http.ResponseWriter, r *http.Request)
 		term = rc.RaftTerm()
 		peers = rc.RaftPeers()
 	}
+	if rl, ok := h.ctrl.(interface {
+		RaftLeader() string
+	}); ok {
+		leader = rl.RaftLeader()
+	}
 	meta, _ := h.ctrl.GetClusterMetadata(r.Context())
 	if h.ctrl == nil {
 		meta = api.ClusterMetadata{}
@@ -85,10 +92,45 @@ func (h *Handler) handleControllerStatus(w http.ResponseWriter, r *http.Request)
 		"raftState": raftState,
 		"term":      term,
 		"peers":     peers,
+		"leader":    leader,
 		"clusterID": meta.ClusterID,
 		"version":   meta.Version,
 	}
 	writeJSON(w, resp)
+}
+
+func (h *Handler) handleControllerRegisterBroker(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.ctrl == nil {
+		http.Error(w, "controller not configured", http.StatusInternalServerError)
+		return
+	}
+	var req struct {
+		BrokerID int    `json:"brokerID"`
+		Host     string `json:"host"`
+		Port     int    `json:"port,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if req.BrokerID == 0 || req.Host == "" {
+		http.Error(w, "brokerID and host required", http.StatusBadRequest)
+		return
+	}
+	info := api.BrokerInfo{
+		BrokerID: req.BrokerID,
+		Host:     req.Host,
+		Port:     req.Port,
+	}
+	if err := h.ctrl.RegisterBroker(r.Context(), info); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) handleClusterMetadata(w http.ResponseWriter, r *http.Request) {

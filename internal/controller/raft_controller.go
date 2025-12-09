@@ -441,6 +441,11 @@ func (c *RaftController) ControllerMode() string { return "raft" }
 // RaftState returns the current raft state as string.
 func (c *RaftController) RaftState() string { return c.raft.State().String() }
 
+// RaftLeader returns the current raft leader address as string.
+func (c *RaftController) RaftLeader() string {
+	return string(c.raft.Leader())
+}
+
 // RaftTerm returns the current term.
 func (c *RaftController) RaftTerm() uint64 {
 	stats := c.raft.Stats()

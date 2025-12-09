@@ -180,7 +180,9 @@ Quickstart outline:
      -raft-dir=./data1/raft \
      -data-dir=./data1 \
      -bind=:7912 -http=:8091 \
-     -replication=true
+     -replication=true \
+     -cluster-id=wave \
+     -static-cluster=1@127.0.0.1:7912,2@127.0.0.1:8912
    ```
 
 4. Start broker/controller 2:
@@ -194,7 +196,9 @@ Quickstart outline:
      -raft-dir=./data2/raft \
      -data-dir=./data2 \
      -bind=:8912 -http=:8092 \
-     -replication=true
+     -replication=true \
+     -cluster-id=wave \
+     -static-cluster=1@127.0.0.1:7912,2@127.0.0.1:8912
    ```
 
 5. Create a topic with `replicationFactor=2` via HTTP or `mbctl`, produce and fetch records through the leader, and then inspect the cluster:
@@ -286,4 +290,3 @@ Access:
 - Consumer group coordination is local; offsets persisted via offset WAL.
 - MQTT support is minimal (QoS0/1, no retained/will/shared subs).
 - Storage uses segmented WAL with sparse index and retention by size/age.
-
