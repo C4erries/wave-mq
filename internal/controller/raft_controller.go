@@ -237,11 +237,17 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 		localAddr = raft.ServerAddress(cfg.RaftBindAddr)
 	}
 
-	initial := initialMeta
-	if stored, err := loadInitialMetadata(stableStore); err != nil {
+	stored, err := loadInitialMetadata(stableStore)
+	if err != nil {
 		return nil, err
-	} else if stored != nil {
+	}
+	initial := initialMeta
+	if stored != nil {
 		initial = *stored
+	} else {
+		if err := persistInitialMetadata(stableStore, initial); err != nil {
+			return nil, err
+		}
 	}
 
 	hasState, err := raft.HasExistingState(logStore, stableStore, snapStore)

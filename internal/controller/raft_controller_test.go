@@ -4,13 +4,95 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/raft"
+	raftboltdb "github.com/hashicorp/raft-boltdb"
 
 	"github.com/c4erries/wave-mq/pkg/api"
 )
+
+func TestRaftControllerPersistsInitialMetadata(t *testing.T) {
+	dir := t.TempDir()
+	cfg := api.BrokerConfig{
+		BrokerID:       1,
+		ControllerMode: "raft",
+	}
+	initial := api.ClusterMetadata{
+		ClusterID: "persist-cluster",
+		Version:   1,
+		Brokers: []api.BrokerInfo{
+			{BrokerID: 1, Host: "leader"},
+		},
+	}
+	rc, err := NewRaftController(cfg, initial, dir)
+	if err != nil {
+		t.Fatalf("new raft controller: %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("close raft controller: %v", err)
+	}
+	store, err := raftboltdb.NewBoltStore(filepath.Join(dir, "raft.bolt"))
+	if err != nil {
+		t.Fatalf("open bolt store: %v", err)
+	}
+	defer store.Close()
+	persisted, err := loadInitialMetadata(store)
+	if err != nil {
+		t.Fatalf("load initial metadata: %v", err)
+	}
+	if persisted == nil || !reflect.DeepEqual(*persisted, initial) {
+		t.Fatalf("expected persisted initial metadata to match %v, got %v", initial, persisted)
+	}
+}
+
+func TestRaftControllerRestoresInitialMetadataOnRestart(t *testing.T) {
+	dir := t.TempDir()
+	cfg := api.BrokerConfig{
+		BrokerID:       1,
+		ControllerMode: "raft",
+	}
+	initial := api.ClusterMetadata{
+		ClusterID: "restart-cluster",
+		Version:   1,
+		Brokers: []api.BrokerInfo{
+			{BrokerID: 1, Host: "leader"},
+		},
+	}
+	rc, err := NewRaftController(cfg, initial, dir)
+	if err != nil {
+		t.Fatalf("new raft controller: %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("close raft controller: %v", err)
+	}
+
+	override := api.ClusterMetadata{
+		ClusterID: "override-cluster",
+		Version:   99,
+	}
+	rc2, err := NewRaftController(cfg, override, dir)
+	if err != nil {
+		t.Fatalf("restart raft controller: %v", err)
+	}
+	defer rc2.Close()
+	restored, err := rc2.GetClusterMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("get cluster metadata after restart: %v", err)
+	}
+	if restored.ClusterID != initial.ClusterID {
+		t.Fatalf("expected cluster id %s after restart, got %s", initial.ClusterID, restored.ClusterID)
+	}
+	if restored.Version != initial.Version {
+		t.Fatalf("expected version %d after restart, got %d", initial.Version, restored.Version)
+	}
+	if len(restored.Brokers) != len(initial.Brokers) {
+		t.Fatalf("expected brokers %+v after restart, got %+v", initial.Brokers, restored.Brokers)
+	}
+}
 
 func TestRaftControllerAssignTopic(t *testing.T) {
 	cfg := api.BrokerConfig{
