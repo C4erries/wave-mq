@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -25,6 +28,8 @@ type Handler struct {
 	cfg  api.BrokerConfig
 	ctrl controller.MetadataStore
 }
+
+const forwardedCreateTopicHeader = "X-WaveMQ-Forwarded"
 
 // New returns an HTTP handler for admin JSON API under /api.
 func New(b *broker.Broker, cfg api.BrokerConfig, ctrl controller.MetadataStore) *Handler {
@@ -338,6 +343,14 @@ func (h *Handler) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 		ReplicationFactor: req.ReplicationFactor,
 	}
 
+	if status, payload, ok := h.forwardCreateTopicToLeader(r, req); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(payload) // #nosec G705 -- payload is leader JSON API response in application/json.
+
+		return
+	}
+
 	ctx := r.Context()
 	if err := h.b.CreateTopic(ctx, req.Name, cfg); err != nil {
 		if errors.Is(err, broker.ErrTopicExists) {
@@ -354,6 +367,103 @@ func (h *Handler) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusCreated)
 	writeJSON(w, detail)
+}
+
+func (h *Handler) forwardCreateTopicToLeader(
+	r *http.Request,
+	req struct {
+		Name              string `json:"name"`
+		Partitions        int    `json:"partitions"`
+		ReplicationFactor int    `json:"replicationFactor"`
+	},
+) (int, []byte, bool) {
+	if r.Header.Get(forwardedCreateTopicHeader) != "" {
+		return 0, nil, false
+	}
+
+	url, ok := h.leaderTopicsURL()
+	if !ok {
+		return 0, nil, false
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return 0, nil, false
+	}
+
+	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return 0, nil, false
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(forwardedCreateTopicHeader, "1")
+
+	resp, err := http.DefaultClient.Do(httpReq) // #nosec G704 -- leader host comes from local Raft state.
+	if err != nil {
+		return 0, nil, false
+	}
+	defer resp.Body.Close()
+
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, false
+	}
+
+	return resp.StatusCode, payload, true
+}
+
+func (h *Handler) leaderTopicsURL() (string, bool) {
+	if h.cfg.ControllerMode != "raft" || h.ctrl == nil {
+		return "", false
+	}
+
+	rs, ok := h.ctrl.(interface {
+		RaftState() string
+		RaftLeader() string
+	})
+	if !ok {
+		return "", false
+	}
+
+	if strings.ToLower(rs.RaftState()) == "leader" {
+		return "", false
+	}
+
+	leaderAddr := rs.RaftLeader()
+	if leaderAddr == "" {
+		return "", false
+	}
+
+	host, _, err := net.SplitHostPort(leaderAddr)
+	if err != nil {
+		return "", false
+	}
+
+	port, ok := httpPort(h.cfg.HTTPAddr)
+	if !ok {
+		return "", false
+	}
+
+	return "http://" + net.JoinHostPort(host, port) + "/api/topics", true
+}
+
+func httpPort(addr string) (string, bool) {
+	if strings.HasPrefix(addr, ":") {
+		port := strings.TrimPrefix(addr, ":")
+		if port == "" {
+			return "", false
+		}
+
+		return port, true
+	}
+
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		return "", false
+	}
+
+	return port, true
 }
 
 func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic string, partition int) {
