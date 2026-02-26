@@ -69,10 +69,12 @@ type PartitionMetadata struct {
 
 // BrokerInfo describes a broker in the cluster.
 type BrokerInfo struct {
-	BrokerID int    `json:"brokerID"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Rack     string `json:"rack"`
+	BrokerID       int    `json:"brokerID"`
+	Host           string `json:"host"`
+	Port           int    `json:"port"`
+	Rack           string `json:"rack"`
+	HTTPAddr       string `json:"httpAddr,omitempty"`
+	ControllerAddr string `json:"controllerAddr,omitempty"`
 }
 
 // PartitionAssignment describes replica layout and leader/ISR for a partition.

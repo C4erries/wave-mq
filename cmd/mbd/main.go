@@ -147,8 +147,10 @@ func main() {
 	}
 
 	bInfo := api.BrokerInfo{
-		BrokerID: cfg.BrokerID,
-		Host:     brokerHost,
+		BrokerID:       cfg.BrokerID,
+		Host:           brokerHost,
+		HTTPAddr:       advertisedHTTPAddr(cfg),
+		ControllerAddr: cfg.RaftBindAddr,
 	}
 	if err := registerBrokerWithRaft(context.Background(), logger, ctrl, cfg, bInfo); err != nil {
 		logger.Error("broker registration failed", "err", err)
@@ -291,7 +293,7 @@ func registerBrokerWithRaft(ctx context.Context, logger *slog.Logger, ctrl contr
 			}
 		default:
 			if leaderAddr != "" {
-				if err := postRegisterBrokerToLeader(ctx, logger, leaderAddr, cfg.HTTPAddr, info); err != nil {
+				if err := postRegisterBrokerToLeader(ctx, logger, leaderAddr, info); err != nil {
 					lastErr = err
 					logger.Warn("register broker via leader http failed", "leader", leaderAddr, "err", err)
 				} else {
@@ -310,35 +312,30 @@ func registerBrokerWithRaft(ctx context.Context, logger *slog.Logger, ctrl contr
 	return lastErr
 }
 
-func postRegisterBrokerToLeader(ctx context.Context, logger *slog.Logger, leaderAddr, localHTTP string, info api.BrokerInfo) error {
+func postRegisterBrokerToLeader(ctx context.Context, logger *slog.Logger, leaderAddr string, info api.BrokerInfo) error {
 	host, _, err := net.SplitHostPort(leaderAddr)
 	if err != nil {
 		return fmt.Errorf("invalid raft leader address %q: %w", leaderAddr, err)
 	}
 
-	port := ""
-	if strings.HasPrefix(localHTTP, ":") {
-		port = localHTTP[1:]
-	} else {
-		if h, p, err := net.SplitHostPort(localHTTP); err == nil {
-			_ = h
-			port = p
-		}
-	}
-
-	if port == "" {
-		return fmt.Errorf("cannot derive http port from %q", localHTTP)
+	port, ok := portFromAddr(info.HTTPAddr)
+	if !ok {
+		return fmt.Errorf("cannot derive http port from advertised http addr %q", info.HTTPAddr)
 	}
 
 	url := fmt.Sprintf("http://%s:%s/api/controller/brokers", host, port)
 	payload := struct {
-		BrokerID int    `json:"brokerID"`
-		Host     string `json:"host"`
-		Port     int    `json:"port,omitempty"`
+		BrokerID       int    `json:"brokerID"`
+		Host           string `json:"host"`
+		Port           int    `json:"port,omitempty"`
+		HTTPAddr       string `json:"httpAddr,omitempty"`
+		ControllerAddr string `json:"controllerAddr,omitempty"`
 	}{
-		BrokerID: info.BrokerID,
-		Host:     info.Host,
-		Port:     info.Port,
+		BrokerID:       info.BrokerID,
+		Host:           info.Host,
+		Port:           info.Port,
+		HTTPAddr:       info.HTTPAddr,
+		ControllerAddr: info.ControllerAddr,
 	}
 
 	data, err := json.Marshal(payload)
@@ -366,4 +363,77 @@ func postRegisterBrokerToLeader(ctx context.Context, logger *slog.Logger, leader
 	logger.Info("broker registered via raft leader", "leader", host, "brokerID", info.BrokerID)
 
 	return nil
+}
+
+func advertisedHTTPAddr(cfg api.BrokerConfig) string {
+	port, ok := portFromAddr(cfg.HTTPAddr)
+	if !ok {
+		return cfg.HTTPAddr
+	}
+
+	host := advertisedHost(cfg)
+	if host == "" {
+		return cfg.HTTPAddr
+	}
+
+	return net.JoinHostPort(host, port)
+}
+
+func advertisedHost(cfg api.BrokerConfig) string {
+	for _, addr := range []string{cfg.AdvertisedAddr, cfg.RaftBindAddr, cfg.BinaryAddr} {
+		host := hostFromAddr(addr)
+		if host == "" || isWildcardHost(host) {
+			continue
+		}
+
+		return host
+	}
+
+	return ""
+}
+
+func hostFromAddr(addr string) string {
+	switch {
+	case addr == "":
+		return ""
+	case strings.HasPrefix(addr, ":"):
+		return ""
+	}
+
+	host, _, err := net.SplitHostPort(addr)
+	if err == nil {
+		return host
+	}
+
+	return addr
+}
+
+func portFromAddr(addr string) (string, bool) {
+	switch {
+	case addr == "":
+		return "", false
+	case strings.HasPrefix(addr, ":"):
+		port := strings.TrimPrefix(addr, ":")
+		if port == "" {
+			return "", false
+		}
+
+		return port, true
+	}
+
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		return "", false
+	}
+
+	return port, true
+}
+
+func isWildcardHost(host string) bool {
+	switch host {
+	case "", "0.0.0.0", "::", "[::]", "*":
+		return true
+	default:
+		return false
+	}
 }

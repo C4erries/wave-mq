@@ -2,12 +2,14 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,6 +77,7 @@ func (h *Handler) handleControllerStatus(w http.ResponseWriter, r *http.Request)
 	term := uint64(0)
 	peers := []controller.PeerInfo{}
 	leader := ""
+	leaderID := ""
 
 	if rc, ok := h.ctrl.(interface {
 		ControllerMode() string
@@ -94,6 +97,12 @@ func (h *Handler) handleControllerStatus(w http.ResponseWriter, r *http.Request)
 		leader = rl.RaftLeader()
 	}
 
+	if rl, ok := h.ctrl.(interface {
+		RaftLeaderID() string
+	}); ok {
+		leaderID = rl.RaftLeaderID()
+	}
+
 	meta, _ := h.ctrl.GetClusterMetadata(r.Context())
 	if h.ctrl == nil {
 		meta = api.ClusterMetadata{}
@@ -105,6 +114,7 @@ func (h *Handler) handleControllerStatus(w http.ResponseWriter, r *http.Request)
 		"term":      term,
 		"peers":     peers,
 		"leader":    leader,
+		"leaderID":  leaderID,
 		"clusterID": meta.ClusterID,
 		"version":   meta.Version,
 	}
@@ -123,9 +133,11 @@ func (h *Handler) handleControllerRegisterBroker(w http.ResponseWriter, r *http.
 	}
 
 	var req struct {
-		BrokerID int    `json:"brokerID"`
-		Host     string `json:"host"`
-		Port     int    `json:"port,omitempty"`
+		BrokerID       int    `json:"brokerID"`
+		Host           string `json:"host"`
+		Port           int    `json:"port,omitempty"`
+		HTTPAddr       string `json:"httpAddr,omitempty"`
+		ControllerAddr string `json:"controllerAddr,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -137,10 +149,17 @@ func (h *Handler) handleControllerRegisterBroker(w http.ResponseWriter, r *http.
 		return
 	}
 
+	if h.cfg.ControllerMode == "raft" && (req.HTTPAddr == "" || req.ControllerAddr == "") {
+		http.Error(w, "httpAddr and controllerAddr required in raft mode", http.StatusBadRequest)
+		return
+	}
+
 	info := api.BrokerInfo{
-		BrokerID: req.BrokerID,
-		Host:     req.Host,
-		Port:     req.Port,
+		BrokerID:       req.BrokerID,
+		Host:           req.Host,
+		Port:           req.Port,
+		HTTPAddr:       req.HTTPAddr,
+		ControllerAddr: req.ControllerAddr,
 	}
 	if err := h.ctrl.RegisterBroker(r.Context(), info); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -343,22 +362,51 @@ func (h *Handler) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 		ReplicationFactor: req.ReplicationFactor,
 	}
 
-	if status, payload, ok := h.forwardCreateTopicToLeader(r, req); ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_, _ = w.Write(payload) // #nosec G705 -- payload is leader JSON API response in application/json.
-
-		return
-	}
-
 	ctx := r.Context()
 	if err := h.b.CreateTopic(ctx, req.Name, cfg); err != nil {
-		if errors.Is(err, broker.ErrTopicExists) {
-			http.Error(w, err.Error(), http.StatusConflict)
+		var nle controller.NotLeaderError
+
+		switch {
+		case errors.As(err, &nle):
+			if status, payload, ok := h.forwardCreateTopicToLeader(r, req, nle.Leader); ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write(payload) // #nosec G705 -- payload is leader JSON API response in application/json.
+
+				return
+			}
+
+			w.WriteHeader(http.StatusConflict)
+			writeJSON(w, map[string]interface{}{
+				"error":   "not_leader",
+				"leader":  nle.Leader,
+				"message": err.Error(),
+			})
+
+			return
+		case errors.Is(err, controller.ErrLeaderNotElected):
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeJSON(w, map[string]interface{}{
+				"error":   "leader_not_elected",
+				"message": err.Error(),
+			})
+
+			return
+		case errors.Is(err, broker.ErrTopicExists):
+			w.WriteHeader(http.StatusConflict)
+			writeJSON(w, map[string]interface{}{
+				"error":   "topic_exists",
+				"message": err.Error(),
+			})
+
 			return
 		}
 
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]interface{}{
+			"error":   "bad_request",
+			"message": err.Error(),
+		})
 
 		return
 	}
@@ -376,13 +424,9 @@ func (h *Handler) forwardCreateTopicToLeader(
 		Partitions        int    `json:"partitions"`
 		ReplicationFactor int    `json:"replicationFactor"`
 	},
+	leaderHint string,
 ) (int, []byte, bool) {
 	if r.Header.Get(forwardedCreateTopicHeader) != "" {
-		return 0, nil, false
-	}
-
-	url, ok := h.leaderTopicsURL()
-	if !ok {
 		return 0, nil, false
 	}
 
@@ -391,31 +435,54 @@ func (h *Handler) forwardCreateTopicToLeader(
 		return 0, nil, false
 	}
 
-	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(data))
-	if err != nil {
-		return 0, nil, false
+	currentLeader := leaderHint
+
+	for attempt := 0; attempt < 3; attempt++ {
+		leaderURL, leaderAddr, ok := h.leaderTopicsURL(r.Context(), currentLeader)
+		if !ok {
+			return 0, nil, false
+		}
+
+		currentLeader = leaderAddr
+
+		httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, leaderURL, bytes.NewReader(data))
+		if err != nil {
+			return 0, nil, false
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set(forwardedCreateTopicHeader, "1")
+
+		resp, err := http.DefaultClient.Do(httpReq) // #nosec G704 -- leader host comes from local Raft state.
+		if err != nil {
+			currentLeader = ""
+			continue
+		}
+
+		payload, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+
+		if readErr != nil {
+			currentLeader = ""
+			continue
+		}
+
+		if resp.StatusCode == http.StatusConflict {
+			if nextLeader, ok := parseNotLeaderHint(payload); ok && nextLeader != "" && nextLeader != currentLeader {
+				currentLeader = nextLeader
+				continue
+			}
+		}
+
+		return resp.StatusCode, payload, true
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set(forwardedCreateTopicHeader, "1")
-
-	resp, err := http.DefaultClient.Do(httpReq) // #nosec G704 -- leader host comes from local Raft state.
-	if err != nil {
-		return 0, nil, false
-	}
-	defer resp.Body.Close()
-
-	payload, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, nil, false
-	}
-
-	return resp.StatusCode, payload, true
+	return 0, nil, false
 }
 
-func (h *Handler) leaderTopicsURL() (string, bool) {
+func (h *Handler) leaderTopicsURL(ctx context.Context, leaderHint string) (string, string, bool) {
 	if h.cfg.ControllerMode != "raft" || h.ctrl == nil {
-		return "", false
+		return "", "", false
 	}
 
 	rs, ok := h.ctrl.(interface {
@@ -423,47 +490,135 @@ func (h *Handler) leaderTopicsURL() (string, bool) {
 		RaftLeader() string
 	})
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 
 	if strings.ToLower(rs.RaftState()) == "leader" {
-		return "", false
+		return "", "", false
 	}
 
-	leaderAddr := rs.RaftLeader()
+	leaderAddr := leaderHint
 	if leaderAddr == "" {
-		return "", false
+		if rl, ok := h.ctrl.(interface{ RaftLeaderID() string }); ok {
+			leaderAddr = rl.RaftLeaderID()
+		}
 	}
 
-	host, _, err := net.SplitHostPort(leaderAddr)
+	if leaderAddr == "" {
+		leaderAddr = rs.RaftLeader()
+	}
+
+	if leaderAddr == "" {
+		return "", "", false
+	}
+
+	meta, err := h.ctrl.GetClusterMetadata(ctx)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 
-	port, ok := httpPort(h.cfg.HTTPAddr)
+	info, ok := brokerInfoForLeader(meta.Brokers, leaderAddr)
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 
-	return "http://" + net.JoinHostPort(host, port) + "/api/topics", true
+	httpAddr, ok := normalizeHostPort(info.HTTPAddr)
+	if !ok {
+		return "", "", false
+	}
+
+	return "http://" + httpAddr + "/api/topics", leaderAddr, true
 }
 
-func httpPort(addr string) (string, bool) {
-	if strings.HasPrefix(addr, ":") {
-		port := strings.TrimPrefix(addr, ":")
-		if port == "" {
+func brokerInfoForLeader(brokers []api.BrokerInfo, leaderAddr string) (api.BrokerInfo, bool) {
+	for _, brokerInfo := range brokers {
+		if brokerInfo.ControllerAddr == leaderAddr {
+			return brokerInfo, true
+		}
+	}
+
+	leaderHost, ok := hostFromAddress(leaderAddr)
+	if !ok {
+		return api.BrokerInfo{}, false
+	}
+
+	for _, brokerInfo := range brokers {
+		for _, candidate := range []string{brokerInfo.ControllerAddr, brokerInfo.HTTPAddr, brokerInfo.Host} {
+			host, ok := hostFromAddress(candidate)
+			if !ok {
+				continue
+			}
+
+			if host == leaderHost {
+				return brokerInfo, true
+			}
+		}
+	}
+
+	return api.BrokerInfo{}, false
+}
+
+func normalizeHostPort(raw string) (string, bool) {
+	addr := strings.TrimSpace(raw)
+	if addr == "" {
+		return "", false
+	}
+
+	if strings.Contains(addr, "://") {
+		u, err := url.Parse(addr)
+		if err != nil || u.Host == "" {
 			return "", false
 		}
 
-		return port, true
+		addr = u.Host
 	}
 
-	_, port, err := net.SplitHostPort(addr)
-	if err != nil || port == "" {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" || port == "" {
 		return "", false
 	}
 
-	return port, true
+	return net.JoinHostPort(host, port), true
+}
+
+func hostFromAddress(addr string) (string, bool) {
+	value := strings.TrimSpace(addr)
+	if value == "" || strings.HasPrefix(value, ":") {
+		return "", false
+	}
+
+	if strings.Contains(value, "://") {
+		u, err := url.Parse(value)
+		if err != nil || u.Hostname() == "" {
+			return "", false
+		}
+
+		return u.Hostname(), true
+	}
+
+	host, _, err := net.SplitHostPort(value)
+	if err == nil && host != "" {
+		return host, true
+	}
+
+	return value, true
+}
+
+func parseNotLeaderHint(payload []byte) (string, bool) {
+	var body struct {
+		Error  string `json:"error"`
+		Leader string `json:"leader"`
+	}
+
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return "", false
+	}
+
+	if body.Error != "not_leader" || body.Leader == "" {
+		return "", false
+	}
+
+	return body.Leader, true
 }
 
 func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic string, partition int) {

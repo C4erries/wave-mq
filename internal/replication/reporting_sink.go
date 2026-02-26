@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/c4erries/wave-mq/internal/controller"
@@ -49,6 +50,11 @@ func (s *reportingSink) ApplyBatch(ctx context.Context, records []api.Record, hi
 
 	if s.ctrl != nil {
 		if _, err := s.ctrl.ReportReplicaProgress(ctx, s.topic, s.part, s.brokerID, last, highWatermark); err != nil {
+			var nle controller.NotLeaderError
+			if errors.As(err, &nle) || errors.Is(err, controller.ErrNotLeader) || errors.Is(err, controller.ErrLeaderNotElected) {
+				return last, nil
+			}
+
 			return last, err
 		}
 	}

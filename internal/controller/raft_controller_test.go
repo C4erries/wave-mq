@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -417,6 +418,63 @@ func TestRaftControllerMultiPeerAssignTopic(t *testing.T) {
 		return len(m1.Partitions) == 2 && len(m2.Partitions) == 2 && m1.Version == m2.Version
 	}); err != nil {
 		t.Fatalf("metadata not replicated: %v", err)
+	}
+}
+
+func TestRaftControllerFollowerAssignTopicReturnsNotLeader(t *testing.T) {
+	addr1 := freeAddr(t)
+	addr2 := freeAddr(t)
+	peers := []string{addr1, addr2}
+
+	cfg1 := api.BrokerConfig{
+		BrokerID:       1,
+		ControllerMode: "raft",
+		RaftBindAddr:   addr1,
+		RaftPeers:      peers,
+	}
+	cfg2 := cfg1
+	cfg2.BrokerID = 2
+	cfg2.RaftBindAddr = addr2
+
+	initial := api.ClusterMetadata{
+		ClusterID: "cluster-raft",
+		Version:   1,
+	}
+
+	rc1, err := NewRaftController(cfg1, initial, "")
+	if err != nil {
+		t.Fatalf("new raft controller 1: %v", err)
+	}
+	defer rc1.Close()
+
+	rc2, err := NewRaftController(cfg2, initial, "")
+	if err != nil {
+		t.Fatalf("new raft controller 2: %v", err)
+	}
+	defer rc2.Close()
+
+	leader := waitForLeader(t, []*RaftController{rc1, rc2})
+
+	follower := rc1
+	if follower == leader {
+		follower = rc2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err = follower.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 1})
+	if err == nil {
+		t.Fatalf("expected not leader error, got nil")
+	}
+
+	var nle NotLeaderError
+	if !errors.As(err, &nle) {
+		t.Fatalf("expected NotLeaderError, got %v", err)
+	}
+
+	if nle.Leader == "" {
+		t.Fatalf("expected leader hint in NotLeaderError")
 	}
 }
 

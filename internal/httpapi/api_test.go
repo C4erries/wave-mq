@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -181,7 +180,7 @@ func (f *forwardingFollowerCtrl) AssignTopic(ctx context.Context, name string, c
 
 	f.assignCalls++
 
-	return f.meta, fmt.Errorf("local assign should not be called on follower")
+	return f.meta, controller.NotLeaderError{Leader: f.leader}
 }
 
 func (f *forwardingFollowerCtrl) ReportReplicaProgress(
@@ -203,6 +202,59 @@ func (f *forwardingFollowerCtrl) ReportReplicaProgress(
 func (f *forwardingFollowerCtrl) RaftState() string { return "follower" }
 
 func (f *forwardingFollowerCtrl) RaftLeader() string { return f.leader }
+
+type leaderUnavailableCtrl struct {
+	meta api.ClusterMetadata
+}
+
+func (l *leaderUnavailableCtrl) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
+	_ = ctx
+
+	return l.meta, nil
+}
+
+func (l *leaderUnavailableCtrl) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
+	_ = ctx
+	_ = sinceVersion
+
+	ch := make(chan api.ClusterMetadata, 1)
+	ch <- l.meta
+
+	close(ch)
+
+	return ch, nil
+}
+
+func (l *leaderUnavailableCtrl) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
+	_ = ctx
+	_ = info
+
+	return nil
+}
+
+func (l *leaderUnavailableCtrl) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = name
+	_ = cfg
+
+	return l.meta, controller.ErrLeaderNotElected
+}
+
+func (l *leaderUnavailableCtrl) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition, brokerID int,
+	lastOffset, leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = topic
+	_ = partition
+	_ = brokerID
+	_ = lastOffset
+	_ = leaderHighWatermark
+
+	return l.meta, nil
+}
 
 func (a *assignmentController) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
 	_ = ctx
@@ -628,10 +680,12 @@ func TestCreateTopicEndpointForwardsToRaftLeader(t *testing.T) {
 		t.Fatalf("parse leader url: %v", err)
 	}
 
-	leaderHost, leaderHTTPPort, err := net.SplitHostPort(leaderURL.Host)
+	leaderHost, _, err := net.SplitHostPort(leaderURL.Host)
 	if err != nil {
 		t.Fatalf("split leader host: %v", err)
 	}
+
+	leaderRaftAddr := net.JoinHostPort(leaderHost, "9001")
 
 	ctrl := &forwardingFollowerCtrl{
 		meta: api.ClusterMetadata{
@@ -639,10 +693,10 @@ func TestCreateTopicEndpointForwardsToRaftLeader(t *testing.T) {
 			Version:   1,
 			Brokers: []api.BrokerInfo{
 				{BrokerID: 1, Host: "b1"},
-				{BrokerID: 2, Host: "b2"},
+				{BrokerID: 2, Host: "b2", HTTPAddr: leaderURL.Host, ControllerAddr: leaderRaftAddr},
 			},
 		},
-		leader: net.JoinHostPort(leaderHost, "9001"),
+		leader: leaderRaftAddr,
 	}
 
 	dir := t.TempDir()
@@ -674,7 +728,7 @@ func TestCreateTopicEndpointForwardsToRaftLeader(t *testing.T) {
 		DataDir:           dir,
 		BinaryAddr:        ":7912",
 		MQTTAddr:          ":1883",
-		HTTPAddr:          ":" + leaderHTTPPort,
+		HTTPAddr:          ":6555",
 		ReplicationFactor: 2,
 		ControllerMode:    "raft",
 	}
@@ -717,8 +771,174 @@ func TestCreateTopicEndpointForwardsToRaftLeader(t *testing.T) {
 		t.Fatalf("expected one leader call, got %d", leaderCalls)
 	}
 
-	if ctrl.assignCalls != 0 {
-		t.Fatalf("local assign must not be called, got %d", ctrl.assignCalls)
+	if ctrl.assignCalls != 1 {
+		t.Fatalf("local assign should be called exactly once before forward, got %d", ctrl.assignCalls)
+	}
+}
+
+func TestCreateTopicEndpointReturnsNotLeaderContractWithoutLeaderHTTPAddr(t *testing.T) {
+	leaderAddr := "leader-node:9001"
+
+	ctrl := &forwardingFollowerCtrl{
+		meta: api.ClusterMetadata{
+			ClusterID: "cluster-forward",
+			Version:   1,
+			Brokers: []api.BrokerInfo{
+				{BrokerID: 1, Host: "b1"},
+				{BrokerID: 2, Host: "leader-node:7912", ControllerAddr: leaderAddr},
+			},
+		},
+		leader: leaderAddr,
+	}
+
+	dir := t.TempDir()
+
+	store, err := storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1 << 20,
+		IndexInterval:   1,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	defer store.Close()
+
+	offsetStore, err := broker.NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+	defer offsetStore.Close()
+
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
+	defer metaStore.Close()
+
+	cfg := api.BrokerConfig{
+		BrokerID:          1,
+		DataDir:           dir,
+		BinaryAddr:        ":7912",
+		MQTTAddr:          ":1883",
+		HTTPAddr:          ":8090",
+		ReplicationFactor: 2,
+		ControllerMode:    "raft",
+	}
+
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+	defer b.Close()
+
+	handler := New(b, cfg, ctrl)
+	mux := http.NewServeMux()
+	handler.Register(mux)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	body := []byte(`{"name":"api-topic","partitions":1,"replicationFactor":2}`)
+
+	resp, err := http.Post(server.URL+"/api/topics", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+
+	var payload map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if payload["error"] != "not_leader" {
+		t.Fatalf("expected not_leader error payload, got %+v", payload)
+	}
+
+	if payload["leader"] != leaderAddr {
+		t.Fatalf("expected leader hint %q, got %+v", leaderAddr, payload)
+	}
+}
+
+func TestCreateTopicEndpointReturnsLeaderNotElected(t *testing.T) {
+	ctrl := &leaderUnavailableCtrl{
+		meta: api.ClusterMetadata{
+			ClusterID: "cluster-unavailable",
+			Version:   1,
+			Brokers:   []api.BrokerInfo{{BrokerID: 1, Host: "b1"}},
+		},
+	}
+
+	dir := t.TempDir()
+
+	store, err := storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1 << 20,
+		IndexInterval:   1,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	defer store.Close()
+
+	offsetStore, err := broker.NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+	defer offsetStore.Close()
+
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
+	defer metaStore.Close()
+
+	cfg := api.BrokerConfig{
+		BrokerID:          1,
+		DataDir:           dir,
+		BinaryAddr:        ":7912",
+		MQTTAddr:          ":1883",
+		HTTPAddr:          ":8090",
+		ReplicationFactor: 2,
+		ControllerMode:    "raft",
+	}
+
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+	defer b.Close()
+
+	handler := New(b, cfg, ctrl)
+	mux := http.NewServeMux()
+	handler.Register(mux)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	body := []byte(`{"name":"api-topic","partitions":1,"replicationFactor":2}`)
+
+	resp, err := http.Post(server.URL+"/api/topics", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", resp.StatusCode)
+	}
+
+	var payload map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if payload["error"] != "leader_not_elected" {
+		t.Fatalf("unexpected payload: %+v", payload)
 	}
 }
 

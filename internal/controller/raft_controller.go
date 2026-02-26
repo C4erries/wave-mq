@@ -154,7 +154,11 @@ func (f *raftMetadataFSM) applyRegisterBrokerLocked(info api.BrokerInfo) error {
 
 	for i, b := range f.meta.Brokers {
 		if b.BrokerID == info.BrokerID {
-			if b.Host == info.Host && b.Port == info.Port && b.Rack == info.Rack {
+			if b.Host == info.Host &&
+				b.Port == info.Port &&
+				b.Rack == info.Rack &&
+				b.HTTPAddr == info.HTTPAddr &&
+				b.ControllerAddr == info.ControllerAddr {
 				return nil
 			}
 
@@ -505,15 +509,27 @@ func (c *RaftController) applyCommand(ctx context.Context, cmd raftCommand) erro
 		return ctx.Err()
 	case err := <-done:
 		if err != nil {
-			return err
+			return c.normalizeApplyError(err)
 		}
 
 		if applyErr, ok := future.Response().(error); ok && applyErr != nil {
-			return applyErr
+			return c.normalizeApplyError(applyErr)
 		}
 
 		return nil
 	}
+}
+
+func (c *RaftController) normalizeApplyError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if errors.Is(err, raft.ErrNotLeader) {
+		return NotLeaderError{Leader: c.leaderHint()}
+	}
+
+	return err
 }
 
 func (c *RaftController) waitForLeader(ctx context.Context) error {
@@ -521,23 +537,45 @@ func (c *RaftController) waitForLeader(ctx context.Context) error {
 		return nil
 	}
 
+	if leader := c.leaderHint(); leader != "" {
+		return NotLeaderError{Leader: leader}
+	}
+
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
-	timeout := time.After(5 * time.Second)
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-timeout:
-			return fmt.Errorf("leader not elected")
+		case <-timeout.C:
+			if leader := c.leaderHint(); leader != "" {
+				return NotLeaderError{Leader: leader}
+			}
+
+			return ErrLeaderNotElected
 		case <-ticker.C:
 			if c.raft.State() == raft.Leader {
 				return nil
 			}
+
+			if leader := c.leaderHint(); leader != "" {
+				return NotLeaderError{Leader: leader}
+			}
 		}
 	}
+}
+
+func (c *RaftController) leaderHint() string {
+	addr, id := c.raft.LeaderWithID()
+	if id != "" {
+		return string(id)
+	}
+
+	return string(addr)
 }
 
 // SnapshotDump returns the encoded metadata snapshot (for tests).
@@ -557,6 +595,13 @@ func (c *RaftController) RaftState() string { return c.raft.State().String() }
 // RaftLeader returns the current raft leader address as string.
 func (c *RaftController) RaftLeader() string {
 	return string(c.raft.Leader())
+}
+
+// RaftLeaderID returns the current raft leader ID.
+func (c *RaftController) RaftLeaderID() string {
+	_, id := c.raft.LeaderWithID()
+
+	return string(id)
 }
 
 // RaftTerm returns the current term.

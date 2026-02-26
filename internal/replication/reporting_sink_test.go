@@ -2,17 +2,20 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/c4erries/wave-mq/internal/controller"
 	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
 
 type fakeController struct {
-	calls []struct {
+	reportErr error
+	calls     []struct {
 		topic string
 		part  int
 		bid   int
@@ -61,7 +64,7 @@ func (f *fakeController) ReportReplicaProgress(
 		hwm   api.Offset
 	}{topic: topic, part: partition, bid: brokerID, last: lastOffset, hwm: leaderHighWatermark})
 
-	return api.ClusterMetadata{}, nil
+	return api.ClusterMetadata{}, f.reportErr
 }
 
 func (f *fakeController) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
@@ -157,5 +160,34 @@ func TestReportingSinkUpdatesLagWithoutRecords(t *testing.T) {
 	applied := testutil.ToFloat64(observability.ReplicationApplied.WithLabelValues("beta", "1", "3"))
 	if applied != 0 {
 		t.Fatalf("expected no applied records, got %f", applied)
+	}
+}
+
+func TestReportingSinkIgnoresControllerLeaderTransitions(t *testing.T) {
+	observability.ReplicationApplied.Reset()
+	observability.ReplicationLag.Reset()
+
+	ctrl := &fakeController{
+		reportErr: controller.NotLeaderError{Leader: "leader:9001"},
+	}
+	sink := NewReportingSink(&stubSink{last: 4}, ctrl, "gamma", 2, 3)
+
+	last, err := sink.ApplyBatch(context.Background(), []api.Record{{Value: []byte("x")}}, 6)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	if last != 4 {
+		t.Fatalf("expected last offset 4, got %d", last)
+	}
+
+	if len(ctrl.calls) != 1 {
+		t.Fatalf("expected 1 progress call, got %d", len(ctrl.calls))
+	}
+
+	ctrl.reportErr = errors.New("controller failed")
+
+	if _, err := sink.ApplyBatch(context.Background(), []api.Record{{Value: []byte("y")}}, 7); err == nil {
+		t.Fatalf("expected non-leader controller error to be returned")
 	}
 }
