@@ -38,7 +38,12 @@ func (p *partitionAwareCluster) AssignTopic(ctx context.Context, name string, cf
 	return p.meta, nil
 }
 
-func (p *partitionAwareCluster) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+func (p *partitionAwareCluster) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition, brokerID int,
+	lastOffset, leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
 	_ = ctx
 	_ = topic
 	_ = partition

@@ -548,7 +548,7 @@ func runReplicatorUntil(ctx context.Context, t *testing.T, rep *PartitionReplica
 			return false
 		}
 
-		return next-1 >= target
+		return next > target
 	}, 3*time.Second)
 	cancel()
 	<-done

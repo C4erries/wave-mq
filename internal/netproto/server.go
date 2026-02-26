@@ -19,8 +19,8 @@ type BrokerAPI interface {
 	Produce(ctx context.Context, topic string, partition int, records []api.Record) (api.Offset, error)
 	Fetch(ctx context.Context, topic string, partition int, offset api.Offset, maxBytes int32) ([]api.Record, error)
 	ListOffsets(ctx context.Context, topic string, partition int) (api.Offset, api.Offset, error)
-	CommitOffset(ctx context.Context, group string, topic string, partition int, offset api.Offset) error
-	FetchCommitted(ctx context.Context, group string, topic string, partition int) (api.Offset, error)
+	CommitOffset(ctx context.Context, group, topic string, partition int, offset api.Offset) error
+	FetchCommitted(ctx context.Context, group, topic string, partition int) (api.Offset, error)
 	Metadata(ctx context.Context, topics []string) ([]api.PartitionMetadata, error)
 }
 
@@ -34,8 +34,8 @@ type Server struct {
 }
 
 // NewServer constructs a TCP server bound to addr.
-func NewServer(addr string, broker BrokerAPI) (*Server, error) {
-	if broker == nil {
+func NewServer(addr string, brokerAPI BrokerAPI) (*Server, error) {
+	if brokerAPI == nil {
 		return nil, fmt.Errorf("broker is required")
 	}
 
@@ -43,7 +43,7 @@ func NewServer(addr string, broker BrokerAPI) (*Server, error) {
 		return nil, fmt.Errorf("addr is required")
 	}
 
-	return &Server{addr: addr, broker: broker}, nil
+	return &Server{addr: addr, broker: brokerAPI}, nil
 }
 
 // ListenAndServe starts accepting client connections until ctx is cancelled.

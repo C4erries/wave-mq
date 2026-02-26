@@ -222,7 +222,7 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 			}
 
 			replicas = append(replicas, metadata.ReplicaSpec{
-				BrokerID:    int32(b.cfg.BrokerID),
+				BrokerID:    int32(b.cfg.BrokerID), // #nosec G115 -- broker IDs are validated application-level integers.
 				Role:        role,
 				LeaderEpoch: 0,
 			})
@@ -420,7 +420,10 @@ func partitionSpecFromAssignment(assign api.PartitionAssignment) metadata.Partit
 		})
 	}
 
-	return metadata.PartitionSpec{ID: int32(assign.Partition), Replicas: replicas}
+	return metadata.PartitionSpec{
+		ID:       int32(assign.Partition), // #nosec G115 -- partition IDs come from validated controller metadata.
+		Replicas: replicas,
+	}
 }
 
 func assignmentsForBroker(meta api.ClusterMetadata, topic string, brokerID int) map[int]api.PartitionAssignment {
@@ -644,7 +647,7 @@ func (b *Broker) loadTopicLocked(ctx context.Context, state metadata.TopicState,
 				epoch = assign.LeaderEpoch
 			}
 
-			replica.BrokerID = int32(b.cfg.BrokerID)
+			replica.BrokerID = int32(b.cfg.BrokerID) // #nosec G115 -- broker IDs are validated application-level integers.
 		}
 
 		leader := int(replica.BrokerID)
@@ -704,7 +707,7 @@ func (b *Broker) replicaForPartition(ps metadata.PartitionSpec) metadata.Replica
 	}
 
 	return metadata.ReplicaSpec{
-		BrokerID:    int32(b.cfg.BrokerID),
+		BrokerID:    int32(b.cfg.BrokerID), // #nosec G115 -- broker IDs are validated application-level integers.
 		Role:        api.RoleLeader,
 		LeaderEpoch: 0,
 	}
@@ -888,7 +891,7 @@ func (b *Broker) ListOffsets(ctx context.Context, topic string, partition int) (
 }
 
 // CommitOffset stores a consumer group's committed offset.
-func (b *Broker) CommitOffset(ctx context.Context, group string, topic string, partition int, offset api.Offset) error {
+func (b *Broker) CommitOffset(ctx context.Context, group, topic string, partition int, offset api.Offset) error {
 	_ = ctx
 
 	b.mu.Lock()
@@ -936,7 +939,7 @@ func (b *Broker) CommitOffset(ctx context.Context, group string, topic string, p
 }
 
 // FetchCommitted returns the last committed offset for a consumer group.
-func (b *Broker) FetchCommitted(ctx context.Context, group string, topic string, partition int) (api.Offset, error) {
+func (b *Broker) FetchCommitted(ctx context.Context, group, topic string, partition int) (api.Offset, error) {
 	_ = ctx
 
 	b.mu.RLock()

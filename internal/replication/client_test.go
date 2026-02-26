@@ -79,15 +79,17 @@ func (f *fakeBroker) Fetch(ctx context.Context, topic string, partition int, off
 
 	if maxBytes > 0 {
 		var (
-			total   int32
+			total   int
 			trimmed []api.Record
 		)
 
+		limit := int(maxBytes)
+
 		for _, r := range res {
-			total += int32(len(r.Value))
+			total += len(r.Value)
 			trimmed = append(trimmed, r)
 
-			if total >= maxBytes {
+			if total >= limit {
 				break
 			}
 		}
@@ -118,7 +120,7 @@ func (f *fakeBroker) ListOffsets(ctx context.Context, topic string, partition in
 	return 0, api.Offset(len(recs) - 1), nil
 }
 
-func (f *fakeBroker) CommitOffset(ctx context.Context, group string, topic string, partition int, offset api.Offset) error {
+func (f *fakeBroker) CommitOffset(ctx context.Context, group, topic string, partition int, offset api.Offset) error {
 	_ = ctx
 	_ = group
 	_ = topic
@@ -128,7 +130,7 @@ func (f *fakeBroker) CommitOffset(ctx context.Context, group string, topic strin
 	return nil
 }
 
-func (f *fakeBroker) FetchCommitted(ctx context.Context, group string, topic string, partition int) (api.Offset, error) {
+func (f *fakeBroker) FetchCommitted(ctx context.Context, group, topic string, partition int) (api.Offset, error) {
 	_ = ctx
 	_ = group
 	_ = topic

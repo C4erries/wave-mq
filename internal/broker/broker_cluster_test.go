@@ -38,7 +38,12 @@ func (f fakeCluster) AssignTopic(ctx context.Context, name string, cfg api.Topic
 	return f.meta, nil
 }
 
-func (f fakeCluster) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+func (f fakeCluster) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition, brokerID int,
+	lastOffset, leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
 	_ = ctx
 	_ = topic
 	_ = partition
@@ -288,7 +293,12 @@ func (t *trackingController) AssignTopic(ctx context.Context, name string, cfg a
 	return t.meta, nil
 }
 
-func (t *trackingController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+func (t *trackingController) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition, brokerID int,
+	lastOffset, leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
 	_ = ctx
 	_ = topic
 	_ = partition

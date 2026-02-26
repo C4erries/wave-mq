@@ -20,6 +20,9 @@ import (
 const (
 	frameHeaderSize = 4 + 2 + 2 + 4 + 2
 	currentVersion  = int16(0)
+	maxInt16        = int(^uint16(0) >> 1)
+	maxInt32        = int(^uint32(0) >> 1)
+	maxUint32       = uint64(^uint32(0))
 )
 
 func encodeRequestFrame(apiKey api.APIKey, correlationID int32, payload []byte) ([]byte, error) {
@@ -58,7 +61,12 @@ func encodeFrame(apiKey api.APIKey, correlationID int32, payload []byte) ([]byte
 	}
 
 	data := buf.Bytes()
-	length := uint32(len(data) - 4)
+
+	length, err := toUint32Checked(len(data)-4, "frame length")
+	if err != nil {
+		return nil, err
+	}
+
 	binary.BigEndian.PutUint32(data[0:4], length)
 
 	return data, nil
@@ -83,14 +91,26 @@ func decodeFrame(r io.Reader) (api.APIKey, int32, []byte, error) {
 		return 0, 0, nil, fmt.Errorf("invalid frame length %d", length)
 	}
 
-	apiKey := api.APIKey(int16(binary.BigEndian.Uint16(header[4:6])))
+	apiKeyRaw, err := uint16ToInt16(binary.BigEndian.Uint16(header[4:6]), "api key")
+	if err != nil {
+		return 0, 0, nil, err
+	}
 
-	version := int16(binary.BigEndian.Uint16(header[6:8]))
+	apiKey := api.APIKey(apiKeyRaw)
+
+	version, err := uint16ToInt16(binary.BigEndian.Uint16(header[6:8]), "version")
+	if err != nil {
+		return 0, 0, nil, err
+	}
+
 	if version != currentVersion {
 		return 0, 0, nil, fmt.Errorf("unsupported version %d", version)
 	}
 
-	corr := int32(binary.BigEndian.Uint32(header[8:12]))
+	corr, err := uint32ToInt32(binary.BigEndian.Uint32(header[8:12]), "correlation id")
+	if err != nil {
+		return 0, 0, nil, err
+	}
 
 	payloadLen := int(length) - (frameHeaderSize - 4)
 	if payloadLen < 0 {
@@ -108,11 +128,16 @@ func decodeFrame(r io.Reader) (api.APIKey, int32, []byte, error) {
 // primitive encoders/decoders
 
 func putString(w io.Writer, s string) error {
-	if err := binary.Write(w, binary.BigEndian, int16(len(s))); err != nil {
+	length, err := toInt16Checked(len(s), "string length")
+	if err != nil {
 		return err
 	}
 
-	if len(s) > 0 {
+	if err := binary.Write(w, binary.BigEndian, length); err != nil {
+		return err
+	}
+
+	if s != "" {
 		_, err := w.Write([]byte(s))
 		return err
 	}
@@ -147,7 +172,12 @@ func putBytes(w io.Writer, b []byte) error {
 		return binary.Write(w, binary.BigEndian, int32(-1))
 	}
 
-	if err := binary.Write(w, binary.BigEndian, int32(len(b))); err != nil {
+	length, err := toInt32Checked(len(b), "bytes length")
+	if err != nil {
+		return err
+	}
+
+	if err := binary.Write(w, binary.BigEndian, length); err != nil {
 		return err
 	}
 
@@ -182,7 +212,12 @@ func readBytes(r io.Reader) ([]byte, error) {
 }
 
 func putHeaders(w io.Writer, headers []api.Header) error {
-	if err := binary.Write(w, binary.BigEndian, int32(len(headers))); err != nil {
+	count, err := toInt32Checked(len(headers), "headers count")
+	if err != nil {
+		return err
+	}
+
+	if err := binary.Write(w, binary.BigEndian, count); err != nil {
 		return err
 	}
 
@@ -301,11 +336,21 @@ func encodeCreateTopicRequest(req *CreateTopicRequest) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.BigEndian, int32(req.Partitions)); err != nil {
+	partitions, err := toInt32Checked(req.Partitions, "partitions")
+	if err != nil {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.BigEndian, int32(req.ReplicationFactor)); err != nil {
+	if err := binary.Write(buf, binary.BigEndian, partitions); err != nil {
+		return nil, err
+	}
+
+	replicationFactor, err := toInt32Checked(req.ReplicationFactor, "replication factor")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, replicationFactor); err != nil {
 		return nil, err
 	}
 
@@ -363,11 +408,21 @@ func encodeProduceRequest(req *ProduceRequest) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
+	partition, err := toInt32Checked(req.Partition, "partition")
+	if err != nil {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.BigEndian, int32(len(req.Records))); err != nil {
+	if err := binary.Write(buf, binary.BigEndian, partition); err != nil {
+		return nil, err
+	}
+
+	recordCount, err := toInt32Checked(len(req.Records), "record count")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, recordCount); err != nil {
 		return nil, err
 	}
 
@@ -381,7 +436,12 @@ func encodeProduceRequest(req *ProduceRequest) ([]byte, error) {
 			return nil, err
 		}
 
-		if err := binary.Write(buf, binary.BigEndian, int32(len(recBytes))); err != nil {
+		recordLen, err := toInt32Checked(len(recBytes), "record bytes length")
+		if err != nil {
+			return nil, err
+		}
+
+		if err := binary.Write(buf, binary.BigEndian, recordLen); err != nil {
 			return nil, err
 		}
 
@@ -475,7 +535,12 @@ func encodeFetchRequest(req *FetchRequest) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
+	partition, err := toInt32Checked(req.Partition, "partition")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, partition); err != nil {
 		return nil, err
 	}
 
@@ -527,7 +592,12 @@ func encodeFetchResponse(resp *FetchResponse) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.BigEndian, int32(len(resp.Records))); err != nil {
+	recordCount, err := toInt32Checked(len(resp.Records), "record count")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, recordCount); err != nil {
 		return nil, err
 	}
 
@@ -537,7 +607,12 @@ func encodeFetchResponse(resp *FetchResponse) ([]byte, error) {
 			return nil, err
 		}
 
-		if err := binary.Write(buf, binary.BigEndian, int32(len(recBytes))); err != nil {
+		recordLen, err := toInt32Checked(len(recBytes), "record bytes length")
+		if err != nil {
+			return nil, err
+		}
+
+		if err := binary.Write(buf, binary.BigEndian, recordLen); err != nil {
 			return nil, err
 		}
 
@@ -594,7 +669,13 @@ func decodeFetchResponse(payload []byte) (*FetchResponse, error) {
 
 func encodeMetadataRequest(req *MetadataRequest) ([]byte, error) {
 	buf := &bytes.Buffer{}
-	if err := binary.Write(buf, binary.BigEndian, int32(len(req.Topics))); err != nil {
+
+	topicCount, err := toInt32Checked(len(req.Topics), "topic count")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, topicCount); err != nil {
 		return nil, err
 	}
 
@@ -634,7 +715,12 @@ func encodeMetadataResponse(resp *MetadataResponse) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.BigEndian, int32(len(resp.Partitions))); err != nil {
+	partitionsCount, err := toInt32Checked(len(resp.Partitions), "partition count")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, partitionsCount); err != nil {
 		return nil, err
 	}
 
@@ -643,15 +729,30 @@ func encodeMetadataResponse(resp *MetadataResponse) ([]byte, error) {
 			return nil, err
 		}
 
-		if err := binary.Write(buf, binary.BigEndian, int32(p.Replica.Partition)); err != nil {
+		partition, err := toInt32Checked(p.Replica.Partition, "replica partition")
+		if err != nil {
 			return nil, err
 		}
 
-		if err := binary.Write(buf, binary.BigEndian, int32(p.Replica.BrokerID)); err != nil {
+		if err := binary.Write(buf, binary.BigEndian, partition); err != nil {
 			return nil, err
 		}
 
-		if err := binary.Write(buf, binary.BigEndian, int16(p.Replica.Role)); err != nil {
+		brokerID, err := toInt32Checked(p.Replica.BrokerID, "replica broker id")
+		if err != nil {
+			return nil, err
+		}
+
+		if err := binary.Write(buf, binary.BigEndian, brokerID); err != nil {
+			return nil, err
+		}
+
+		role, err := partitionRoleToInt16(p.Replica.Role)
+		if err != nil {
+			return nil, err
+		}
+
+		if err := binary.Write(buf, binary.BigEndian, role); err != nil {
 			return nil, err
 		}
 
@@ -667,26 +768,51 @@ func encodeMetadataResponse(resp *MetadataResponse) ([]byte, error) {
 			return nil, err
 		}
 
-		if err := binary.Write(buf, binary.BigEndian, int32(p.Leader)); err != nil {
+		leader, err := toInt32Checked(p.Leader, "leader")
+		if err != nil {
 			return nil, err
 		}
 
-		if err := binary.Write(buf, binary.BigEndian, int32(len(p.Replicas))); err != nil {
+		if err := binary.Write(buf, binary.BigEndian, leader); err != nil {
+			return nil, err
+		}
+
+		replicasCount, err := toInt32Checked(len(p.Replicas), "replicas count")
+		if err != nil {
+			return nil, err
+		}
+
+		if err := binary.Write(buf, binary.BigEndian, replicasCount); err != nil {
 			return nil, err
 		}
 
 		for _, r := range p.Replicas {
-			if err := binary.Write(buf, binary.BigEndian, int32(r)); err != nil {
+			replicaID, err := toInt32Checked(r, "replica id")
+			if err != nil {
+				return nil, err
+			}
+
+			if err := binary.Write(buf, binary.BigEndian, replicaID); err != nil {
 				return nil, err
 			}
 		}
 
-		if err := binary.Write(buf, binary.BigEndian, int32(len(p.ISR))); err != nil {
+		isrCount, err := toInt32Checked(len(p.ISR), "isr count")
+		if err != nil {
+			return nil, err
+		}
+
+		if err := binary.Write(buf, binary.BigEndian, isrCount); err != nil {
 			return nil, err
 		}
 
 		for _, r := range p.ISR {
-			if err := binary.Write(buf, binary.BigEndian, int32(r)); err != nil {
+			isrID, err := toInt32Checked(r, "isr id")
+			if err != nil {
+				return nil, err
+			}
+
+			if err := binary.Write(buf, binary.BigEndian, isrID); err != nil {
 				return nil, err
 			}
 		}
@@ -834,7 +960,12 @@ func encodeCommitOffsetRequest(req *CommitOffsetRequest) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
+	partition, err := toInt32Checked(req.Partition, "partition")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, partition); err != nil {
 		return nil, err
 	}
 
@@ -906,7 +1037,12 @@ func encodeFetchCommittedRequest(req *FetchCommittedRequest) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
+	partition, err := toInt32Checked(req.Partition, "partition")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, partition); err != nil {
 		return nil, err
 	}
 
@@ -976,7 +1112,12 @@ func encodeListOffsetsRequest(req *ListOffsetsRequest) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
+	partition, err := toInt32Checked(req.Partition, "partition")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, partition); err != nil {
 		return nil, err
 	}
 
@@ -1118,4 +1259,57 @@ func EncodeListOffsetsRequest(req *ListOffsetsRequest) ([]byte, error) {
 
 func DecodeListOffsetsResponse(p []byte) (*ListOffsetsResponse, error) {
 	return decodeListOffsetsResponse(p)
+}
+
+func toUint32Checked(n int, field string) (uint32, error) {
+	if n < 0 {
+		return 0, fmt.Errorf("%s is negative: %d", field, n)
+	}
+
+	if uint64(n) > maxUint32 {
+		return 0, fmt.Errorf("%s exceeds uint32 max: %d", field, n)
+	}
+
+	return uint32(n), nil // #nosec G115 -- bounds checked above.
+}
+
+func toInt16Checked(n int, field string) (int16, error) {
+	if n < 0 || n > maxInt16 {
+		return 0, fmt.Errorf("%s out of int16 range: %d", field, n)
+	}
+
+	return int16(n), nil // #nosec G115 -- bounds checked above.
+}
+
+func toInt32Checked(n int, field string) (int32, error) {
+	if n < 0 || n > maxInt32 {
+		return 0, fmt.Errorf("%s out of int32 range: %d", field, n)
+	}
+
+	return int32(n), nil // #nosec G115 -- bounds checked above.
+}
+
+func uint16ToInt16(v uint16, field string) (int16, error) {
+	if v > uint16(maxInt16) {
+		return 0, fmt.Errorf("%s out of int16 range: %d", field, v)
+	}
+
+	return int16(v), nil // #nosec G115 -- bounds checked above.
+}
+
+func uint32ToInt32(v uint32, field string) (int32, error) {
+	if v > uint32(maxInt32) {
+		return 0, fmt.Errorf("%s out of int32 range: %d", field, v)
+	}
+
+	return int32(v), nil // #nosec G115 -- bounds checked above.
+}
+
+func partitionRoleToInt16(role api.PartitionRole) (int16, error) {
+	v := int(role)
+	if v < 0 || v > maxInt16 {
+		return 0, fmt.Errorf("partition role out of int16 range: %d", v)
+	}
+
+	return int16(v), nil // #nosec G115 -- bounds checked above.
 }

@@ -11,7 +11,7 @@ func TestConnectRoundTrip(t *testing.T) {
 		KeepAliveSec: 10,
 		CleanStart:   true,
 		Username:     "u",
-		Password:     []byte("p"),
+		AuthData:     []byte("p"),
 	}
 	buf := &bytes.Buffer{}
 	header := []byte{packetTypeCONNECT << 4}
@@ -22,7 +22,7 @@ func TestConnectRoundTrip(t *testing.T) {
 	body.Write([]byte{0, 10})
 	_ = writeString(body, orig.ClientID)
 	_ = writeString(body, orig.Username)
-	_ = writeString(body, string(orig.Password))
+	_ = writeString(body, string(orig.AuthData))
 	header = append(header, encodeRemainingLength(body.Len())...)
 	buf.Write(header)
 	buf.Write(body.Bytes())
@@ -52,7 +52,8 @@ func TestSubscribeRoundTrip(t *testing.T) {
 
 	header := []byte{(packetTypeSUBSCRIBE << 4) | 0x02}
 	header = append(header, encodeRemainingLength(body.Len())...)
-	all := append(header, body.Bytes()...)
+	header = append(header, body.Bytes()...)
+	all := header
 
 	pkt, err := readPacket(bytes.NewReader(all))
 	if err != nil {
@@ -77,7 +78,8 @@ func TestPublishRoundTripQoS1(t *testing.T) {
 	body.Write(orig.Payload)
 	header := []byte{(packetTypePUBLISH << 4) | (orig.QoS << 1)}
 	header = append(header, encodeRemainingLength(body.Len())...)
-	all := append(header, body.Bytes()...)
+	header = append(header, body.Bytes()...)
+	all := header
 
 	pkt, err := readPacket(bytes.NewReader(all))
 	if err != nil {

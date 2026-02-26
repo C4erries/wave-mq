@@ -109,7 +109,11 @@ func (f *raftMetadataFSM) Apply(l *raft.Log) interface{} {
 	return err
 }
 
-func (f *raftMetadataFSM) applyReplicaProgressLocked(topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) error {
+func (f *raftMetadataFSM) applyReplicaProgressLocked(
+	topic string,
+	partition, brokerID int,
+	lastOffset, leaderHighWatermark api.Offset,
+) error {
 	idx := -1
 
 	for i, p := range f.meta.Partitions {
@@ -256,57 +260,20 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 		return nil, err
 	}
 
-	var transport raft.Transport
-
-	if useInmem {
-		addr, inmem := raft.NewInmemTransport(raft.ServerAddress(rCfg.LocalID))
-		transport = inmem
-		localAddr = addr
-	} else {
-		tcpTransport, err := raft.NewTCPTransport(cfg.RaftBindAddr, nil, 3, 2*time.Second, io.Discard)
-		if err != nil {
-			return nil, err
-		}
-
-		transport = tcpTransport
-		localAddr = raft.ServerAddress(cfg.RaftBindAddr)
-	}
-
-	stored, err := loadInitialMetadata(stableStore)
+	transport, resolvedAddr, err := newRaftTransport(cfg, rCfg, useInmem)
 	if err != nil {
 		return nil, err
 	}
 
-	initial := initialMeta
-	if stored != nil {
-		initial = *stored
-	} else {
-		if err := persistInitialMetadata(stableStore, initial); err != nil {
-			return nil, err
-		}
-	}
-
-	hasState, err := raft.HasExistingState(logStore, stableStore, snapStore)
+	initial, err := resolveInitialMetadata(stableStore, initialMeta)
 	if err != nil {
 		return nil, err
 	}
 
-	if !hasState {
-		if len(cfg.RaftPeers) == 0 {
-			cfg.RaftPeers = []string{string(localAddr)}
-		}
-
-		config := raft.Configuration{
-			Servers: buildServers(cfg, rCfg.LocalID, localAddr),
-		}
-
-		if err := persistInitialMetadata(stableStore, initial); err != nil {
-			return nil, err
-		}
-
-		if err := raft.BootstrapCluster(rCfg, logStore, stableStore, snapStore, transport, config); err != nil && err != raft.ErrCantBootstrap {
-			return nil, err
-		}
+	if err := bootstrapClusterIfNeeded(
+		cfg, rCfg, logStore, stableStore, snapStore, transport, resolvedAddr, initial,
+	); err != nil {
+		return nil, err
 	}
 
 	pub := metadataPublisher{}
@@ -318,6 +285,77 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 	}
 
 	return &RaftController{cfg: cfg, fsm: fsm, raft: r, pub: &pub, closers: closers}, nil
+}
+
+func newRaftTransport(cfg api.BrokerConfig, rCfg *raft.Config, useInmem bool) (raft.Transport, raft.ServerAddress, error) {
+	if useInmem {
+		addr, inmem := raft.NewInmemTransport(raft.ServerAddress(rCfg.LocalID))
+		return inmem, addr, nil
+	}
+
+	tcpTransport, err := raft.NewTCPTransport(cfg.RaftBindAddr, nil, 3, 2*time.Second, io.Discard)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return tcpTransport, raft.ServerAddress(cfg.RaftBindAddr), nil
+}
+
+func resolveInitialMetadata(stableStore raft.StableStore, initialMeta api.ClusterMetadata) (api.ClusterMetadata, error) {
+	stored, err := loadInitialMetadata(stableStore)
+	if err != nil {
+		return api.ClusterMetadata{}, err
+	}
+
+	initial := initialMeta
+
+	if stored != nil {
+		return *stored, nil
+	}
+
+	if err := persistInitialMetadata(stableStore, initial); err != nil {
+		return api.ClusterMetadata{}, err
+	}
+
+	return initial, nil
+}
+
+func bootstrapClusterIfNeeded(
+	cfg api.BrokerConfig,
+	rCfg *raft.Config,
+	logStore raft.LogStore,
+	stableStore raft.StableStore,
+	snapStore raft.SnapshotStore,
+	transport raft.Transport,
+	localAddr raft.ServerAddress,
+	initial api.ClusterMetadata,
+) error {
+	hasState, err := raft.HasExistingState(logStore, stableStore, snapStore)
+	if err != nil {
+		return err
+	}
+
+	if hasState {
+		return nil
+	}
+
+	if len(cfg.RaftPeers) == 0 {
+		cfg.RaftPeers = []string{string(localAddr)}
+	}
+
+	config := raft.Configuration{
+		Servers: buildServers(cfg, rCfg.LocalID, localAddr),
+	}
+
+	if err := persistInitialMetadata(stableStore, initial); err != nil {
+		return err
+	}
+
+	if err := raft.BootstrapCluster(rCfg, logStore, stableStore, snapStore, transport, config); err != nil && err != raft.ErrCantBootstrap {
+		return err
+	}
+
+	return nil
 }
 
 func buildStores(raftDir string) (raft.LogStore, raft.StableStore, raft.SnapshotStore, []io.Closer, error) {
@@ -424,7 +462,12 @@ func (c *RaftController) AssignTopic(ctx context.Context, name string, cfg api.T
 	return c.GetClusterMetadata(ctx)
 }
 
-func (c *RaftController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+func (c *RaftController) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition, brokerID int,
+	lastOffset, leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
 	cmd := raftCommand{
 		Type:                cmdReportReplicaProgress,
 		Topic:               topic,

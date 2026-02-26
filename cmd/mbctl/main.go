@@ -11,6 +11,8 @@ import (
 	"github.com/c4erries/wave-mq/pkg/api"
 )
 
+const maxInt32 = int(^uint32(0) >> 1)
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -37,7 +39,7 @@ func main() {
 	case "help", "-h", "--help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown command: %q\n", os.Args[1]) // #nosec G705 -- CLI stderr output only.
 		usage()
 		os.Exit(1)
 	}
@@ -140,11 +142,17 @@ func handleFetch(args []string) {
 		os.Exit(1)
 	}
 
+	maxFetchBytes, err := toInt32(*maxBytes, "max-bytes")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid max-bytes: %v\n", err)
+		os.Exit(1)
+	}
+
 	req := &netproto.FetchRequest{
 		Topic:     *topic,
 		Partition: *partition,
 		Offset:    api.Offset(*offset),
-		MaxBytes:  int32(*maxBytes),
+		MaxBytes:  maxFetchBytes,
 	}
 
 	resp, err := sendFetch(*brokerAddr, req)
@@ -419,4 +427,12 @@ func sendRequest(addr string, apiKey api.APIKey, payloadFn func() ([]byte, error
 	_, _, respPayload, err := netproto.DecodeResponseFrame(conn)
 
 	return respPayload, err
+}
+
+func toInt32(v int, field string) (int32, error) {
+	if v < 0 || v > maxInt32 {
+		return 0, fmt.Errorf("%s out of int32 range: %d", field, v)
+	}
+
+	return int32(v), nil // #nosec G115 -- bounds checked above.
 }

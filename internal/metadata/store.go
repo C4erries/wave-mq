@@ -25,6 +25,12 @@ const (
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
+const (
+	maxUint16 = int(^uint16(0))
+	maxUint32 = uint64(^uint32(0))
+	maxByte   = int(^byte(0))
+)
+
 type unknownEvent struct {
 	typ uint8
 }
@@ -234,7 +240,13 @@ func wrapRecord(payload []byte) ([]byte, error) {
 	}
 
 	b := buf.Bytes()
-	binary.LittleEndian.PutUint32(b[0:4], uint32(len(b)-4))
+
+	recordLen, err := toUint32Length(len(b) - 4)
+	if err != nil {
+		return nil, err
+	}
+
+	binary.LittleEndian.PutUint32(b[0:4], recordLen)
 	crc := crc32.Checksum(b[8:], crcTable)
 	binary.LittleEndian.PutUint32(b[4:8], crc)
 
@@ -295,7 +307,12 @@ func encodeCreateTopicEvent(ev CreateTopicEvent) ([]byte, error) {
 		return nil, fmt.Errorf("topic name too long")
 	}
 
-	if err := binary.Write(buf, binary.LittleEndian, uint16(len(ev.Name))); err != nil {
+	nameLen, err := toUint16("topic name length", len(ev.Name))
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, nameLen); err != nil {
 		return nil, err
 	}
 
@@ -303,15 +320,30 @@ func encodeCreateTopicEvent(ev CreateTopicEvent) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.LittleEndian, uint16(ev.NumPartitions)); err != nil {
+	numPartitions, err := toUint16("num partitions", ev.NumPartitions)
+	if err != nil {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.LittleEndian, uint16(ev.ReplicationFactor)); err != nil {
+	if err := binary.Write(buf, binary.LittleEndian, numPartitions); err != nil {
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.LittleEndian, uint16(len(ev.Partitions))); err != nil {
+	replicationFactor, err := toUint16("replication factor", ev.ReplicationFactor)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, replicationFactor); err != nil {
+		return nil, err
+	}
+
+	partitionCount, err := toUint16("partition spec count", len(ev.Partitions))
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, partitionCount); err != nil {
 		return nil, err
 	}
 
@@ -332,7 +364,12 @@ func encodeCreateTopicEvent(ev CreateTopicEvent) ([]byte, error) {
 			return nil, fmt.Errorf("too many replicas for partition %d", p.ID)
 		}
 
-		if err := binary.Write(buf, binary.LittleEndian, uint16(len(p.Replicas))); err != nil {
+		replicaCount, err := toUint16(fmt.Sprintf("partition %d replica count", p.ID), len(p.Replicas))
+		if err != nil {
+			return nil, err
+		}
+
+		if err := binary.Write(buf, binary.LittleEndian, replicaCount); err != nil {
 			return nil, err
 		}
 
@@ -341,7 +378,12 @@ func encodeCreateTopicEvent(ev CreateTopicEvent) ([]byte, error) {
 				return nil, err
 			}
 
-			if err := buf.WriteByte(byte(r.Role)); err != nil {
+			role, err := partitionRoleToByte(r.Role)
+			if err != nil {
+				return nil, err
+			}
+
+			if err := buf.WriteByte(role); err != nil {
 				return nil, err
 			}
 
@@ -391,52 +433,102 @@ func decodeCreateTopicEvent(version uint8, data []byte) (CreateTopicEvent, error
 		Name:              string(name),
 		NumPartitions:     int(parts),
 		ReplicationFactor: int(rf),
-		Partitions:        make([]PartitionSpec, 0, specCount),
 	}
-	for i := 0; i < int(specCount); i++ {
-		var pid int32
-		if err := binary.Read(reader, binary.LittleEndian, &pid); err != nil {
-			return ev, err
-		}
 
-		var replicaCount uint16
-		if err := binary.Read(reader, binary.LittleEndian, &replicaCount); err != nil {
-			return ev, err
-		}
-
-		replicas := make([]ReplicaSpec, 0, replicaCount)
-		for j := 0; j < int(replicaCount); j++ {
-			var brokerID int32
-			if err := binary.Read(reader, binary.LittleEndian, &brokerID); err != nil {
-				return ev, err
-			}
-
-			roleByte, err := reader.ReadByte()
-			if err != nil {
-				return ev, err
-			}
-
-			var epoch int32
-			if err := binary.Read(reader, binary.LittleEndian, &epoch); err != nil {
-				return ev, err
-			}
-
-			replicas = append(replicas, ReplicaSpec{
-				BrokerID:    brokerID,
-				Role:        api.PartitionRole(roleByte),
-				LeaderEpoch: epoch,
-			})
-		}
-
-		ev.Partitions = append(ev.Partitions, PartitionSpec{
-			ID:       pid,
-			Replicas: replicas,
-		})
+	partitions, err := decodePartitionSpecs(reader, specCount)
+	if err != nil {
+		return ev, err
 	}
+
+	ev.Partitions = partitions
 
 	if len(ev.Partitions) != ev.NumPartitions {
 		return ev, fmt.Errorf("create-topic partition count mismatch: expected %d, got %d", ev.NumPartitions, len(ev.Partitions))
 	}
 
 	return ev, nil
+}
+
+func decodePartitionSpecs(reader *bytes.Reader, specCount uint16) ([]PartitionSpec, error) {
+	partitions := make([]PartitionSpec, 0, specCount)
+	for i := 0; i < int(specCount); i++ {
+		var pid int32
+		if err := binary.Read(reader, binary.LittleEndian, &pid); err != nil {
+			return nil, err
+		}
+
+		var replicaCount uint16
+		if err := binary.Read(reader, binary.LittleEndian, &replicaCount); err != nil {
+			return nil, err
+		}
+
+		replicas, err := decodeReplicaSpecs(reader, replicaCount)
+		if err != nil {
+			return nil, err
+		}
+
+		partitions = append(partitions, PartitionSpec{
+			ID:       pid,
+			Replicas: replicas,
+		})
+	}
+
+	return partitions, nil
+}
+
+func decodeReplicaSpecs(reader *bytes.Reader, replicaCount uint16) ([]ReplicaSpec, error) {
+	replicas := make([]ReplicaSpec, 0, replicaCount)
+	for j := 0; j < int(replicaCount); j++ {
+		var brokerID int32
+		if err := binary.Read(reader, binary.LittleEndian, &brokerID); err != nil {
+			return nil, err
+		}
+
+		roleByte, err := reader.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+
+		var epoch int32
+		if err := binary.Read(reader, binary.LittleEndian, &epoch); err != nil {
+			return nil, err
+		}
+
+		replicas = append(replicas, ReplicaSpec{
+			BrokerID:    brokerID,
+			Role:        api.PartitionRole(roleByte),
+			LeaderEpoch: epoch,
+		})
+	}
+
+	return replicas, nil
+}
+
+func toUint32Length(n int) (uint32, error) {
+	if n < 0 {
+		return 0, fmt.Errorf("negative length %d", n)
+	}
+
+	if uint64(n) > maxUint32 {
+		return 0, fmt.Errorf("length %d exceeds uint32 max", n)
+	}
+
+	return uint32(n), nil // #nosec G115 -- bounds checked above
+}
+
+func toUint16(field string, n int) (uint16, error) {
+	if n < 0 || n > maxUint16 {
+		return 0, fmt.Errorf("%s out of range: %d", field, n)
+	}
+
+	return uint16(n), nil // #nosec G115 -- bounds checked above
+}
+
+func partitionRoleToByte(role api.PartitionRole) (byte, error) {
+	v := int(role)
+	if v < 0 || v > maxByte {
+		return 0, fmt.Errorf("partition role out of range: %d", v)
+	}
+
+	return byte(v), nil // #nosec G115 -- bounds checked above
 }

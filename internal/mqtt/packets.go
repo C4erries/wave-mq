@@ -8,7 +8,7 @@ type ConnectPacket struct {
 	KeepAliveSec uint16
 	CleanStart   bool
 	Username     string
-	Password     []byte
+	AuthData     []byte
 }
 
 type ConnackPacket struct {

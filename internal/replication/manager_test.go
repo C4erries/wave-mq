@@ -43,7 +43,12 @@ func (f *fakeMetadataStore) AssignTopic(ctx context.Context, name string, cfg ap
 	return f.meta, nil
 }
 
-func (f *fakeMetadataStore) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+func (f *fakeMetadataStore) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition, brokerID int,
+	lastOffset, leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
 	_ = ctx
 	_ = topic
 	_ = partition
@@ -192,7 +197,12 @@ func (s *streamMetadataStore) AssignTopic(ctx context.Context, name string, cfg 
 	return s.GetClusterMetadata(ctx)
 }
 
-func (s *streamMetadataStore) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+func (s *streamMetadataStore) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition, brokerID int,
+	lastOffset, leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
 	_ = topic
 	_ = partition
 	_ = brokerID

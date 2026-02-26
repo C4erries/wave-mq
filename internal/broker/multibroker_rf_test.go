@@ -163,6 +163,7 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 
 	ctxSrv, cancelSrv := context.WithCancel(ctx)
 	defer cancelSrv()
+
 	srv1Err := make(chan error, 1)
 	srv2Err := make(chan error, 1)
 
@@ -172,6 +173,7 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	go func() {
 		srv2Err <- srv2.ListenAndServe(ctxSrv)
 	}()
+
 	waitForServerReady(t, cfg1.BinaryAddr, srv1Err)
 	waitForServerReady(t, cfg2.BinaryAddr, srv2Err)
 
@@ -566,11 +568,13 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 
 	ctxSrv, cancelSrv := context.WithCancel(ctx)
 	defer cancelSrv()
+
 	serverErr := make(chan error, 1)
 
 	go func() {
 		serverErr <- server.ListenAndServe(ctxSrv)
 	}()
+
 	waitForServerReady(t, leaderAddr, serverErr)
 
 	rep := replication.NewBinaryReplicator()

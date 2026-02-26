@@ -190,7 +190,7 @@ func main() {
 
 	if err := b.StartClusterMetadataWatcher(ctx); err != nil {
 		logger.Error("cluster metadata watcher init failed", "err", err)
-		os.Exit(1)
+		return
 	}
 
 	if cfg.Replication {
@@ -207,7 +207,7 @@ func main() {
 		}()
 	}
 
-	ready := func() bool { return readyFlag.Load() }
+	ready := readyFlag.Load
 
 	go func() {
 		apiHandler := httpapi.New(b, cfg, ctrl)
@@ -349,7 +349,7 @@ func postRegisterBrokerToLeader(ctx context.Context, logger *slog.Logger, leader
 
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- leader address comes from configured raft peers.
 	if err != nil {
 		return err
 	}

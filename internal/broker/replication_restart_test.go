@@ -274,7 +274,9 @@ func startBrokerNodes(
 
 	nodes := make(map[int]*brokerNode)
 
-	for idx, cfg := range cfgs {
+	for idx := range cfgs {
+		cfg := &cfgs[idx]
+
 		meta, err := metadata.NewStore(api.BrokerConfig{DataDir: cfg.DataDir})
 		if err != nil {
 			t.Fatalf("metadata store: %v", err)
@@ -301,7 +303,7 @@ func startBrokerNodes(
 			t.Fatalf("offset store nil")
 		}
 
-		b, err := broker.NewBroker(cfg, store, offsets, meta, ctrls[idx], nil)
+		b, err := broker.NewBroker(*cfg, store, offsets, meta, ctrls[idx], nil)
 		if err != nil {
 			t.Fatalf("broker init: %v", err)
 		}
@@ -315,7 +317,7 @@ func startBrokerNodes(
 		}()
 
 		nodes[cfg.BrokerID] = &brokerNode{
-			cfg:       cfg,
+			cfg:       *cfg,
 			meta:      meta,
 			store:     store,
 			offsets:   offsets,
@@ -336,14 +338,18 @@ func createTopicEventFromMeta(meta api.ClusterMetadata, topic string) (metadata.
 			continue
 		}
 
-		part := metadata.PartitionSpec{ID: int32(p.Partition)}
+		part := metadata.PartitionSpec{ID: int32(p.Partition)} // #nosec G115 -- test metadata uses bounded partition ids.
 		for _, r := range p.Replicas {
 			role := api.RoleFollower
 			if r == p.Leader {
 				role = api.RoleLeader
 			}
 
-			part.Replicas = append(part.Replicas, metadata.ReplicaSpec{BrokerID: int32(r), Role: role, LeaderEpoch: p.LeaderEpoch})
+			part.Replicas = append(part.Replicas, metadata.ReplicaSpec{
+				BrokerID:    int32(r), // #nosec G115 -- test metadata uses bounded broker ids.
+				Role:        role,
+				LeaderEpoch: p.LeaderEpoch,
+			})
 		}
 
 		ev.Partitions = append(ev.Partitions, part)
@@ -359,7 +365,7 @@ func createTopicEventFromMeta(meta api.ClusterMetadata, topic string) (metadata.
 	return ev, nil
 }
 
-func startReplication(ctx context.Context, leader *brokerNode, follower *brokerNode, followerID int) (context.CancelFunc, <-chan error) {
+func startReplication(ctx context.Context, leader, follower *brokerNode, followerID int) (context.CancelFunc, <-chan error) {
 	rep := replication.NewBinaryReplicator()
 	sink := replication.NewReportingSink(replication.NewWALSink(follower.store, "alpha", 0), follower.ctrl, "alpha", 0, followerID)
 	pr := replication.NewPartitionReplicator(rep, api.BrokerInfo{BrokerID: leader.cfg.BrokerID, Host: leader.cfg.BinaryAddr}, "alpha", 0, sink)

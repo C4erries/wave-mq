@@ -118,7 +118,12 @@ func (f *followerCtrl) AssignTopic(ctx context.Context, name string, cfg api.Top
 	return f.meta, nil
 }
 
-func (f *followerCtrl) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+func (f *followerCtrl) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition, brokerID int,
+	lastOffset, leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
 	_ = ctx
 	_ = topic
 	_ = partition
@@ -174,7 +179,12 @@ func (a *assignmentController) AssignTopic(ctx context.Context, name string, cfg
 	return a.meta, nil
 }
 
-func (a *assignmentController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+func (a *assignmentController) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition, brokerID int,
+	lastOffset, leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
 	_ = ctx
 	_ = topic
 	_ = partition

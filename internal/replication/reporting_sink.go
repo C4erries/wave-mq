@@ -18,7 +18,7 @@ type reportingSink struct {
 }
 
 // NewReportingSink wraps a sink to report progress to the controller.
-func NewReportingSink(inner Sink, ctrl controller.MetadataStore, topic string, part int, brokerID int) Sink {
+func NewReportingSink(inner Sink, ctrl controller.MetadataStore, topic string, part, brokerID int) Sink {
 	return &reportingSink{
 		inner:    inner,
 		ctrl:     ctrl,

@@ -19,6 +19,15 @@ type stats struct {
 	maxDur   time.Duration
 }
 
+type benchConfig struct {
+	brokerAddr  string
+	topic       string
+	partition   int
+	messages    int
+	valueSize   int
+	concurrency int
+}
+
 func (s *stats) add(d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -32,6 +41,11 @@ func (s *stats) add(d time.Duration) {
 }
 
 func main() {
+	cfg := parseFlags()
+	runBenchmark(cfg)
+}
+
+func parseFlags() benchConfig {
 	brokerAddr := flag.String("broker", "127.0.0.1:7912", "binary protocol address")
 	topic := flag.String("topic", "bench", "topic name")
 	partition := flag.Int("partition", 0, "partition id")
@@ -41,76 +55,94 @@ func main() {
 
 	flag.Parse()
 
+	return benchConfig{
+		brokerAddr:  *brokerAddr,
+		topic:       *topic,
+		partition:   *partition,
+		messages:    *messages,
+		valueSize:   *valueSize,
+		concurrency: *concurrency,
+	}
+}
+
+func runBenchmark(cfg benchConfig) {
 	// Ensure topic exists
-	if err := createTopic(*brokerAddr, *topic, 1); err != nil {
+	if err := createTopic(cfg.brokerAddr, cfg.topic, 1); err != nil {
 		log.Printf("create-topic warning: %v", err)
 	}
 
-	payload := make([]byte, *valueSize)
+	payload := make([]byte, cfg.valueSize)
+	work := buildWorkQueue(cfg.messages)
 
-	work := make(chan struct{}, *messages)
-	for i := 0; i < *messages; i++ {
+	var wg sync.WaitGroup
+
+	st := stats{}
+
+	start := time.Now()
+
+	for i := 0; i < cfg.concurrency; i++ {
+		wg.Add(1)
+
+		go runProducer(&wg, &st, cfg, payload, work)
+	}
+
+	wg.Wait()
+	printStats(&st, cfg.concurrency, time.Since(start))
+}
+
+func buildWorkQueue(messages int) <-chan struct{} {
+	work := make(chan struct{}, messages)
+	for i := 0; i < messages; i++ {
 		work <- struct{}{}
 	}
 
 	close(work)
 
-	var (
-		wg sync.WaitGroup
-		st stats
-	)
+	return work
+}
 
-	start := time.Now()
+func runProducer(wg *sync.WaitGroup, st *stats, cfg benchConfig, payload []byte, work <-chan struct{}) {
+	defer wg.Done()
 
-	for i := 0; i < *concurrency; i++ {
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-
-			conn, err := net.Dial("tcp", *brokerAddr)
-			if err != nil {
-				log.Printf("dial: %v", err)
-				return
-			}
-			defer conn.Close()
-
-			for range work {
-				req := &netproto.ProduceRequest{
-					Topic:     *topic,
-					Partition: *partition,
-					Records:   []api.Record{{Value: payload}},
-				}
-				payloadBytes, _ := netproto.EncodeProduceRequest(req)
-				frame, _ := netproto.EncodeRequestFrame(api.APIKeyProduce, 1, payloadBytes)
-				startOp := time.Now()
-
-				if _, err := conn.Write(frame); err != nil {
-					log.Printf("write: %v", err)
-					return
-				}
-
-				_, _, respPayload, err := netproto.DecodeResponseFrame(conn)
-				if err != nil {
-					log.Printf("read: %v", err)
-					return
-				}
-
-				resp, err := netproto.DecodeProduceResponse(respPayload)
-				if err != nil || resp.Error != api.ErrNone {
-					log.Printf("produce resp err=%v code=%v", err, resp.Error)
-					return
-				}
-
-				st.add(time.Since(startOp))
-			}
-		}()
+	conn, err := net.Dial("tcp", cfg.brokerAddr)
+	if err != nil {
+		log.Printf("dial: %v", err)
+		return
 	}
+	defer conn.Close()
 
-	wg.Wait()
+	for range work {
+		req := &netproto.ProduceRequest{
+			Topic:     cfg.topic,
+			Partition: cfg.partition,
+			Records:   []api.Record{{Value: payload}},
+		}
+		payloadBytes, _ := netproto.EncodeProduceRequest(req)
+		frame, _ := netproto.EncodeRequestFrame(api.APIKeyProduce, 1, payloadBytes)
+		startOp := time.Now()
 
-	total := time.Since(start)
+		if _, err := conn.Write(frame); err != nil {
+			log.Printf("write: %v", err)
+			return
+		}
 
+		_, _, respPayload, err := netproto.DecodeResponseFrame(conn)
+		if err != nil {
+			log.Printf("read: %v", err)
+			return
+		}
+
+		resp, err := netproto.DecodeProduceResponse(respPayload)
+		if err != nil || resp.Error != api.ErrNone {
+			log.Printf("produce resp err=%v code=%v", err, resp.Error)
+			return
+		}
+
+		st.add(time.Since(startOp))
+	}
+}
+
+func printStats(st *stats, concurrency int, total time.Duration) {
 	if st.count == 0 {
 		log.Printf("no messages produced")
 		return
@@ -119,7 +151,7 @@ func main() {
 	avg := st.totalDur / time.Duration(st.count)
 	rps := float64(st.count) / total.Seconds()
 	fmt.Printf("produced=%d concurrency=%d avg_latency=%s max_latency=%s total=%s rps=%.0f\n",
-		st.count, *concurrency, avg, st.maxDur, total, rps)
+		st.count, concurrency, avg, st.maxDur, total, rps)
 }
 
 func createTopic(addr, topic string, partitions int) error {

@@ -120,7 +120,7 @@ func (b *fakeBroker) ListOffsets(ctx context.Context, topic string, partition in
 	return 0, 0, nil
 }
 
-func (b *fakeBroker) CommitOffset(ctx context.Context, group string, topic string, partition int, offset api.Offset) error {
+func (b *fakeBroker) CommitOffset(ctx context.Context, group, topic string, partition int, offset api.Offset) error {
 	_ = ctx
 	key := fmt.Sprintf("%s:%s:%d", group, topic, partition)
 
@@ -134,7 +134,7 @@ func (b *fakeBroker) CommitOffset(ctx context.Context, group string, topic strin
 	return nil
 }
 
-func (b *fakeBroker) FetchCommitted(ctx context.Context, group string, topic string, partition int) (api.Offset, error) {
+func (b *fakeBroker) FetchCommitted(ctx context.Context, group, topic string, partition int) (api.Offset, error) {
 	_ = ctx
 	key := fmt.Sprintf("%s:%s:%d", group, topic, partition)
 

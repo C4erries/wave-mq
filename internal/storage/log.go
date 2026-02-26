@@ -47,6 +47,9 @@ const (
 	logExt            = ".log"
 	indexExt          = ".idx"
 	defaultMaxSegment = int64(64 << 20) // 64MB
+	maxInt32          = int(^uint32(0) >> 1)
+	maxUint32         = uint64(^uint32(0))
+	maxInt64Uint      = ^uint64(0) >> 1
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -535,7 +538,12 @@ func (l *segmentedLog) Read(ctx context.Context, offset api.Offset, maxBytes int
 		for _, r := range records {
 			res = append(res, r)
 			if maxBytes > 0 {
-				bytesRead += int32(len(r.Value))
+				valueLen, err := toInt32Length(len(r.Value), "record value length")
+				if err != nil {
+					return nil, err
+				}
+
+				bytesRead += valueLen
 				if bytesRead >= maxBytes {
 					return res, nil
 				}
@@ -918,7 +926,11 @@ func validateRecord(data []byte, expectedOffset api.Offset) error {
 		return fmt.Errorf("crc mismatch")
 	}
 
-	offset := api.Offset(binary.LittleEndian.Uint64(data[4:]))
+	offset, err := uint64ToOffset(binary.LittleEndian.Uint64(data[4:]))
+	if err != nil {
+		return fmt.Errorf("invalid offset: %w", err)
+	}
+
 	if offset != expectedOffset {
 		return fmt.Errorf("offset mismatch: got %d expected %d", offset, expectedOffset)
 	}
@@ -985,7 +997,12 @@ func readFromSegment(ctx context.Context, seg *segment, offset api.Offset, maxBy
 
 		res = append(res, rec)
 		if maxBytes > 0 {
-			maxBytes -= int32(len(rec.Value))
+			valueLen, err := toInt32Length(len(rec.Value), "record value length")
+			if err != nil {
+				return nil, err
+			}
+
+			maxBytes -= valueLen
 			if maxBytes <= 0 {
 				return res, nil
 			}
@@ -1072,64 +1089,33 @@ func lookupIndex(seg *segment, target api.Offset) (int64, bool) {
 
 func encodeRecord(r api.Record) ([]byte, error) {
 	var buf bytes.Buffer
-	// placeholder for length
-	if err := binary.Write(&buf, binary.LittleEndian, uint32(0)); err != nil {
-		return nil, err
-	}
-	// placeholder for crc
-	if err := binary.Write(&buf, binary.LittleEndian, uint32(0)); err != nil {
+	if err := writeRecordPrefix(&buf); err != nil {
 		return nil, err
 	}
 
-	if err := binary.Write(&buf, binary.LittleEndian, uint64(r.Offset)); err != nil {
+	if err := writeRecordFixedFields(&buf, r); err != nil {
 		return nil, err
 	}
 
-	if err := binary.Write(&buf, binary.LittleEndian, r.Timestamp.UnixNano()); err != nil {
+	if err := writeRecordBytesField(&buf, r.Key); err != nil {
 		return nil, err
 	}
 
-	writeBytes := func(b []byte) error {
-		if b == nil {
-			return binary.Write(&buf, binary.LittleEndian, int32(-1))
-		}
-
-		if err := binary.Write(&buf, binary.LittleEndian, int32(len(b))); err != nil {
-			return err
-		}
-
-		if len(b) > 0 {
-			_, err := buf.Write(b)
-			return err
-		}
-
-		return nil
-	}
-	if err := writeBytes(r.Key); err != nil {
+	if err := writeRecordBytesField(&buf, r.Value); err != nil {
 		return nil, err
 	}
 
-	if err := writeBytes(r.Value); err != nil {
+	if err := writeRecordHeaders(&buf, r.Headers); err != nil {
 		return nil, err
-	}
-
-	if err := binary.Write(&buf, binary.LittleEndian, int32(len(r.Headers))); err != nil {
-		return nil, err
-	}
-
-	for _, h := range r.Headers {
-		if err := writeBytes([]byte(h.Key)); err != nil {
-			return nil, err
-		}
-
-		if err := writeBytes(h.Value); err != nil {
-			return nil, err
-		}
 	}
 
 	recordBytes := buf.Bytes()
 	// recordSize excludes the length prefix, includes crc+payload.
-	recordSize := uint32(len(recordBytes) - 4)
+	recordSize, err := toUint32Length(len(recordBytes) - 4)
+	if err != nil {
+		return nil, err
+	}
+
 	binary.LittleEndian.PutUint32(recordBytes[0:4], recordSize)
 	crc := crc32.Checksum(recordBytes[8:], crcTable)
 	binary.LittleEndian.PutUint32(recordBytes[4:8], crc)
@@ -1138,77 +1124,240 @@ func encodeRecord(r api.Record) ([]byte, error) {
 }
 
 func decodeRecord(data []byte) (api.Record, error) {
-	var r api.Record
-	if len(data) < 4+8+8+4+4+4 {
-		return r, fmt.Errorf("record too small")
-	}
-
-	r.CRC32C = binary.LittleEndian.Uint32(data[:4])
-	offset := binary.LittleEndian.Uint64(data[4:])
-	r.Offset = api.Offset(offset)
-	ts := int64(binary.LittleEndian.Uint64(data[12:]))
-	r.Timestamp = time.Unix(0, ts)
-	idx := 20
-	readBytes := func() ([]byte, error) {
-		if idx+4 > len(data) {
-			return nil, fmt.Errorf("invalid length")
-		}
-
-		l := int(int32(binary.LittleEndian.Uint32(data[idx : idx+4])))
-		idx += 4
-
-		if l < 0 {
-			return nil, nil
-		}
-
-		if idx+l > len(data) {
-			return nil, fmt.Errorf("invalid length")
-		}
-
-		b := data[idx : idx+l]
-		idx += l
-
-		return b, nil
-	}
-
-	key, err := readBytes()
+	r, idx, err := decodeRecordPrefix(data)
 	if err != nil {
 		return r, err
 	}
 
-	val, err := readBytes()
+	key, err := readRecordBytesField(data, &idx)
+	if err != nil {
+		return r, err
+	}
+
+	val, err := readRecordBytesField(data, &idx)
+	if err != nil {
+		return r, err
+	}
+
+	headers, err := readRecordHeaders(data, &idx)
 	if err != nil {
 		return r, err
 	}
 
 	r.Key = key
-
 	r.Value = val
-	if idx+4 > len(data) {
-		return r, fmt.Errorf("invalid header count")
-	}
-
-	hCount := int(binary.LittleEndian.Uint32(data[idx : idx+4]))
-	idx += 4
-
-	if hCount < 0 {
-		return r, fmt.Errorf("invalid header count")
-	}
-
-	r.Headers = make([]api.Header, 0, hCount)
-	for i := 0; i < hCount; i++ {
-		k, err := readBytes()
-		if err != nil {
-			return r, err
-		}
-
-		v, err := readBytes()
-		if err != nil {
-			return r, err
-		}
-
-		r.Headers = append(r.Headers, api.Header{Key: string(k), Value: v})
-	}
+	r.Headers = headers
 
 	return r, nil
+}
+
+func writeRecordPrefix(buf *bytes.Buffer) error {
+	if err := binary.Write(buf, binary.LittleEndian, uint32(0)); err != nil {
+		return err
+	}
+
+	return binary.Write(buf, binary.LittleEndian, uint32(0))
+}
+
+func writeRecordFixedFields(buf *bytes.Buffer, r api.Record) error {
+	offset, err := offsetToUint64(r.Offset)
+	if err != nil {
+		return err
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, offset); err != nil {
+		return err
+	}
+
+	return binary.Write(buf, binary.LittleEndian, r.Timestamp.UnixNano())
+}
+
+func writeRecordBytesField(buf *bytes.Buffer, b []byte) error {
+	if b == nil {
+		return binary.Write(buf, binary.LittleEndian, int32(-1))
+	}
+
+	length, err := toInt32Length(len(b), "record byte field length")
+	if err != nil {
+		return err
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, length); err != nil {
+		return err
+	}
+
+	if len(b) == 0 {
+		return nil
+	}
+
+	_, err = buf.Write(b)
+
+	return err
+}
+
+func writeRecordHeaders(buf *bytes.Buffer, headers []api.Header) error {
+	headersCount, err := toInt32Length(len(headers), "headers count")
+	if err != nil {
+		return err
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, headersCount); err != nil {
+		return err
+	}
+
+	for _, h := range headers {
+		if err := writeRecordBytesField(buf, []byte(h.Key)); err != nil {
+			return err
+		}
+
+		if err := writeRecordBytesField(buf, h.Value); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func decodeRecordPrefix(data []byte) (api.Record, int, error) {
+	var r api.Record
+	if len(data) < 4+8+8+4+4+4 {
+		return r, 0, fmt.Errorf("record too small")
+	}
+
+	r.CRC32C = binary.LittleEndian.Uint32(data[:4])
+
+	parsedOffset, err := uint64ToOffset(binary.LittleEndian.Uint64(data[4:]))
+	if err != nil {
+		return r, 0, fmt.Errorf("invalid record offset: %w", err)
+	}
+
+	ts, err := uint64ToInt64(binary.LittleEndian.Uint64(data[12:]), "timestamp")
+	if err != nil {
+		return r, 0, err
+	}
+
+	r.Offset = parsedOffset
+	r.Timestamp = time.Unix(0, ts)
+
+	return r, 20, nil
+}
+
+func readRecordBytesField(data []byte, idx *int) ([]byte, error) {
+	if *idx+4 > len(data) {
+		return nil, fmt.Errorf("invalid length")
+	}
+
+	rawLen, err := readInt32(data[*idx : *idx+4])
+	if err != nil {
+		return nil, err
+	}
+
+	l := int(rawLen)
+	*idx += 4
+
+	if l < 0 {
+		return nil, nil
+	}
+
+	if *idx+l > len(data) {
+		return nil, fmt.Errorf("invalid length")
+	}
+
+	b := data[*idx : *idx+l]
+	*idx += l
+
+	return b, nil
+}
+
+func readRecordHeaders(data []byte, idx *int) ([]api.Header, error) {
+	if *idx+4 > len(data) {
+		return nil, fmt.Errorf("invalid header count")
+	}
+
+	rawCount, err := readInt32(data[*idx : *idx+4])
+	if err != nil {
+		return nil, err
+	}
+
+	*idx += 4
+
+	if rawCount < 0 {
+		return nil, fmt.Errorf("invalid header count")
+	}
+
+	hCount := int(rawCount)
+
+	headers := make([]api.Header, 0, hCount)
+	for i := 0; i < hCount; i++ {
+		k, err := readRecordBytesField(data, idx)
+		if err != nil {
+			return nil, err
+		}
+
+		v, err := readRecordBytesField(data, idx)
+		if err != nil {
+			return nil, err
+		}
+
+		headers = append(headers, api.Header{Key: string(k), Value: v})
+	}
+
+	return headers, nil
+}
+
+func toInt32Length(n int, field string) (int32, error) {
+	if n < 0 || n > maxInt32 {
+		return 0, fmt.Errorf("%s out of int32 range: %d", field, n)
+	}
+
+	return int32(n), nil // #nosec G115 -- bounds checked above.
+}
+
+func toUint32Length(n int) (uint32, error) {
+	if n < 0 {
+		return 0, fmt.Errorf("negative length %d", n)
+	}
+
+	if uint64(n) > maxUint32 {
+		return 0, fmt.Errorf("length exceeds uint32 max: %d", n)
+	}
+
+	return uint32(n), nil // #nosec G115 -- bounds checked above.
+}
+
+func offsetToUint64(offset api.Offset) (uint64, error) {
+	if offset < 0 {
+		return 0, fmt.Errorf("negative offset: %d", offset)
+	}
+
+	return uint64(offset), nil // #nosec G115 -- offset validated non-negative.
+}
+
+func uint64ToOffset(v uint64) (api.Offset, error) {
+	if v > maxInt64Uint {
+		return 0, fmt.Errorf("offset out of int64 range: %d", v)
+	}
+
+	return api.Offset(v), nil // #nosec G115 -- bounds checked above.
+}
+
+func uint64ToInt64(v uint64, field string) (int64, error) {
+	if v > maxInt64Uint {
+		return 0, fmt.Errorf("%s out of int64 range: %d", field, v)
+	}
+
+	return int64(v), nil // #nosec G115 -- bounds checked above.
+}
+
+func readInt32(data []byte) (int32, error) {
+	if len(data) != 4 {
+		return 0, fmt.Errorf("invalid int32 length: %d", len(data))
+	}
+
+	var value int32
+	if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, &value); err != nil {
+		return 0, err
+	}
+
+	return value, nil
 }

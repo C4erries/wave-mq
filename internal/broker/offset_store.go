@@ -22,6 +22,12 @@ import (
 // int32  partition
 // int64  offset
 
+const (
+	maxInt32  = int(^uint32(0) >> 1)
+	maxUint16 = int(^uint16(0))
+	maxUint32 = uint64(^uint32(0))
+)
+
 type OffsetStore struct {
 	mu   sync.Mutex
 	f    *os.File
@@ -190,7 +196,12 @@ func encodeOffsetRecord(group, topic string, partition int, offset api.Offset) (
 		return nil, fmt.Errorf("string too long")
 	}
 
-	if err := binary.Write(buf, binary.LittleEndian, uint16(len(group))); err != nil {
+	groupLen, err := toUint16Length(len(group), "group length")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, groupLen); err != nil {
 		return nil, err
 	}
 
@@ -198,7 +209,12 @@ func encodeOffsetRecord(group, topic string, partition int, offset api.Offset) (
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.LittleEndian, uint16(len(topic))); err != nil {
+	topicLen, err := toUint16Length(len(topic), "topic length")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, topicLen); err != nil {
 		return nil, err
 	}
 
@@ -206,7 +222,12 @@ func encodeOffsetRecord(group, topic string, partition int, offset api.Offset) (
 		return nil, err
 	}
 
-	if err := binary.Write(buf, binary.LittleEndian, int32(partition)); err != nil {
+	partitionID, err := toInt32(partition, "partition")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, partitionID); err != nil {
 		return nil, err
 	}
 
@@ -215,7 +236,12 @@ func encodeOffsetRecord(group, topic string, partition int, offset api.Offset) (
 	}
 
 	b := buf.Bytes()
-	length := uint32(len(b) - 4)
+
+	length, err := toUint32Length(len(b) - 4)
+	if err != nil {
+		return nil, err
+	}
+
 	binary.LittleEndian.PutUint32(b[0:4], length)
 	crc := crc32.Checksum(b[8:], crc32.MakeTable(crc32.Castagnoli))
 	binary.LittleEndian.PutUint32(b[4:8], crc)
@@ -256,7 +282,7 @@ func (s *OffsetStore) Compact(ctx context.Context, offsets map[string]map[string
 				case <-ctx.Done():
 					tmp.Close()
 
-					_ = os.Remove(tmpPath)
+					removeTempFile(tmpPath)
 
 					return ctx.Err()
 				default:
@@ -266,7 +292,7 @@ func (s *OffsetStore) Compact(ctx context.Context, offsets map[string]map[string
 				if err != nil {
 					tmp.Close()
 
-					_ = os.Remove(tmpPath)
+					removeTempFile(tmpPath)
 
 					return err
 				}
@@ -274,7 +300,7 @@ func (s *OffsetStore) Compact(ctx context.Context, offsets map[string]map[string
 				if _, err := tmp.Write(rec); err != nil {
 					tmp.Close()
 
-					_ = os.Remove(tmpPath)
+					removeTempFile(tmpPath)
 
 					return err
 				}
@@ -285,13 +311,13 @@ func (s *OffsetStore) Compact(ctx context.Context, offsets map[string]map[string
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 
-		_ = os.Remove(tmpPath)
+		removeTempFile(tmpPath)
 
 		return err
 	}
 
 	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
+		removeTempFile(tmpPath)
 		return err
 	}
 	// Swap files.
@@ -299,7 +325,7 @@ func (s *OffsetStore) Compact(ctx context.Context, offsets map[string]map[string
 		_ = s.f.Close()
 	}
 
-	if err := os.Rename(tmpPath, s.path); err != nil {
+	if err := os.Rename(tmpPath, s.path); err != nil { // #nosec G703 -- tmpPath and target path are controlled local filesystem paths.
 		return err
 	}
 
@@ -311,4 +337,36 @@ func (s *OffsetStore) Compact(ctx context.Context, offsets map[string]map[string
 	s.f = newFile
 
 	return nil
+}
+
+func toUint32Length(n int) (uint32, error) {
+	if n < 0 {
+		return 0, fmt.Errorf("negative length %d", n)
+	}
+
+	if uint64(n) > maxUint32 {
+		return 0, fmt.Errorf("length %d exceeds uint32 max", n)
+	}
+
+	return uint32(n), nil // #nosec G115 -- bounds checked above
+}
+
+func toUint16Length(n int, field string) (uint16, error) {
+	if n < 0 || n > maxUint16 {
+		return 0, fmt.Errorf("%s out of uint16 range: %d", field, n)
+	}
+
+	return uint16(n), nil // #nosec G115 -- bounds checked above
+}
+
+func toInt32(n int, field string) (int32, error) {
+	if n < -maxInt32-1 || n > maxInt32 {
+		return 0, fmt.Errorf("%s out of int32 range: %d", field, n)
+	}
+
+	return int32(n), nil // #nosec G115 -- bounds checked above
+}
+
+func removeTempFile(path string) {
+	_ = os.Remove(path) // #nosec G703 -- path is created by os.CreateTemp in Compact.
 }

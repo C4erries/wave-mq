@@ -281,7 +281,7 @@ func fetchMessages(t *testing.T, baseURL, topic string, partition int) []map[str
 
 	url := fmt.Sprintf("%s/api/topics/%s/partitions/%d/messages", baseURL, topic, partition)
 
-	resp, err := http.Get(url)
+	resp, err := http.Get(url) // #nosec G107 -- url points to local httptest server.
 	if err != nil {
 		t.Fatalf("get messages: %v", err)
 	}

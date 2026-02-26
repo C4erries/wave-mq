@@ -45,7 +45,12 @@ func (f *fakeController) AssignTopic(ctx context.Context, name string, cfg api.T
 	return api.ClusterMetadata{}, nil
 }
 
-func (f *fakeController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+func (f *fakeController) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition, brokerID int,
+	lastOffset, leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
 	_ = ctx
 
 	f.calls = append(f.calls, struct {

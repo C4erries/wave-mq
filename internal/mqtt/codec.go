@@ -23,13 +23,15 @@ const (
 const (
 	qos0 byte = 0
 	qos1 byte = 1
+
+	maxUint16 = int(^uint16(0))
 )
 
 func encodeRemainingLength(n int) []byte {
 	var out []byte
 
 	for {
-		encoded := byte(n % 128)
+		encoded := byte(n % 128) // #nosec G115 -- MQTT remaining length uses 7-bit chunks.
 
 		n /= 128
 		if n > 0 {
@@ -71,15 +73,16 @@ func decodeRemainingLength(r io.Reader) (int, error) {
 }
 
 func writeString(w io.Writer, s string) error {
-	if len(s) > 65535 {
-		return fmt.Errorf("string too long")
-	}
-
-	if err := binary.Write(w, binary.BigEndian, uint16(len(s))); err != nil {
+	length, err := toUint16Length(len(s))
+	if err != nil {
 		return err
 	}
 
-	if len(s) > 0 {
+	if err := binary.Write(w, binary.BigEndian, length); err != nil {
+		return err
+	}
+
+	if s != "" {
 		_, err := w.Write([]byte(s))
 		return err
 	}
@@ -198,7 +201,7 @@ func decodeConnect(r *bytes.Buffer) (*ConnectPacket, error) {
 		KeepAliveSec: keepAlive,
 		CleanStart:   connectFlags&0x02 != 0,
 		Username:     username,
-		Password:     password,
+		AuthData:     password,
 	}, nil
 }
 
@@ -359,4 +362,12 @@ func writePingresp(w io.Writer, _ *PingrespPacket) error {
 	_, err := w.Write(header)
 
 	return err
+}
+
+func toUint16Length(n int) (uint16, error) {
+	if n < 0 || n > maxUint16 {
+		return 0, fmt.Errorf("string too long")
+	}
+
+	return uint16(n), nil // #nosec G115 -- bounds checked above.
 }
