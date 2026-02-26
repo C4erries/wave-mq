@@ -245,6 +245,7 @@ func decodePublish(r *bytes.Buffer, flags byte) (*PublishPacket, error) {
 		return nil, err
 	}
 
+	duplicate := flags&0x08 != 0
 	qos := (flags >> 1) & 0x03
 
 	var packetID uint16
@@ -257,10 +258,11 @@ func decodePublish(r *bytes.Buffer, flags byte) (*PublishPacket, error) {
 	payload := r.Bytes()
 
 	return &PublishPacket{
-		Topic:    topic,
-		QoS:      qos,
-		PacketID: packetID,
-		Payload:  payload,
+		Topic:     topic,
+		QoS:       qos,
+		Duplicate: duplicate,
+		PacketID:  packetID,
+		Payload:   payload,
 	}, nil
 }
 
@@ -321,6 +323,10 @@ func writePublish(w io.Writer, pkt *PublishPacket) error {
 	}
 
 	flags := byte(packetTypePUBLISH<<4) | (pkt.QoS << 1)
+	if pkt.Duplicate {
+		flags |= 0x08
+	}
+
 	if pkt.QoS > qos0 {
 		if err := binary.Write(body, binary.BigEndian, pkt.PacketID); err != nil {
 			return err

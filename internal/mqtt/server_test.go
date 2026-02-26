@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,10 +14,12 @@ import (
 )
 
 type fakeBroker struct {
+	mu        sync.Mutex
 	records   map[string]map[int][]api.Record
 	fetches   int
 	produced  int
 	committed map[string]map[string]map[int]api.Offset
+	commits   []api.Offset
 }
 
 func newFakeBroker() *fakeBroker {
@@ -28,6 +31,9 @@ func newFakeBroker() *fakeBroker {
 
 func (b *fakeBroker) Produce(ctx context.Context, topic string, partition int, records []api.Record) (api.Offset, error) {
 	_ = ctx
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
 	if _, ok := b.records[topic]; !ok {
 		b.records[topic] = make(map[int][]api.Record)
@@ -50,6 +56,10 @@ func (b *fakeBroker) Produce(ctx context.Context, topic string, partition int, r
 func (b *fakeBroker) Fetch(ctx context.Context, topic string, partition int, offset api.Offset, maxBytes int32) ([]api.Record, error) {
 	_ = ctx
 	_ = maxBytes
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	b.fetches++
 
 	parts := b.records[topic][partition]
@@ -63,6 +73,9 @@ func (b *fakeBroker) Fetch(ctx context.Context, topic string, partition int, off
 func (b *fakeBroker) ListOffsets(ctx context.Context, topic string, partition int) (api.Offset, api.Offset, error) {
 	_ = ctx
 
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	parts := b.records[topic][partition]
 	if len(parts) == 0 {
 		return 0, -1, nil
@@ -73,6 +86,9 @@ func (b *fakeBroker) ListOffsets(ctx context.Context, topic string, partition in
 
 func (b *fakeBroker) Metadata(ctx context.Context, topics []string) ([]api.PartitionMetadata, error) {
 	_ = ctx
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
 	var res []api.PartitionMetadata
 
@@ -125,6 +141,9 @@ func (b *fakeBroker) LeaveGroup(ctx context.Context, group, memberID string) err
 func (b *fakeBroker) CommitOffset(ctx context.Context, group, topic string, partition int, offset api.Offset) error {
 	_ = ctx
 
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	if _, ok := b.committed[group]; !ok {
 		b.committed[group] = make(map[string]map[int]api.Offset)
 	}
@@ -134,6 +153,7 @@ func (b *fakeBroker) CommitOffset(ctx context.Context, group, topic string, part
 	}
 
 	b.committed[group][topic][partition] = offset
+	b.commits = append(b.commits, offset)
 
 	return nil
 }
@@ -141,11 +161,75 @@ func (b *fakeBroker) CommitOffset(ctx context.Context, group, topic string, part
 func (b *fakeBroker) FetchCommitted(ctx context.Context, group, topic string, partition int) (api.Offset, error) {
 	_ = ctx
 
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	if off, ok := b.committed[group][topic][partition]; ok {
 		return off, nil
 	}
 
 	return -1, fmt.Errorf("not found")
+}
+
+func (b *fakeBroker) appendRecord(topic string, partition int, offset api.Offset, value []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if _, ok := b.records[topic]; !ok {
+		b.records[topic] = make(map[int][]api.Record)
+	}
+
+	b.records[topic][partition] = append(b.records[topic][partition], api.Record{
+		Offset: offset,
+		Value:  append([]byte(nil), value...),
+	})
+}
+
+func (b *fakeBroker) recordCount(topic string, partition int) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return len(b.records[topic][partition])
+}
+
+func (b *fakeBroker) fetchCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.fetches
+}
+
+func (b *fakeBroker) committedOffset(group, topic string, partition int) (api.Offset, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	parts, ok := b.committed[group]
+	if !ok {
+		return 0, false
+	}
+
+	topicOffsets, ok := parts[topic]
+	if !ok {
+		return 0, false
+	}
+
+	off, ok := topicOffsets[partition]
+
+	return off, ok
+}
+
+func (b *fakeBroker) commitCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return len(b.commits)
+}
+
+func (b *fakeBroker) producedCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.produced
 }
 
 func TestMQTTServerBasicFlow(t *testing.T) {
@@ -235,7 +319,7 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 	}
 
 	// Append record to broker so fetch loop delivers it.
-	b.records["t/1"][0] = append(b.records["t/1"][0], api.Record{Offset: 0, Value: []byte("hello")})
+	b.appendRecord("t/1", 0, 0, []byte("hello"))
 	// Expect PUBLISH from server with "hello"
 	received := false
 	for i := 0; i < 20 && !received; i++ {
@@ -327,15 +411,19 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 	// Give some time for broker produce/commit to be called
 	time.Sleep(50 * time.Millisecond)
 
-	if len(b.records["t/1"][0]) < 2 {
+	if b.recordCount("t/1", 0) < 2 {
 		t.Fatalf("expected broker to store produced record")
 	}
 
-	if b.fetches == 0 {
+	if b.fetchCount() == 0 {
 		t.Fatalf("fetch loop did not run")
 	}
 
-	committed := b.committed["client-1"]["t/1"][0]
+	committed, ok := b.committedOffset("client-1", "t/1", 0)
+	if !ok {
+		t.Fatalf("expected committed offset")
+	}
+
 	if committed != 0 && committed != 1 {
 		t.Fatalf("expected committed offset 0 or 1, got %d", committed)
 	}
@@ -436,7 +524,7 @@ func TestMQTTServerTailVsBacklog(t *testing.T) {
 		t.Fatalf("suback read (client2): %v", err)
 	}
 	// Append new message after subscribe
-	b.records["topic"][0] = append(b.records["topic"][0], api.Record{Offset: 2, Value: []byte("new")})
+	b.appendRecord("topic", 0, 2, []byte("new"))
 	// Expect to receive only "new"
 	tp, body, err = readPacketTypeClient(client2)
 	if err != nil || tp != packetTypePUBLISH {
@@ -469,7 +557,7 @@ func readPacketTypeClient(c net.Conn) (byte, []byte, error) {
 	}
 
 	body := make([]byte, remaining)
-	if _, err := c.Read(body); err != nil {
+	if _, err := io.ReadFull(c, body); err != nil {
 		return 0, nil, err
 	}
 

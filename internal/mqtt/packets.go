@@ -32,10 +32,11 @@ type SubackPacket struct {
 }
 
 type PublishPacket struct {
-	Topic    string
-	QoS      byte
-	PacketID uint16
-	Payload  []byte
+	Topic     string
+	QoS       byte
+	Duplicate bool
+	PacketID  uint16
+	Payload   []byte
 }
 
 type PubackPacket struct {

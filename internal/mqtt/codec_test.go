@@ -100,6 +100,35 @@ func TestPublishRoundTripQoS1(t *testing.T) {
 	}
 }
 
+func TestPublishRoundTripQoS1Duplicate(t *testing.T) {
+	orig := &PublishPacket{
+		Topic:     "t",
+		QoS:       1,
+		Duplicate: true,
+		PacketID:  9,
+		Payload:   []byte("dup"),
+	}
+
+	buf := &bytes.Buffer{}
+	if err := writePublish(buf, orig); err != nil {
+		t.Fatalf("encode publish: %v", err)
+	}
+
+	pkt, err := readPacket(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("decode publish: %v", err)
+	}
+
+	pub, ok := pkt.(*PublishPacket)
+	if !ok {
+		t.Fatalf("expected PublishPacket")
+	}
+
+	if !pub.Duplicate || pub.PacketID != 9 || string(pub.Payload) != "dup" {
+		t.Fatalf("publish duplicate mismatch: %#v", pub)
+	}
+}
+
 func TestPingReq(t *testing.T) {
 	header := []byte{packetTypePINGREQ << 4, 0}
 
