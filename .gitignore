@@ -19,6 +19,16 @@ profile.cov
 
 # Data
 data
+*.log
+
+# Local temp artifacts
+.tmp-*
+*.tmp
+
+# Python example artifacts
+__pycache__/
+*.py[cod]
+*.pyo
 # Dependency directories (remove the comment below to include it)
 # vendor/
 

@@ -113,6 +113,8 @@ func readPacket(r io.Reader) (interface{}, error) {
 		return decodeSubscribe(buf)
 	case packetTypePUBLISH:
 		return decodePublish(buf, flags)
+	case packetTypePUBACK:
+		return decodePuback(buf)
 	case packetTypePINGREQ:
 		return &PingreqPacket{}, nil
 	case packetTypeDISCONNECT:
@@ -216,6 +218,14 @@ func decodePublish(r *bytes.Buffer, flags byte) (*PublishPacket, error) {
 		PacketID: packetID,
 		Payload:  payload,
 	}, nil
+}
+
+func decodePuback(r *bytes.Buffer) (*PubackPacket, error) {
+	var packetID uint16
+	if err := binary.Read(r, binary.BigEndian, &packetID); err != nil {
+		return nil, err
+	}
+	return &PubackPacket{PacketID: packetID}, nil
 }
 
 func writeConnack(w io.Writer, pkt *ConnackPacket) error {

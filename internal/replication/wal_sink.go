@@ -2,12 +2,14 @@ package replication
 
 import (
 	"context"
+	"sync"
 
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
 
 type walSink struct {
+	mu    sync.Mutex
 	store *storage.Manager
 	topic string
 	part  int
@@ -23,13 +25,15 @@ func NewWALSink(store *storage.Manager, topic string, part int) Sink {
 // EnsureLeaderHighWatermark ensures the local log is opened and returns the next offset to fetch
 // from the leader based on the current high watermark.
 func (s *walSink) EnsureLeaderHighWatermark(ctx context.Context, leaderHighWatermark api.Offset) (api.Offset, error) {
-	if err := s.ensureLog(); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLogLocked(); err != nil {
 		return -1, err
 	}
 	return s.log.HighWatermark() + 1, nil
 }
 
-func (s *walSink) ensureLog() error {
+func (s *walSink) ensureLogLocked() error {
 	if s.log != nil {
 		return nil
 	}
@@ -46,14 +50,18 @@ func (s *walSink) ensureLog() error {
 
 // NextOffset returns the next offset to replicate into (high watermark + 1).
 func (s *walSink) NextOffset() (api.Offset, error) {
-	if err := s.ensureLog(); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLogLocked(); err != nil {
 		return -1, err
 	}
 	return s.log.HighWatermark() + 1, nil
 }
 
 func (s *walSink) ApplyBatch(ctx context.Context, records []api.Record, highWatermark api.Offset) (api.Offset, error) {
-	if err := s.ensureLog(); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLogLocked(); err != nil {
 		return -1, err
 	}
 	base, err := s.log.AppendBatch(ctx, records)

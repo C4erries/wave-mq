@@ -115,6 +115,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 				observability.RequestErrors.WithLabelValues("mqtt", "publish").Inc()
 				return
 			}
+		case *PubackPacket:
+			// QoS1 subscriber acknowledgements are currently fire-and-forget.
+			continue
 		case *PingreqPacket:
 			state.writeMu.Lock()
 			_ = writePingresp(conn, &PingrespPacket{})

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 
 	"github.com/c4erries/wave-mq/internal/broker"
@@ -26,6 +27,7 @@ type BrokerAPI interface {
 
 // Server hosts the custom binary protocol over TCP.
 type Server struct {
+	mu      sync.RWMutex
 	addr    string
 	broker  BrokerAPI
 	ln      net.Listener
@@ -46,15 +48,30 @@ func NewServer(addr string, broker BrokerAPI) (*Server, error) {
 
 // ListenAndServe starts accepting client connections until ctx is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
+	s.mu.Lock()
 	if s.started {
+		s.mu.Unlock()
 		return fmt.Errorf("server already started")
 	}
+	s.started = true
+	s.mu.Unlock()
+
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
+		s.mu.Lock()
+		s.started = false
+		s.mu.Unlock()
 		return err
 	}
+	s.mu.Lock()
 	s.ln = ln
-	s.started = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.ln = nil
+		s.started = false
+		s.mu.Unlock()
+	}()
 
 	go func() {
 		<-ctx.Done()
@@ -77,18 +94,33 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 // Close stops accepting new connections.
 func (s *Server) Close() error {
-	if s.ln != nil {
-		return s.ln.Close()
+	s.mu.RLock()
+	ln := s.ln
+	s.mu.RUnlock()
+	if ln != nil {
+		return ln.Close()
 	}
 	return nil
 }
 
 // Addr returns the listener address after ListenAndServe has started.
 func (s *Server) Addr() net.Addr {
-	if s.ln == nil {
+	s.mu.RLock()
+	ln := s.ln
+	s.mu.RUnlock()
+	if ln == nil {
 		return nil
 	}
-	return s.ln.Addr()
+	addr := ln.Addr()
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return addr
+	}
+	copied := *tcp
+	if tcp.IP != nil {
+		copied.IP = append(net.IP(nil), tcp.IP...)
+	}
+	return &copied
 }
 
 // frame is a placeholder for length-prefixed protocol frames.

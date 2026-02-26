@@ -14,6 +14,7 @@ import (
 )
 
 type fakeSink struct {
+	mu            sync.Mutex
 	records       []api.Record
 	highWatermark api.Offset
 }
@@ -34,12 +35,21 @@ func (f *testReplicator) FetchFromLeader(ctx context.Context, leader api.BrokerI
 
 func (f *fakeSink) ApplyBatch(ctx context.Context, records []api.Record, highWatermark api.Offset) (api.Offset, error) {
 	_ = ctx
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.records = append(f.records, records...)
 	f.highWatermark = highWatermark
 	if len(records) == 0 {
 		return -1, nil
 	}
 	return records[len(records)-1].Offset, nil
+}
+
+func (f *fakeSink) snapshot() ([]api.Record, api.Offset) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	recs := append([]api.Record(nil), f.records...)
+	return recs, f.highWatermark
 }
 
 func TestPartitionReplicatorFetchesBatches(t *testing.T) {
@@ -72,14 +82,18 @@ func TestPartitionReplicatorFetchesBatches(t *testing.T) {
 		close(done)
 	}()
 
-	waitUntil(t, func() bool { return len(sink.records) == 2 }, 2*time.Second)
+	waitUntil(t, func() bool {
+		recs, _ := sink.snapshot()
+		return len(recs) == 2
+	}, 2*time.Second)
 	cancel()
 	<-done
-	if sink.highWatermark != 1 {
-		t.Fatalf("expected hwm 1, got %d", sink.highWatermark)
+	records, hwm := sink.snapshot()
+	if hwm != 1 {
+		t.Fatalf("expected hwm 1, got %d", hwm)
 	}
-	if string(sink.records[0].Value) != "one" || string(sink.records[1].Value) != "two" {
-		t.Fatalf("unexpected records: %+v", sink.records)
+	if string(records[0].Value) != "one" || string(records[1].Value) != "two" {
+		t.Fatalf("unexpected records: %+v", records)
 	}
 }
 
@@ -181,20 +195,33 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 }
 
 type offsetSink struct {
+	mu      sync.Mutex
 	next    api.Offset
 	applied int
 }
 
-func (s *offsetSink) NextOffset() (api.Offset, error) { return s.next, nil }
+func (s *offsetSink) NextOffset() (api.Offset, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.next, nil
+}
 
 func (s *offsetSink) ApplyBatch(ctx context.Context, records []api.Record, highWatermark api.Offset) (api.Offset, error) {
 	_ = ctx
 	_ = highWatermark
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	base := s.next
 	last := base + api.Offset(len(records)) - 1
 	s.next = last + 1
 	s.applied += len(records)
 	return last, nil
+}
+
+func (s *offsetSink) Applied() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.applied
 }
 
 func TestPartitionReplicatorUsesNextOffsetHint(t *testing.T) {
@@ -210,7 +237,7 @@ func TestPartitionReplicatorUsesNextOffsetHint(t *testing.T) {
 		_ = rep.Run(ctx)
 		close(done)
 	}()
-	waitUntil(t, func() bool { return sink.applied > 0 }, time.Second)
+	waitUntil(t, func() bool { return sink.Applied() > 0 }, time.Second)
 	cancel()
 	<-done
 	fr.mu.Lock()
@@ -423,10 +450,11 @@ func runReplicatorUntil(t *testing.T, ctx context.Context, rep *PartitionReplica
 		close(done)
 	}()
 	waitUntil(t, func() bool {
-		if sink.log == nil {
+		next, err := sink.NextOffset()
+		if err != nil || next == 0 {
 			return false
 		}
-		return sink.log.HighWatermark() >= target
+		return next-1 >= target
 	}, 3*time.Second)
 	cancel()
 	<-done
