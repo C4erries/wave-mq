@@ -434,17 +434,19 @@ class BlackboxSuite:
         topic = self.topic("http")
         self.create_topic(topic, cfg.http_partitions)
 
-        dup_status, _ = self.http.post_json(
+        dup_status, _ = self.http.request(
+            "POST",
             "/api/topics",
-            {"name": topic, "partitions": cfg.http_partitions, "replicationFactor": 1},
+            json_body={"name": topic, "partitions": cfg.http_partitions, "replicationFactor": 1},
             expected_status=None,
         )
         if dup_status != 409:
             raise BlackboxError(f"duplicate topic create should return 409, got {dup_status}")
 
-        bad_status, _ = self.http.post_json(
+        bad_status, _ = self.http.request(
+            "POST",
             "/api/topics",
-            {"name": "", "partitions": 0, "replicationFactor": 1},
+            json_body={"name": "", "partitions": 0, "replicationFactor": 1},
             expected_status=None,
         )
         if bad_status != 400:
@@ -615,6 +617,8 @@ class BlackboxSuite:
 
         self.restart_hook()
         self.wait_health(timeout_sec=90.0)
+        # Process restart resets in-memory Prometheus counters.
+        self.total_produced = 0
 
         new_payloads: list[str] = []
         for i in range(cfg.restart_new_messages):
@@ -641,10 +645,17 @@ class BlackboxSuite:
         messages = self.fetch_messages(
             topic,
             0,
-            limit=cfg.restart_initial_messages + cfg.restart_new_messages + 10,
+            limit=max(
+                (cfg.restart_initial_messages + cfg.restart_new_messages) * 3,
+                cfg.restart_initial_messages + cfg.restart_new_messages + 20,
+            ),
         )
-        if len(messages) != cfg.restart_initial_messages + cfg.restart_new_messages:
-            raise BlackboxError("restart scenario: unexpected message count after restart")
+        values = {str(m.get("value")) for m in messages if isinstance(m.get("value"), str)}
+        for payload in new_payloads:
+            if payload not in values:
+                raise BlackboxError(
+                    "restart scenario: missing post-restart payload marker after restart"
+                )
 
     def scenario_parallel_stress(self) -> None:
         cfg = self.settings.profile

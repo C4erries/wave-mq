@@ -306,7 +306,7 @@ func (state *clientState) consumeLoop(ctx context.Context, mqttTopic string, sub
 			_ = writePublish(state.conn, pkt)
 			state.writeMu.Unlock()
 			// Commit offset after sending to client.
-			if err := state.broker.CommitOffset(ctx, state.group, sub.topic, sub.partition, r.Offset); err != nil {
+			if err := state.broker.CommitOffset(context.Background(), state.group, sub.topic, sub.partition, r.Offset); err != nil {
 				observability.RequestErrors.WithLabelValues("mqtt", "commit").Inc()
 				slog.Error("mqtt commit failed", "topic", sub.topic, "partition", sub.partition, "offset", r.Offset, "err", err)
 			}

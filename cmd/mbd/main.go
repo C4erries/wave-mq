@@ -42,6 +42,7 @@ func main() {
 		brokerID          = flag.Int("broker-id", 1, "numeric broker id")
 		replicationFactor = flag.Int("replication-factor", 1, "default replication factor for new topics")
 		segmentBytes      = flag.Int64("segment-bytes", 64<<20, "max segment size before rotation")
+		syncOnAppend      = flag.Bool("sync-on-append", true, "fsync log segment on append for durability")
 		retentionBytes    = flag.Int64("retention-bytes", -1, "total retention budget in bytes (-1 for unlimited)")
 		retentionHours    = flag.Int("retention-hours", 0, "retention by age in hours (0 disables time-based retention)")
 		controllerMode    = flag.String("controller", "single", "controller mode: single or raft")
@@ -105,6 +106,7 @@ func main() {
 		DataDir:         cfg.DataDir,
 		MaxSegmentBytes: cfg.MaxSegmentBytes,
 		IndexInterval:   1024,
+		SyncOnAppend:    *syncOnAppend,
 		SegmentMaxAge:   cfg.RetentionTime,
 		MaxLogBytes:     cfg.RetentionBytes,
 		// TODO: load index interval/segment age from config or flags.
