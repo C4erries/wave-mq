@@ -41,6 +41,7 @@ func NewSingleNodeController(cfg api.BrokerConfig, topics map[string]metadata.To
 	if err != nil {
 		return nil, err
 	}
+
 	partitions := buildAssignments(cfg, brokers, topics)
 	meta := api.ClusterMetadata{
 		ClusterID:  clusterID,
@@ -48,13 +49,16 @@ func NewSingleNodeController(cfg api.BrokerConfig, topics map[string]metadata.To
 		Brokers:    brokers,
 		Partitions: partitions,
 	}
+
 	return &SingleNodeController{meta: meta, cfg: cfg}, nil
 }
 
 func (c *SingleNodeController) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
 	_ = ctx
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
 	return c.meta, nil
 }
 
@@ -63,14 +67,17 @@ func (c *SingleNodeController) WatchClusterMetadata(ctx context.Context, sinceVe
 	meta := c.meta
 	c.mu.RUnlock()
 	ch := c.pub.watch(ctx, sinceVersion, meta)
+
 	return ch, nil
 }
 
 func (c *SingleNodeController) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
 	_ = ctx
+
 	if c.cfg.StaticCluster == nil && info.BrokerID != c.cfg.BrokerID {
 		return fmt.Errorf("single-node controller refuses broker %d (local %d)", info.BrokerID, c.cfg.BrokerID)
 	}
+
 	if c.cfg.StaticCluster != nil {
 		if !brokerPresent(info.BrokerID, c.cfg.StaticCluster.Brokers) {
 			return fmt.Errorf("broker %d not in static cluster", info.BrokerID)
@@ -82,49 +89,62 @@ func (c *SingleNodeController) RegisterBroker(ctx context.Context, info api.Brok
 
 func (c *SingleNodeController) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
 	_ = ctx
+
 	c.mu.Lock()
 	if cfg.Partitions <= 0 {
 		cfg.Partitions = 1
 	}
+
 	if cfg.ReplicationFactor <= 0 {
 		cfg.ReplicationFactor = c.cfg.ReplicationFactor
 	}
+
 	if cfg.ReplicationFactor <= 0 {
 		cfg.ReplicationFactor = 1
 	}
+
 	newParts := assignTopicPartitions(c.cfg, c.meta.Brokers, name, cfg.Partitions, cfg.ReplicationFactor, c.meta.Partitions)
 	c.meta.Partitions = append(c.meta.Partitions, newParts...)
 	c.meta.Version++
 	meta := c.meta
 	c.mu.Unlock()
 	c.pub.publish(meta)
+
 	return meta, nil
 }
 
 // ReportReplicaProgress updates ISR based on follower progress relative to leader high watermark.
 func (c *SingleNodeController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
 	_ = ctx
+
 	c.mu.Lock()
 	idx := -1
+
 	for i, p := range c.meta.Partitions {
 		if p.Topic == topic && p.Partition == partition {
 			idx = i
 			break
 		}
 	}
+
 	if idx == -1 {
 		meta := c.meta
 		c.mu.Unlock()
+
 		return meta, fmt.Errorf("partition not found")
 	}
+
 	assign := c.meta.Partitions[idx]
 	if !brokerPresent(brokerID, brokersFromInts(assign.Replicas)) {
 		meta := c.meta
 		c.mu.Unlock()
+
 		return meta, fmt.Errorf("broker %d not in replicas", brokerID)
 	}
+
 	shouldBeISR := lastOffset >= leaderHighWatermark
 	assign.ISR = ensureLeaderInISR(assign.Leader, assign.ISR)
+
 	inISR := contains(assign.ISR, brokerID)
 	switch {
 	case shouldBeISR && !inISR:
@@ -132,11 +152,13 @@ func (c *SingleNodeController) ReportReplicaProgress(ctx context.Context, topic 
 	case !shouldBeISR && inISR && brokerID != assign.Leader:
 		assign.ISR = remove(assign.ISR, brokerID)
 	}
+
 	c.meta.Partitions[idx] = assign
 	c.meta.Version++
 	meta := c.meta
 	c.mu.Unlock()
 	c.pub.publish(meta)
+
 	return meta, nil
 }
 
@@ -145,16 +167,21 @@ func buildAssignments(cfg api.BrokerConfig, brokers []api.BrokerInfo, topics map
 	if len(brokers) == 0 {
 		return res
 	}
+
 	sort.Slice(brokers, func(i, j int) bool { return brokers[i].BrokerID < brokers[j].BrokerID })
+
 	names := make([]string, 0, len(topics))
 	for name := range topics {
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
+
 	for _, name := range names {
 		state := topics[name]
 		parts := append([]metadata.PartitionSpec(nil), state.Partitions...)
 		sort.Slice(parts, func(i, j int) bool { return parts[i].ID < parts[j].ID })
+
 		rf := state.ReplicationFactor
 		if rf <= 0 {
 			rf = cfg.ReplicationFactor
@@ -165,8 +192,10 @@ func buildAssignments(cfg api.BrokerConfig, brokers []api.BrokerInfo, topics map
 			assignments[i].Partition = int(parts[i].ID)
 			assignments[i].LeaderEpoch = replicaEpoch(assignments[i].Leader, parts[i].Replicas)
 		}
+
 		res = append(res, assignments...)
 	}
+
 	return res
 }
 
@@ -180,6 +209,7 @@ func replicaEpoch(brokerID int, replicas []metadata.ReplicaSpec) int32 {
 	if len(replicas) > 0 {
 		return replicas[0].LeaderEpoch
 	}
+
 	return 0
 }
 
@@ -189,20 +219,25 @@ func resolveBrokers(cfg api.BrokerConfig) ([]api.BrokerInfo, string, error) {
 		if host == "" {
 			host = cfg.BinaryAddr
 		}
+
 		return []api.BrokerInfo{
 			{BrokerID: cfg.BrokerID, Host: host},
 		}, cfg.ClusterID, nil
 	}
+
 	if len(cfg.StaticCluster.Brokers) == 0 {
 		return nil, "", fmt.Errorf("static cluster must list brokers")
 	}
+
 	if !brokerPresent(cfg.BrokerID, cfg.StaticCluster.Brokers) {
 		return nil, "", fmt.Errorf("local broker %d not in static cluster", cfg.BrokerID)
 	}
+
 	clusterID := cfg.StaticCluster.ClusterID
 	if clusterID == "" {
 		clusterID = cfg.ClusterID
 	}
+
 	return cfg.StaticCluster.Brokers, clusterID, nil
 }
 
@@ -212,6 +247,7 @@ func brokerPresent(id int, brokers []api.BrokerInfo) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -219,29 +255,39 @@ func assignTopicPartitions(cfg api.BrokerConfig, brokers []api.BrokerInfo, name 
 	if len(brokers) == 0 {
 		return nil
 	}
+
 	sort.Slice(brokers, func(i, j int) bool { return brokers[i].BrokerID < brokers[j].BrokerID })
+
 	if rf <= 0 {
 		rf = cfg.ReplicationFactor
 	}
+
 	if partitions < 0 {
 		partitions = 0
 	}
+
 	if rf < 1 {
 		rf = 1
 	}
+
 	replicaCount := rf
 	if replicaCount > len(brokers) {
 		replicaCount = len(brokers)
 	}
+
 	counter := len(existing)
+
 	var res []api.PartitionAssignment
+
 	for pid := 0; pid < partitions; pid++ {
 		leaderIdx := counter % len(brokers)
 		counter++
+
 		replicas := make([]int, 0, replicaCount)
 		for i := 0; i < replicaCount; i++ {
 			replicas = append(replicas, brokers[(leaderIdx+i)%len(brokers)].BrokerID)
 		}
+
 		res = append(res, api.PartitionAssignment{
 			Topic:       name,
 			Partition:   pid,
@@ -251,6 +297,7 @@ func assignTopicPartitions(cfg api.BrokerConfig, brokers []api.BrokerInfo, name 
 			LeaderEpoch: 0,
 		})
 	}
+
 	return res
 }
 
@@ -259,6 +306,7 @@ func brokersFromInts(ids []int) []api.BrokerInfo {
 	for _, id := range ids {
 		res = append(res, api.BrokerInfo{BrokerID: id})
 	}
+
 	return res
 }
 
@@ -266,6 +314,7 @@ func ensureLeaderInISR(leader int, isr []int) []int {
 	if contains(isr, leader) {
 		return isr
 	}
+
 	return append(isr, leader)
 }
 
@@ -275,15 +324,18 @@ func contains(list []int, id int) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
 func remove(list []int, id int) []int {
 	var res []int
+
 	for _, v := range list {
 		if v != id {
 			res = append(res, v)
 		}
 	}
+
 	return res
 }

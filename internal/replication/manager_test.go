@@ -20,11 +20,14 @@ func (f *fakeMetadataStore) GetClusterMetadata(ctx context.Context) (api.Cluster
 
 func (f *fakeMetadataStore) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
 	ch := make(chan api.ClusterMetadata, 1)
+
 	go func() {
 		ch <- f.meta
+
 		<-ctx.Done()
 		close(ch)
 	}()
+
 	return ch, nil
 }
 
@@ -39,6 +42,7 @@ func (f *fakeMetadataStore) ReportReplicaProgress(ctx context.Context, topic str
 func (f *fakeMetadataStore) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
 	_ = ctx
 	_ = info
+
 	return nil
 }
 
@@ -53,6 +57,7 @@ func (f *fakeReplicator) FetchFromLeader(ctx context.Context, leader api.BrokerI
 	f.mu.Lock()
 	f.fetch = append(f.fetch, req)
 	f.mu.Unlock()
+
 	return f.resp, f.err
 }
 
@@ -79,19 +84,23 @@ func (t *trackingReplicator) FetchFromLeader(ctx context.Context, leader api.Bro
 func (t *trackingReplicator) hasLeader(id int) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	for _, l := range t.leaders {
 		if l == id {
 			return true
 		}
 	}
+
 	return false
 }
 
 func (t *trackingReplicator) contextsSnapshot() []context.Context {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	res := make([]context.Context, len(t.contexts))
 	copy(res, t.contexts)
+
 	return res
 }
 
@@ -109,21 +118,27 @@ func (s *streamMetadataStore) push(meta api.ClusterMetadata) {
 	s.mu.Lock()
 	s.last = meta
 	s.mu.Unlock()
+
 	s.feed <- meta
 }
 
 func (s *streamMetadataStore) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
 	_ = ctx
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	return s.last, nil
 }
 
 func (s *streamMetadataStore) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
 	out := make(chan api.ClusterMetadata, 1)
+
 	go func() {
 		defer close(out)
+
 		current := sinceVersion
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -132,9 +147,11 @@ func (s *streamMetadataStore) WatchClusterMetadata(ctx context.Context, sinceVer
 				if !ok {
 					return
 				}
+
 				if meta.Version <= current {
 					continue
 				}
+
 				current = meta.Version
 				select {
 				case <-ctx.Done():
@@ -144,6 +161,7 @@ func (s *streamMetadataStore) WatchClusterMetadata(ctx context.Context, sinceVer
 			}
 		}
 	}()
+
 	return out, nil
 }
 
@@ -158,16 +176,20 @@ func (s *streamMetadataStore) ReportReplicaProgress(ctx context.Context, topic s
 func (s *streamMetadataStore) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
 	_ = ctx
 	_ = info
+
 	return nil
 }
 
 func TestManagerStartsReplicatorsForFollowers(t *testing.T) {
 	dir := t.TempDir()
+
 	store, err := storage.NewManager(storage.Config{DataDir: dir})
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+
 	t.Cleanup(func() { _ = store.Close() })
+
 	meta := api.ClusterMetadata{
 		Brokers: []api.BrokerInfo{
 			{BrokerID: 1, Host: "b1"},
@@ -182,13 +204,16 @@ func TestManagerStartsReplicatorsForFollowers(t *testing.T) {
 	repl := &fakeReplicator{}
 
 	mgr := NewManager(api.BrokerConfig{BrokerID: 2}, store, ctrl, repl)
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	go mgr.Run(ctx)
+
 	time.Sleep(300 * time.Millisecond)
 	repl.mu.Lock()
 	defer repl.mu.Unlock()
+
 	if len(repl.fetch) == 0 {
 		t.Fatalf("expected at least one fetch from replicator for follower partition")
 	}
@@ -202,11 +227,14 @@ func TestManagerStartsReplicatorsForFollowers(t *testing.T) {
 
 func TestManagerStartsReplicatorsForMultipleFollowers(t *testing.T) {
 	dir := t.TempDir()
+
 	store, err := storage.NewManager(storage.Config{DataDir: dir})
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+
 	t.Cleanup(func() { _ = store.Close() })
+
 	meta := api.ClusterMetadata{
 		Brokers: []api.BrokerInfo{
 			{BrokerID: 1, Host: "b1"},
@@ -222,20 +250,25 @@ func TestManagerStartsReplicatorsForMultipleFollowers(t *testing.T) {
 	repl := &fakeReplicator{}
 
 	mgr := NewManager(api.BrokerConfig{BrokerID: 2}, store, ctrl, repl)
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	go mgr.Run(ctx)
+
 	time.Sleep(300 * time.Millisecond)
 	repl.mu.Lock()
 	defer repl.mu.Unlock()
+
 	seen := make(map[int]bool)
 	for _, req := range repl.fetch {
 		seen[req.Partition] = true
 	}
+
 	if !seen[0] || !seen[1] {
 		t.Fatalf("expected replication for follower partitions 0 and 1, got %+v", seen)
 	}
+
 	if seen[2] {
 		t.Fatalf("should not replicate locally-led partition 2")
 	}
@@ -243,10 +276,12 @@ func TestManagerStartsReplicatorsForMultipleFollowers(t *testing.T) {
 
 func TestManagerRestartsOnLeaderChange(t *testing.T) {
 	dir := t.TempDir()
+
 	store, err := storage.NewManager(storage.Config{DataDir: dir})
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+
 	t.Cleanup(func() { _ = store.Close() })
 
 	metaFeed := newStreamMetadataStore()
@@ -279,10 +314,12 @@ func TestManagerRestartsOnLeaderChange(t *testing.T) {
 
 func TestManagerStopsReplicationWhenReplicaRemoved(t *testing.T) {
 	dir := t.TempDir()
+
 	store, err := storage.NewManager(storage.Config{DataDir: dir})
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+
 	t.Cleanup(func() { _ = store.Close() })
 
 	metaFeed := newStreamMetadataStore()
@@ -290,6 +327,7 @@ func TestManagerStopsReplicationWhenReplicaRemoved(t *testing.T) {
 	mgr := NewManager(api.BrokerConfig{BrokerID: 2}, store, metaFeed, repl)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+
 	go mgr.Run(ctx)
 
 	metaFeed.push(api.ClusterMetadata{
@@ -312,12 +350,15 @@ func TestManagerStopsReplicationWhenReplicaRemoved(t *testing.T) {
 
 func waitForLeaderAndContext(t *testing.T, repl *trackingReplicator, leader int) context.Context {
 	t.Helper()
+
 	deadline := time.After(time.Second)
+
 	for {
 		ctxs := repl.contextsSnapshot()
 		if repl.hasLeader(leader) && len(ctxs) > 0 {
 			return ctxs[0]
 		}
+
 		select {
 		case <-deadline:
 			t.Fatalf("timed out waiting for leader %d fetch", leader)
@@ -328,11 +369,14 @@ func waitForLeaderAndContext(t *testing.T, repl *trackingReplicator, leader int)
 
 func waitForLeader(t *testing.T, repl *trackingReplicator, leader int) {
 	t.Helper()
+
 	deadline := time.After(time.Second)
+
 	for {
 		if repl.hasLeader(leader) {
 			return
 		}
+
 		select {
 		case <-deadline:
 			t.Fatalf("timed out waiting for leader %d", leader)
@@ -343,7 +387,9 @@ func waitForLeader(t *testing.T, repl *trackingReplicator, leader int) {
 
 func waitForContextCanceled(t *testing.T, ctx context.Context) {
 	t.Helper()
+
 	deadline := time.After(time.Second)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -357,7 +403,9 @@ func waitForContextCanceled(t *testing.T, ctx context.Context) {
 
 func waitForNewContext(t *testing.T, repl *trackingReplicator, old context.Context) {
 	t.Helper()
+
 	deadline := time.After(time.Second)
+
 	for {
 		ctxs := repl.contextsSnapshot()
 		for _, ctx := range ctxs {
@@ -365,6 +413,7 @@ func waitForNewContext(t *testing.T, repl *trackingReplicator, old context.Conte
 				return
 			}
 		}
+
 		select {
 		case <-deadline:
 			t.Fatalf("did not observe new replication context")
@@ -376,6 +425,7 @@ func waitForNewContext(t *testing.T, repl *trackingReplicator, old context.Conte
 func ensureNoNewContexts(t *testing.T, repl *trackingReplicator, expected int) {
 	t.Helper()
 	time.Sleep(200 * time.Millisecond)
+
 	if got := len(repl.contextsSnapshot()); got != expected {
 		t.Fatalf("expected %d contexts after removal, got %d", expected, got)
 	}

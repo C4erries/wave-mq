@@ -28,22 +28,27 @@ func TestRaftControllerPersistsInitialMetadata(t *testing.T) {
 			{BrokerID: 1, Host: "leader"},
 		},
 	}
+
 	rc, err := NewRaftController(cfg, initial, dir)
 	if err != nil {
 		t.Fatalf("new raft controller: %v", err)
 	}
+
 	if err := rc.Close(); err != nil {
 		t.Fatalf("close raft controller: %v", err)
 	}
+
 	store, err := raftboltdb.NewBoltStore(filepath.Join(dir, "raft.bolt"))
 	if err != nil {
 		t.Fatalf("open bolt store: %v", err)
 	}
 	defer store.Close()
+
 	persisted, err := loadInitialMetadata(store)
 	if err != nil {
 		t.Fatalf("load initial metadata: %v", err)
 	}
+
 	if persisted == nil || !reflect.DeepEqual(*persisted, initial) {
 		t.Fatalf("expected persisted initial metadata to match %v, got %v", initial, persisted)
 	}
@@ -62,10 +67,12 @@ func TestRaftControllerRestoresInitialMetadataOnRestart(t *testing.T) {
 			{BrokerID: 1, Host: "leader"},
 		},
 	}
+
 	rc, err := NewRaftController(cfg, initial, dir)
 	if err != nil {
 		t.Fatalf("new raft controller: %v", err)
 	}
+
 	if err := rc.Close(); err != nil {
 		t.Fatalf("close raft controller: %v", err)
 	}
@@ -74,21 +81,26 @@ func TestRaftControllerRestoresInitialMetadataOnRestart(t *testing.T) {
 		ClusterID: "override-cluster",
 		Version:   99,
 	}
+
 	rc2, err := NewRaftController(cfg, override, dir)
 	if err != nil {
 		t.Fatalf("restart raft controller: %v", err)
 	}
 	defer rc2.Close()
+
 	restored, err := rc2.GetClusterMetadata(context.Background())
 	if err != nil {
 		t.Fatalf("get cluster metadata after restart: %v", err)
 	}
+
 	if restored.ClusterID != initial.ClusterID {
 		t.Fatalf("expected cluster id %s after restart, got %s", initial.ClusterID, restored.ClusterID)
 	}
+
 	if restored.Version != initial.Version {
 		t.Fatalf("expected version %d after restart, got %d", initial.Version, restored.Version)
 	}
+
 	if len(restored.Brokers) != len(initial.Brokers) {
 		t.Fatalf("expected brokers %+v after restart, got %+v", initial.Brokers, restored.Brokers)
 	}
@@ -111,62 +123,80 @@ func TestRaftControllerAssignTopic(t *testing.T) {
 		Version:   1,
 		Brokers:   cfg.StaticCluster.Brokers,
 	}
+
 	rc, err := NewRaftController(cfg, initial, "")
 	if err != nil {
 		t.Fatalf("new raft controller: %v", err)
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	meta, err := rc.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 2, ReplicationFactor: 2})
 	if err != nil {
 		t.Fatalf("assign topic: %v", err)
 	}
+
 	if len(meta.Partitions) != 2 {
 		t.Fatalf("expected 2 partitions, got %d", len(meta.Partitions))
 	}
+
 	if meta.Version != 2 {
 		t.Fatalf("expected version 2, got %d", meta.Version)
 	}
+
 	leaders := make(map[int]int)
 	for _, p := range meta.Partitions {
 		leaders[p.Leader]++
 		if len(p.Replicas) != 2 {
 			t.Fatalf("replicas mismatch for %s-%d: %+v", p.Topic, p.Partition, p.Replicas)
 		}
+
 		seen := map[int]struct{}{}
 		for _, id := range p.Replicas {
 			seen[id] = struct{}{}
 		}
+
 		if len(seen) != len(p.Replicas) {
 			t.Fatalf("replicas must be unique, got %+v", p.Replicas)
 		}
+
 		if p.Leader != p.Replicas[0] {
 			t.Fatalf("leader should be first replica, got %d", p.Leader)
 		}
 	}
+
 	if len(leaders) != 2 {
 		t.Fatalf("expected leaders across 2 brokers, got %+v", leaders)
 	}
+
 	meta, err = rc.AssignTopic(ctx, "beta", api.TopicConfig{Partitions: 1, ReplicationFactor: 3})
 	if err != nil {
 		t.Fatalf("assign topic beta: %v", err)
 	}
+
 	if meta.Version != 3 {
 		t.Fatalf("expected version 3 after second assignment, got %d", meta.Version)
 	}
+
 	found := false
+
 	for _, p := range meta.Partitions {
 		if p.Topic != "beta" {
 			continue
 		}
+
 		found = true
+
 		if len(p.Replicas) != 2 {
 			t.Fatalf("expected replicas truncated to 2 brokers, got %+v", p.Replicas)
 		}
+
 		if p.Leader != p.Replicas[0] {
 			t.Fatalf("leader should be first replica for beta, got %d", p.Leader)
 		}
 	}
+
 	if !found {
 		t.Fatalf("beta partition not found in metadata")
 	}
@@ -189,12 +219,15 @@ func TestRaftControllerReportReplicaProgress(t *testing.T) {
 		Version:   1,
 		Brokers:   cfg.StaticCluster.Brokers,
 	}
+
 	rc, err := NewRaftController(cfg, initial, "")
 	if err != nil {
 		t.Fatalf("new raft controller: %v", err)
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	meta, err := rc.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 1})
 	if err != nil {
 		t.Fatalf("assign topic: %v", err)
@@ -211,10 +244,12 @@ func TestRaftControllerReportReplicaProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("report progress: %v", err)
 	}
+
 	isr := meta2.Partitions[0].ISR
-	if !(contains(isr, 1) && contains(isr, 2)) {
+	if !contains(isr, 1) || !contains(isr, 2) {
 		t.Fatalf("expected ISR to include 1 and 2, got %+v", isr)
 	}
+
 	if meta2.Version != meta.Version+1 {
 		t.Fatalf("expected version increment, got %d", meta2.Version)
 	}
@@ -229,6 +264,7 @@ func TestRaftControllerRegisterBrokerSingleNode(t *testing.T) {
 		ClusterID: "c1",
 		Version:   1,
 	}
+
 	rc, err := NewRaftController(cfg, initial, "")
 	if err != nil {
 		t.Fatalf("new raft controller: %v", err)
@@ -241,16 +277,19 @@ func TestRaftControllerRegisterBrokerSingleNode(t *testing.T) {
 	if err := rc.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 1, Host: "b1"}); err != nil {
 		t.Fatalf("register broker 1: %v", err)
 	}
+
 	meta, _ := rc.GetClusterMetadata(ctx)
 	if len(meta.Brokers) != 1 {
 		t.Fatalf("expected 1 broker, got %d", len(meta.Brokers))
 	}
+
 	firstVersion := meta.Version
 
 	// idempotent re-register
 	if err := rc.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 1, Host: "b1"}); err != nil {
 		t.Fatalf("register broker 1 again: %v", err)
 	}
+
 	meta, _ = rc.GetClusterMetadata(ctx)
 	if meta.Version != firstVersion {
 		t.Fatalf("version should not change on identical re-register: got %d want %d", meta.Version, firstVersion)
@@ -259,10 +298,12 @@ func TestRaftControllerRegisterBrokerSingleNode(t *testing.T) {
 	if err := rc.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 2, Host: "b2"}); err != nil {
 		t.Fatalf("register broker 2: %v", err)
 	}
+
 	meta, _ = rc.GetClusterMetadata(ctx)
 	if len(meta.Brokers) != 2 {
 		t.Fatalf("expected 2 brokers, got %d", len(meta.Brokers))
 	}
+
 	if meta.Version != firstVersion+1 {
 		t.Fatalf("expected version to increment on new broker")
 	}
@@ -285,6 +326,7 @@ func TestRaftControllerRestartsWithPersistentState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("assign topic: %v", err)
 	}
+
 	if err := rc.Close(); err != nil {
 		t.Fatalf("shutdown raft: %v", err)
 	}
@@ -305,10 +347,12 @@ func TestRaftControllerRestartsWithPersistentState(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("metadata not restored: %v", err)
 	}
+
 	restored, _ := rc.GetClusterMetadata(ctx)
 	if restored.ClusterID != meta.ClusterID {
 		t.Fatalf("cluster id mismatch after restart: got %s want %s", restored.ClusterID, meta.ClusterID)
 	}
+
 	if len(restored.Partitions) != len(meta.Partitions) {
 		t.Fatalf("partition count mismatch after restart: got %d want %d", len(restored.Partitions), len(meta.Partitions))
 	}
@@ -349,6 +393,7 @@ func TestRaftControllerMultiPeerAssignTopic(t *testing.T) {
 		t.Fatalf("new raft controller 1: %v", err)
 	}
 	defer rc1.raft.Shutdown()
+
 	rc2, err := NewRaftController(cfg2, initial, "")
 	if err != nil {
 		t.Fatalf("new raft controller 2: %v", err)
@@ -360,6 +405,7 @@ func TestRaftControllerMultiPeerAssignTopic(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
 	if _, err := leader.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 2}); err != nil {
 		t.Fatalf("assign topic on leader: %v", err)
 	}
@@ -367,6 +413,7 @@ func TestRaftControllerMultiPeerAssignTopic(t *testing.T) {
 	if err := waitForMetadata(func() bool {
 		m1, _ := rc1.GetClusterMetadata(ctx)
 		m2, _ := rc2.GetClusterMetadata(ctx)
+
 		return len(m1.Partitions) == 2 && len(m2.Partitions) == 2 && m1.Version == m2.Version
 	}); err != nil {
 		t.Fatalf("metadata not replicated: %v", err)
@@ -375,17 +422,21 @@ func TestRaftControllerMultiPeerAssignTopic(t *testing.T) {
 
 func freeAddr(t *testing.T) string {
 	t.Helper()
+
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+
 	addr := l.Addr().String()
 	_ = l.Close()
+
 	return addr
 }
 
 func waitForLeader(t *testing.T, ctrls []*RaftController) *RaftController {
 	t.Helper()
+
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, c := range ctrls {
@@ -393,9 +444,12 @@ func waitForLeader(t *testing.T, ctrls []*RaftController) *RaftController {
 				return c
 			}
 		}
+
 		time.Sleep(20 * time.Millisecond)
 	}
+
 	t.Fatalf("leader not elected")
+
 	return nil
 }
 
@@ -405,8 +459,10 @@ func waitForMetadata(pred func() bool) error {
 		if pred() {
 			return nil
 		}
+
 		time.Sleep(20 * time.Millisecond)
 	}
+
 	return fmt.Errorf("condition not met before deadline")
 }
 
@@ -435,6 +491,7 @@ func TestRaftControllerMultiPeerRegisterBrokerReplicates(t *testing.T) {
 		t.Fatalf("new raft controller 1: %v", err)
 	}
 	defer rc1.raft.Shutdown()
+
 	rc2, err := NewRaftController(cfg2, initial, "")
 	if err != nil {
 		t.Fatalf("new raft controller 2: %v", err)
@@ -442,12 +499,14 @@ func TestRaftControllerMultiPeerRegisterBrokerReplicates(t *testing.T) {
 	defer rc2.raft.Shutdown()
 
 	leader := waitForLeader(t, []*RaftController{rc1, rc2})
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := leader.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 1, Host: "b1"}); err != nil {
 		t.Fatalf("register broker1: %v", err)
 	}
+
 	if err := leader.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 2, Host: "b2"}); err != nil {
 		t.Fatalf("register broker2: %v", err)
 	}
@@ -455,6 +514,7 @@ func TestRaftControllerMultiPeerRegisterBrokerReplicates(t *testing.T) {
 	if err := waitForMetadata(func() bool {
 		m1, _ := rc1.GetClusterMetadata(ctx)
 		m2, _ := rc2.GetClusterMetadata(ctx)
+
 		return len(m1.Brokers) == 2 && len(m2.Brokers) == 2 && m1.Version == m2.Version
 	}); err != nil {
 		t.Fatalf("brokers not replicated: %v", err)
@@ -487,13 +547,16 @@ func TestRaftControllerFailoverApplyCommands(t *testing.T) {
 	}
 
 	var ctrls []*RaftController
+
 	for _, cfg := range cfgs {
 		rc, err := NewRaftController(cfg, initial, "")
 		if err != nil {
 			t.Fatalf("controller: %v", err)
 		}
+
 		ctrls = append(ctrls, rc)
 	}
+
 	defer func() {
 		for _, c := range ctrls {
 			_ = c.raft.Shutdown()
@@ -501,12 +564,14 @@ func TestRaftControllerFailoverApplyCommands(t *testing.T) {
 	}()
 
 	leader := waitForLeader(t, ctrls)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if _, err := leader.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 1}); err != nil {
 		t.Fatalf("assign alpha: %v", err)
 	}
+
 	if err := waitForMetadata(func() bool {
 		for _, c := range ctrls {
 			m, _ := c.GetClusterMetadata(ctx)
@@ -514,6 +579,7 @@ func TestRaftControllerFailoverApplyCommands(t *testing.T) {
 				return false
 			}
 		}
+
 		return true
 	}); err != nil {
 		t.Fatalf("metadata did not converge before failover: %v", err)
@@ -523,15 +589,18 @@ func TestRaftControllerFailoverApplyCommands(t *testing.T) {
 	_ = leader.raft.Shutdown()
 
 	var survivors []*RaftController
+
 	for _, c := range ctrls {
 		if c != leader {
 			survivors = append(survivors, c)
 		}
 	}
+
 	newLeader := waitForLeader(t, survivors)
 	if _, err := newLeader.AssignTopic(ctx, "beta", api.TopicConfig{Partitions: 1}); err != nil {
 		t.Fatalf("assign beta after failover: %v", err)
 	}
+
 	if err := waitForMetadata(func() bool {
 		for _, c := range survivors {
 			m, _ := c.GetClusterMetadata(ctx)
@@ -539,6 +608,7 @@ func TestRaftControllerFailoverApplyCommands(t *testing.T) {
 				return false
 			}
 		}
+
 		return true
 	}); err != nil {
 		t.Fatalf("metadata did not converge after failover: %v", err)
@@ -555,6 +625,7 @@ func TestRaftControllerWatchStreamsUpdates(t *testing.T) {
 		ControllerMode: "raft",
 	}
 	initial := api.ClusterMetadata{ClusterID: cfg.StaticCluster.ClusterID, Version: 1, Brokers: cfg.StaticCluster.Brokers}
+
 	rc, err := NewRaftController(cfg, initial, "")
 	if err != nil {
 		t.Fatalf("new raft controller: %v", err)
@@ -571,11 +642,13 @@ func TestRaftControllerWatchStreamsUpdates(t *testing.T) {
 
 	awaitVersion := func(expected int64) {
 		t.Helper()
+
 		select {
 		case meta, ok := <-updates:
 			if !ok {
 				t.Fatalf("channel closed before receiving version %d", expected)
 			}
+
 			if meta.Version != expected {
 				t.Fatalf("expected version %d, got %d", expected, meta.Version)
 			}
@@ -585,12 +658,16 @@ func TestRaftControllerWatchStreamsUpdates(t *testing.T) {
 	}
 
 	awaitVersion(1)
+
 	if _, err := rc.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 1}); err != nil {
 		t.Fatalf("assign topic: %v", err)
 	}
+
 	awaitVersion(2)
+
 	if _, err := rc.ReportReplicaProgress(ctx, "alpha", 0, cfg.BrokerID, 1, 1); err != nil {
 		t.Fatalf("report progress: %v", err)
 	}
+
 	awaitVersion(3)
 }

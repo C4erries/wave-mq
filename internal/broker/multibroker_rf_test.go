@@ -1,6 +1,7 @@
 package broker_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -65,23 +66,28 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 		t.Fatalf("controller1: %v", err)
 	}
 	defer rc1.Close()
+
 	rc2, err := controller.NewRaftController(cfg2, initial, "")
 	if err != nil {
 		t.Fatalf("controller2: %v", err)
 	}
 	defer rc2.Close()
+
 	ctrls := []*controller.RaftController{rc1, rc2}
 	leaderCtrl := waitForLeaderCtrl(t, ctrls)
 	// Register brokers and assign topic with RF=2.
 	if err := leaderCtrl.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 1, Host: binaryAddr1}); err != nil {
 		t.Fatalf("register broker1: %v", err)
 	}
+
 	if err := leaderCtrl.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 2, Host: binaryAddr2}); err != nil {
 		t.Fatalf("register broker2: %v", err)
 	}
+
 	if _, err := leaderCtrl.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 1, ReplicationFactor: 2}); err != nil {
 		t.Fatalf("assign topic: %v", err)
 	}
+
 	waitForClusterMeta(t, ctrls, 1)
 
 	// Prepare metadata logs.
@@ -96,29 +102,38 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 			}},
 		},
 	}
+
 	meta1, _ := metadata.NewStore(api.BrokerConfig{DataDir: dir1})
 	defer meta1.Close()
+
 	meta2, _ := metadata.NewStore(api.BrokerConfig{DataDir: dir2})
 	defer meta2.Close()
+
 	if err := meta1.AppendCreateTopic(ctx, ev); err != nil {
 		t.Fatalf("meta1 append: %v", err)
 	}
+
 	if err := meta2.AppendCreateTopic(ctx, ev); err != nil {
 		t.Fatalf("meta2 append: %v", err)
 	}
 
 	store1, _ := storage.NewManager(storage.Config{DataDir: dir1})
 	defer store1.Close()
+
 	store2, _ := storage.NewManager(storage.Config{DataDir: dir2})
 	defer store2.Close()
+
 	if err := store1.Recover(ctx); err != nil {
 		t.Fatalf("store1 recover: %v", err)
 	}
+
 	if err := store2.Recover(ctx); err != nil {
 		t.Fatalf("store2 recover: %v", err)
 	}
+
 	offset1, _ := broker.NewOffsetStore(dir1)
 	offset2, _ := broker.NewOffsetStore(dir2)
+
 	defer offset1.Close()
 	defer offset2.Close()
 
@@ -130,6 +145,7 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 		t.Fatalf("broker1: %v", err)
 	}
 	defer b1.Close()
+
 	b2, err := broker.NewBroker(cfg2, store2, offset2, meta2, rc2, nil)
 	if err != nil {
 		t.Fatalf("broker2: %v", err)
@@ -144,21 +160,27 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	// Start servers to serve replication fetches.
 	srv1, _ := netproto.NewServer(cfg1.BinaryAddr, b1)
 	srv2, _ := netproto.NewServer(cfg2.BinaryAddr, b2)
+
 	ctxSrv, cancelSrv := context.WithCancel(ctx)
 	defer cancelSrv()
+
 	go srv1.ListenAndServe(ctxSrv)
 	go srv2.ListenAndServe(ctxSrv)
 
 	meta, _ := rc1.GetClusterMetadata(ctx)
+
 	var leaderID int
+
 	for _, p := range meta.Partitions {
 		if p.Topic == "alpha" && p.Partition == 0 {
 			leaderID = p.Leader
 		}
 	}
+
 	if leaderID == 0 {
 		t.Fatalf("leader not found")
 	}
+
 	rep := replication.NewBinaryReplicator()
 	leaderBroker := b1
 	followerBroker := b2
@@ -166,38 +188,48 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	followerStore := store2
 	followerID := cfg2.BrokerID
 	followerCtrl := rc2
+
 	if leaderID == 2 {
 		leaderBroker, followerBroker = b2, b1
 		leaderStore, followerStore = store2, store1
 		followerID = cfg1.BrokerID
 		followerCtrl = rc1
 	}
+
 	leaderAddr := binaryAddr1
+
 	followerAddr := binaryAddr2
 	if leaderID == 2 {
 		leaderAddr = binaryAddr2
 		followerAddr = binaryAddr1
 	}
+
 	sink := replication.NewReportingSink(replication.NewWALSink(followerStore, "alpha", 0), followerCtrl, "alpha", 0, followerID)
 	pr := replication.NewPartitionReplicator(rep, api.BrokerInfo{BrokerID: leaderID, Host: leaderAddr}, "alpha", 0, sink)
 	repErr := make(chan error, 1)
+
 	go func() {
 		repErr <- pr.Run(ctxSrv)
 	}()
+
 	sendProtoRequest := func(addr string, key api.APIKey, payload []byte) ([]byte, error) {
 		conn, err := net.Dial("tcp", addr)
 		if err != nil {
 			return nil, err
 		}
 		defer conn.Close()
+
 		frame, err := netproto.EncodeRequestFrame(key, 1, payload)
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := conn.Write(frame); err != nil {
 			return nil, err
 		}
+
 		_, _, respPayload, err := netproto.DecodeResponseFrame(conn)
+
 		return respPayload, err
 	}
 	sendProduce := func(addr string, records []api.Record) (*netproto.ProduceResponse, error) {
@@ -206,14 +238,17 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 			Partition: 0,
 			Records:   records,
 		}
+
 		payload, err := netproto.EncodeProduceRequest(req)
 		if err != nil {
 			return nil, err
 		}
+
 		respPayload, err := sendProtoRequest(addr, api.APIKeyProduce, payload)
 		if err != nil {
 			return nil, err
 		}
+
 		return netproto.DecodeProduceResponse(respPayload)
 	}
 	sendFetch := func(addr string, offset api.Offset) (*netproto.FetchResponse, error) {
@@ -223,14 +258,17 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 			Offset:    offset,
 			MaxBytes:  4096,
 		}
+
 		payload, err := netproto.EncodeFetchRequest(req)
 		if err != nil {
 			return nil, err
 		}
+
 		respPayload, err := sendProtoRequest(addr, api.APIKeyFetch, payload)
 		if err != nil {
 			return nil, err
 		}
+
 		return netproto.DecodeFetchResponse(respPayload)
 	}
 
@@ -244,6 +282,7 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 
 	// Wait for follower to catch up.
 	var replicationErr error
+
 	caughtUp := waitUntil(t, func() bool {
 		select {
 		case err := <-repErr:
@@ -251,12 +290,15 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 			return true
 		default:
 		}
+
 		logFollower, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
+
 		return logFollower.HighWatermark() == 2
 	}, 10*time.Second)
 	if replicationErr != nil && !errors.Is(replicationErr, context.Canceled) {
 		t.Fatalf("replication failed: %v", replicationErr)
 	}
+
 	if !caughtUp {
 		logFollower, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
 		t.Fatalf("follower did not catch up, hwm=%d", logFollower.HighWatermark())
@@ -264,12 +306,15 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 
 	// ISR should contain both.
 	metaAfter, _ := rc1.GetClusterMetadata(ctx)
+
 	var isr []int
+
 	for _, p := range metaAfter.Partitions {
 		if p.Topic == "alpha" && p.Partition == 0 {
 			isr = p.ISR
 		}
 	}
+
 	if len(isr) != 2 || !contains(isr, 1) || !contains(isr, 2) {
 		t.Fatalf("expected both brokers in ISR, got %+v", isr)
 	}
@@ -281,6 +326,7 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 
 	logLeader, _ := leaderStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
 	logFollower, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
+
 	leaderHWM := logLeader.HighWatermark()
 	if leaderHWM != logFollower.HighWatermark() {
 		t.Fatalf("expected matching high watermarks, leader=%d follower=%d", leaderHWM, logFollower.HighWatermark())
@@ -291,9 +337,11 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("leader fetch via netproto: %v", err)
 	}
+
 	if resp.Error != api.ErrNone {
 		t.Fatalf("expected no error from leader fetch, got %v", resp.Error)
 	}
+
 	if len(resp.Records) != 3 {
 		t.Fatalf("unexpected record count from leader fetch, got %d", len(resp.Records))
 	}
@@ -303,13 +351,16 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("follower produce via netproto: %v", err)
 	}
+
 	if prodResp.Error != api.ErrNotLeader {
 		t.Fatalf("expect not leader error for follower produce, got %v", prodResp.Error)
 	}
+
 	fetchResp, err := sendFetch(followerAddr, 0)
 	if err != nil {
 		t.Fatalf("follower fetch via netproto: %v", err)
 	}
+
 	if fetchResp.Error != api.ErrNotLeader {
 		t.Fatalf("expect not leader error for follower fetch, got %v", fetchResp.Error)
 	}
@@ -323,17 +374,19 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("leader metadata: %v", err)
 	}
+
 	if len(leaderMeta) != 1 || leaderMeta[0].Replica.Role != api.RoleLeader {
 		t.Fatalf("unexpected leader metadata: %+v", leaderMeta)
 	}
+
 	followerMeta, err := followerBroker.Metadata(ctx, []string{"alpha"})
 	if err != nil {
 		t.Fatalf("follower metadata: %v", err)
 	}
+
 	if len(followerMeta) != 1 || followerMeta[0].Leader != leaderID || followerMeta[0].Replica.Role != api.RoleFollower {
 		t.Fatalf("unexpected follower metadata: %+v", followerMeta)
 	}
-
 }
 
 func TestReplicationResumesAfterRestarts(t *testing.T) {
@@ -381,22 +434,28 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 		t.Fatalf("controller1: %v", err)
 	}
 	defer rc1.Close()
+
 	rc2, err := controller.NewRaftController(cfg2, initial, ctrlDir2)
 	if err != nil {
 		t.Fatalf("controller2: %v", err)
 	}
 	defer rc2.Close()
+
 	ctrls := []*controller.RaftController{rc1, rc2}
+
 	leaderCtrl := waitForLeaderCtrl(t, ctrls)
 	if err := leaderCtrl.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 1, Host: binaryAddr1}); err != nil {
 		t.Fatalf("register broker1: %v", err)
 	}
+
 	if err := leaderCtrl.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 2, Host: binaryAddr2}); err != nil {
 		t.Fatalf("register broker2: %v", err)
 	}
+
 	if _, err := leaderCtrl.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 1, ReplicationFactor: 2}); err != nil {
 		t.Fatalf("assign topic: %v", err)
 	}
+
 	waitForClusterMeta(t, ctrls, 1)
 
 	appendMetadata := func(store *metadata.Store) {
@@ -419,27 +478,36 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 
 	meta1, _ := metadata.NewStore(api.BrokerConfig{DataDir: leaderDir})
 	defer meta1.Close()
+
 	appendMetadata(meta1)
+
 	meta2, _ := metadata.NewStore(api.BrokerConfig{DataDir: followerDir})
 	defer meta2.Close()
+
 	appendMetadata(meta2)
 
 	store1, _ := storage.NewManager(storage.Config{DataDir: leaderDir, SyncOnAppend: true})
 	store2, _ := storage.NewManager(storage.Config{DataDir: followerDir, SyncOnAppend: true})
+
 	defer store1.Close()
 	defer store2.Close()
+
 	if err := store1.Recover(ctx); err != nil {
 		t.Fatalf("store1 recover: %v", err)
 	}
+
 	if err := store2.Recover(ctx); err != nil {
 		t.Fatalf("store2 recover: %v", err)
 	}
+
 	offset1, _ := broker.NewOffsetStore(leaderDir)
 	offset2, _ := broker.NewOffsetStore(followerDir)
+
 	defer offset1.Close()
 	defer offset2.Close()
 
 	metaTopics1, _ := meta1.RecoverTopics(ctx)
+
 	metaTopics2, _ := meta2.RecoverTopics(ctx)
 	if len(metaTopics1.Topics) == 0 || len(metaTopics2.Topics) == 0 {
 		t.Fatalf("topics not recovered")
@@ -450,6 +518,7 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 		t.Fatalf("broker1: %v", err)
 	}
 	defer b1.Close()
+
 	b2, err := broker.NewBroker(cfg2, store2, offset2, meta2, rc2, nil)
 	if err != nil {
 		t.Fatalf("broker2: %v", err)
@@ -457,21 +526,26 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 	defer b2.Close()
 
 	meta, _ := rc1.GetClusterMetadata(ctx)
+
 	var leaderID int
+
 	for _, p := range meta.Partitions {
 		if p.Topic == "alpha" && p.Partition == 0 {
 			leaderID = p.Leader
 		}
 	}
+
 	if leaderID == 0 {
 		t.Fatalf("leader not found")
 	}
+
 	leaderBroker := b1
 	leaderStore := store1
 	followerStore := store2
 	leaderAddr := binaryAddr1
 	followerCtrl := controller.MetadataStore(rc2)
 	followerID := cfg2.BrokerID
+
 	if leaderID == 2 {
 		leaderBroker = b2
 		leaderStore, followerStore = store2, store1
@@ -481,8 +555,10 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 	}
 
 	server, _ := netproto.NewServer(leaderAddr, leaderBroker)
+
 	ctxSrv, cancelSrv := context.WithCancel(ctx)
 	defer cancelSrv()
+
 	go server.ListenAndServe(ctxSrv)
 
 	rep := replication.NewBinaryReplicator()
@@ -492,10 +568,13 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 		ctxRep, cancelRep := context.WithCancel(ctx)
 		done := make(chan struct{})
 		errCh := make(chan error, 1)
+
 		go func() {
 			errCh <- pr.Run(ctxRep)
+
 			close(done)
 		}()
+
 		return cancelRep, done, errCh
 	}
 
@@ -506,10 +585,13 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 				if err != nil && !errors.Is(err, context.Canceled) {
 					t.Fatalf("replication error: %v", err)
 				}
+
 				return false
 			default:
 			}
+
 			log, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
+
 			return log.HighWatermark() == expected
 		}, 5*time.Second)
 		if !ok {
@@ -523,6 +605,7 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 		for _, v := range values {
 			recs = append(recs, api.Record{Value: []byte(v)})
 		}
+
 		if _, err := leaderBroker.Produce(ctx, "alpha", 0, recs); err != nil {
 			t.Fatalf("produce: %v", err)
 		}
@@ -532,6 +615,7 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 
 	produce("one", "two")
 	waitCatchUp(1, repErr)
+
 	if log, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0}); log.HighWatermark() != 1 {
 		t.Fatalf("expected follower hwm 1 after initial replication, got %d", log.HighWatermark())
 	}
@@ -543,9 +627,11 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 
 	cancelRep, repDone, repErr = startReplication(followerStore, followerCtrl)
 	waitCatchUp(3, repErr)
+
 	if log, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0}); log.HighWatermark() != 3 {
 		t.Fatalf("expected follower hwm 3 after restart catch-up, got %d", log.HighWatermark())
 	}
+
 	if recs, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0}); len(offsetsOf(mustRead(ctx, recs))) != 4 {
 		t.Fatalf("unexpected follower offsets after catch-up: start=%d hwm=%d offsets=%v", recs.StartOffset(), recs.HighWatermark(), offsetsOf(mustRead(ctx, recs)))
 	}
@@ -555,15 +641,20 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 
 	rc1.Close()
 	rc2.Close()
+
 	rc1, _ = controller.NewRaftController(cfg1, initial, ctrlDir1)
 	rc2, _ = controller.NewRaftController(cfg2, initial, ctrlDir2)
+
 	defer rc1.Close()
 	defer rc2.Close()
+
 	ctrls = []*controller.RaftController{rc1, rc2}
+
 	leaderCtrl = waitForLeaderCtrl(t, ctrls)
 	if err := leaderCtrl.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 1, Host: binaryAddr1}); err != nil {
 		t.Fatalf("re-register broker1: %v", err)
 	}
+
 	if err := leaderCtrl.RegisterBroker(ctx, api.BrokerInfo{BrokerID: 2, Host: binaryAddr2}); err != nil {
 		t.Fatalf("re-register broker2: %v", err)
 	}
@@ -577,31 +668,38 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 
 	produce("five", "six")
 	waitCatchUp(5, repErr)
+
 	if log, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0}); log.HighWatermark() != 5 {
 		t.Fatalf("expected follower hwm 5 after controller restart, got %d", log.HighWatermark())
 	}
+
 	if recs, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0}); len(offsetsOf(mustRead(ctx, recs))) != 6 {
 		t.Fatalf("unexpected follower offsets after final catch-up: start=%d hwm=%d offsets=%v", recs.StartOffset(), recs.HighWatermark(), offsetsOf(mustRead(ctx, recs)))
 	}
+
 	cancelRep()
 	<-repDone
 
 	leaderLog, _ := leaderStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
 	followerLog, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
 	leadRecords, _ := leaderLog.Read(ctx, 0, 1<<20)
+
 	follRecords, _ := followerLog.Read(ctx, 0, 1<<20)
 	if followerLog.StartOffset() != 0 {
 		t.Fatalf("unexpected follower start offset %d", followerLog.StartOffset())
 	}
+
 	if len(leadRecords) != len(follRecords) {
 		followerOffsets := make([]api.Offset, 0, len(follRecords))
 		for _, r := range follRecords {
 			followerOffsets = append(followerOffsets, r.Offset)
 		}
+
 		t.Fatalf("record count mismatch leader=%d follower=%d hwm=%d offsets=%v", len(leadRecords), len(follRecords), followerLog.HighWatermark(), followerOffsets)
 	}
+
 	for i := range leadRecords {
-		if string(leadRecords[i].Value) != string(follRecords[i].Value) || leadRecords[i].Offset != follRecords[i].Offset {
+		if !bytes.Equal(leadRecords[i].Value, follRecords[i].Value) || leadRecords[i].Offset != follRecords[i].Offset {
 			t.Fatalf("mismatched record at %d: leader=%s follower=%s", i, leadRecords[i].Value, follRecords[i].Value)
 		}
 	}
@@ -612,6 +710,7 @@ func offsetsOf(recs []api.Record) []api.Offset {
 	for _, r := range recs {
 		res = append(res, r.Offset)
 	}
+
 	return res
 }
 
@@ -620,6 +719,7 @@ func mustRead(ctx context.Context, log storage.Log) []api.Record {
 	if err != nil {
 		panic(err)
 	}
+
 	return recs
 }
 
@@ -628,13 +728,16 @@ func freeTCPAddr(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+
 	addr := l.Addr().String()
 	_ = l.Close()
+
 	return addr
 }
 
 func waitForLeaderCtrl(t *testing.T, ctrls []*controller.RaftController) *controller.RaftController {
 	t.Helper()
+
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, c := range ctrls {
@@ -642,17 +745,22 @@ func waitForLeaderCtrl(t *testing.T, ctrls []*controller.RaftController) *contro
 				return c
 			}
 		}
+
 		time.Sleep(20 * time.Millisecond)
 	}
+
 	t.Fatalf("leader not elected")
+
 	return nil
 }
 
 func waitForClusterMeta(t *testing.T, ctrls []*controller.RaftController, parts int) {
 	t.Helper()
+
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		ok := true
+
 		for _, c := range ctrls {
 			meta, _ := c.GetClusterMetadata(context.Background())
 			if len(meta.Partitions) != parts {
@@ -660,11 +768,14 @@ func waitForClusterMeta(t *testing.T, ctrls []*controller.RaftController, parts 
 				break
 			}
 		}
+
 		if ok {
 			return
 		}
+
 		time.Sleep(20 * time.Millisecond)
 	}
+
 	t.Fatalf("metadata did not converge")
 }
 
@@ -674,17 +785,21 @@ func contains(list []int, id int) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
 func waitUntil(t *testing.T, pred func() bool, timeout time.Duration) bool {
 	t.Helper()
+
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if pred() {
 			return true
 		}
+
 		time.Sleep(20 * time.Millisecond)
 	}
+
 	return false
 }

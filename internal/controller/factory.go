@@ -14,6 +14,7 @@ func NewController(cfg api.BrokerConfig, topics map[string]metadata.TopicState) 
 	if mode == "" {
 		mode = "single"
 	}
+
 	switch mode {
 	case "single":
 		return NewSingleNodeController(cfg, topics)
@@ -22,11 +23,13 @@ func NewController(cfg api.BrokerConfig, topics map[string]metadata.TopicState) 
 		if err != nil {
 			return nil, err
 		}
+
 		initial := api.ClusterMetadata{
 			ClusterID: clusterID,
 			Version:   1,
 			Brokers:   brokers,
 		}
+
 		return NewRaftController(cfg, initial, cfg.RaftDir)
 	default:
 		return nil, fmt.Errorf("unknown controller mode: %s", cfg.ControllerMode)

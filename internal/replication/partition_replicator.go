@@ -58,6 +58,7 @@ func (p *PartitionReplicator) Run(ctx context.Context) error {
 	if p.rep == nil {
 		return nil
 	}
+
 	if p.nextOffset == 0 {
 		if prov, ok := p.sink.(OffsetProvider); ok {
 			if off, err := prov.NextOffset(); err == nil {
@@ -67,12 +68,14 @@ func (p *PartitionReplicator) Run(ctx context.Context) error {
 			}
 		}
 	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
+
 		fetchResp, err := p.rep.FetchFromLeader(ctx, p.leader, FetchRequest{
 			Topic:     p.topic,
 			Partition: p.part,
@@ -82,22 +85,27 @@ func (p *PartitionReplicator) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+
 		if fetchResp.Error != api.ErrNone {
 			return fmt.Errorf("fetch error: %v", fetchResp.Error)
 		}
+
 		nextOffset := p.nextOffset
 		if fetchResp.HighWatermark+1 < nextOffset || nextOffset == 0 {
 			nextOffset = fetchResp.HighWatermark + 1
 		}
+
 		if aligner, ok := p.sink.(HighWatermarkAligner); ok {
 			next, err := aligner.EnsureLeaderHighWatermark(ctx, fetchResp.HighWatermark)
 			if err != nil {
 				return err
 			}
+
 			if nextOffset == 0 || next < nextOffset {
 				nextOffset = next
 			}
 		}
+
 		p.nextOffset = nextOffset
 		if len(fetchResp.Records) == 0 {
 			if p.Interval > 0 {
@@ -107,12 +115,15 @@ func (p *PartitionReplicator) Run(ctx context.Context) error {
 				case <-time.After(p.Interval):
 				}
 			}
+
 			continue
 		}
+
 		lastApplied, err := p.sink.ApplyBatch(ctx, fetchResp.Records, fetchResp.HighWatermark)
 		if err != nil {
 			return err
 		}
+
 		p.nextOffset = lastApplied + 1
 	}
 }

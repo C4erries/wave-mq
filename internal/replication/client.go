@@ -26,11 +26,14 @@ func NewBinaryReplicator() *BinaryReplicator {
 // FetchFromLeader connects to the leader broker and issues a Fetch request via the binary protocol.
 func (r *BinaryReplicator) FetchFromLeader(ctx context.Context, leader api.BrokerInfo, req FetchRequest) (FetchResponse, error) {
 	var resp FetchResponse
+
 	addr := leader.Host
 	if !strings.Contains(addr, ":") && leader.Port != 0 {
 		addr = fmt.Sprintf("%s:%d", addr, leader.Port)
 	}
+
 	dialer := &net.Dialer{Timeout: r.DialTimeout}
+
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return resp, err
@@ -50,29 +53,37 @@ func (r *BinaryReplicator) FetchFromLeader(ctx context.Context, leader api.Broke
 	if err != nil {
 		return resp, err
 	}
+
 	frame, err := netproto.EncodeRequestFrame(api.APIKeyFetch, 1, payload)
 	if err != nil {
 		return resp, err
 	}
+
 	if _, err := conn.Write(frame); err != nil {
 		return resp, err
 	}
+
 	apiKey, _, payloadResp, err := netproto.DecodeResponseFrame(conn)
 	if err != nil {
 		return resp, err
 	}
+
 	if apiKey != api.APIKeyFetch {
 		return resp, fmt.Errorf("unexpected api key %d in response", apiKey)
 	}
+
 	fr, err := netproto.DecodeFetchResponse(payloadResp)
 	if err != nil {
 		return resp, err
 	}
+
 	resp.Error = fr.Error
 	if fr.Error != api.ErrNone {
 		return resp, fmt.Errorf("leader returned %d", fr.Error)
 	}
+
 	resp.Records = fr.Records
 	resp.HighWatermark = fr.HighWatermark
+
 	return resp, nil
 }

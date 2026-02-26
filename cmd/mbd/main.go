@@ -31,8 +31,9 @@ import (
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
-	var readyFlag atomic.Bool
+
 	var (
+		readyFlag         atomic.Bool
 		dataDir           = flag.String("data-dir", "data", "path to broker data directory")
 		binaryAddr        = flag.String("bind", ":7912", "address for binary protocol listener")
 		mqttAddr          = flag.String("mqtt", ":1883", "address for MQTT listener")
@@ -48,6 +49,7 @@ func main() {
 		raftPeers         = flag.String("raft-peer", "", "comma-separated list of raft peer addresses")
 		enableReplication = flag.Bool("replication", false, "enable follower replication (experimental)")
 	)
+
 	flag.Parse()
 
 	cfg := api.BrokerConfig{
@@ -67,25 +69,31 @@ func main() {
 	if *raftPeers != "" {
 		cfg.RaftPeers = strings.Split(*raftPeers, ",")
 	}
+
 	if *retentionHours > 0 {
 		cfg.RetentionTime = time.Duration(*retentionHours) * time.Hour
 	}
+
 	if cfg.ControllerMode == "raft" {
 		if cfg.RaftBindAddr == "" {
 			logger.Error("raft controller mode requires -raft-bind")
 			os.Exit(1)
 		}
+
 		if len(cfg.RaftPeers) == 0 {
 			logger.Error("raft controller mode requires at least one -raft-peer (including self)")
 			os.Exit(1)
 		}
+
 		inPeers := false
+
 		for _, peer := range cfg.RaftPeers {
 			if peer == cfg.RaftBindAddr {
 				inPeers = true
 				break
 			}
 		}
+
 		if !inPeers {
 			logger.Warn("raft-bind not present in raft-peer list", "bind", cfg.RaftBindAddr)
 		}
@@ -114,22 +122,26 @@ func main() {
 		logger.Error("metadata store init failed", "err", err)
 		os.Exit(1)
 	}
+
 	recoveredTopics, err := metadataStore.RecoverTopics(context.Background())
 	if err != nil {
 		logger.Error("metadata recover failed", "err", err)
 		os.Exit(1)
 	}
+
 	ctrl, err := controller.NewController(cfg, recoveredTopics.Topics)
 	if err != nil {
 		logger.Error("controller init failed", "err", err)
 		os.Exit(1)
 	}
+
 	logger.Info("controller initialized", "mode", cfg.ControllerMode)
 
 	brokerHost := cfg.AdvertisedAddr
 	if brokerHost == "" {
 		brokerHost = cfg.BinaryAddr
 	}
+
 	bInfo := api.BrokerInfo{
 		BrokerID: cfg.BrokerID,
 		Host:     brokerHost,
@@ -138,6 +150,7 @@ func main() {
 		logger.Error("broker registration failed", "err", err)
 		os.Exit(1)
 	}
+
 	logger.Info("broker registered in controller", "brokerID", bInfo.BrokerID, "host", bInfo.Host)
 
 	metaSnapshot, err := ctrl.GetClusterMetadata(context.Background())
@@ -145,6 +158,7 @@ func main() {
 		logger.Error("cluster metadata fetch failed", "err", err)
 		os.Exit(1)
 	}
+
 	logger.Info("fetched initial cluster metadata", "version", metaSnapshot.Version, "partitions", len(metaSnapshot.Partitions))
 
 	offsetStore, err := broker.NewOffsetStore(cfg.DataDir)
@@ -164,6 +178,7 @@ func main() {
 		logger.Error("netproto init failed", "err", err)
 		os.Exit(1)
 	}
+
 	mqttServer, err := mqtt.NewServer(cfg.MQTTAddr, b)
 	if err != nil {
 		logger.Error("mqtt init failed", "err", err)
@@ -177,11 +192,14 @@ func main() {
 		logger.Error("cluster metadata watcher init failed", "err", err)
 		os.Exit(1)
 	}
+
 	if cfg.Replication {
 		rep := replication.NewBinaryReplicator()
 		replMgr := replication.NewManager(cfg, store, ctrl, rep)
+
 		go func() {
 			logger.Info("replication manager starting", "mode", cfg.ControllerMode)
+
 			if err := replMgr.Run(ctx); err != nil && err != context.Canceled {
 				logger.Error("replication manager stopped", "err", err)
 				cancel()
@@ -190,6 +208,7 @@ func main() {
 	}
 
 	ready := func() bool { return readyFlag.Load() }
+
 	go func() {
 		apiHandler := httpapi.New(b, cfg, ctrl)
 		if err := observability.StartHTTPServer(ctx, cfg.HTTPAddr, ready, apiHandler.Register, nil); err != nil {
@@ -214,6 +233,7 @@ func main() {
 			cancel()
 		}
 	}()
+
 	readyFlag.Store(true)
 
 	waitForSignal()
@@ -237,20 +257,26 @@ func registerBrokerWithRaft(ctx context.Context, logger *slog.Logger, ctrl contr
 	if cfg.ControllerMode != "raft" {
 		return ctrl.RegisterBroker(ctx, info)
 	}
+
 	type raftStatus interface {
 		ControllerMode() string
 		RaftState() string
 		RaftLeader() string
 	}
+
 	rs, ok := ctrl.(raftStatus)
 	if !ok {
 		return ctrl.RegisterBroker(ctx, info)
 	}
+
 	deadline := time.Now().Add(30 * time.Second)
+
 	var lastErr error
+
 	for time.Now().Before(deadline) {
 		state := strings.ToLower(rs.RaftState())
 		leaderAddr := rs.RaftLeader()
+
 		switch state {
 		case "leader":
 			if err := ctrl.RegisterBroker(ctx, info); err != nil {
@@ -269,11 +295,14 @@ func registerBrokerWithRaft(ctx context.Context, logger *slog.Logger, ctrl contr
 				}
 			}
 		}
+
 		time.Sleep(500 * time.Millisecond)
 	}
+
 	if lastErr == nil {
 		lastErr = fmt.Errorf("broker registration timed out waiting for raft leader")
 	}
+
 	return lastErr
 }
 
@@ -282,6 +311,7 @@ func postRegisterBrokerToLeader(ctx context.Context, logger *slog.Logger, leader
 	if err != nil {
 		return fmt.Errorf("invalid raft leader address %q: %w", leaderAddr, err)
 	}
+
 	port := ""
 	if strings.HasPrefix(localHTTP, ":") {
 		port = localHTTP[1:]
@@ -291,9 +321,11 @@ func postRegisterBrokerToLeader(ctx context.Context, logger *slog.Logger, leader
 			port = p
 		}
 	}
+
 	if port == "" {
 		return fmt.Errorf("cannot derive http port from %q", localHTTP)
 	}
+
 	url := fmt.Sprintf("http://%s:%s/api/controller/brokers", host, port)
 	payload := struct {
 		BrokerID int    `json:"brokerID"`
@@ -304,23 +336,30 @@ func postRegisterBrokerToLeader(ctx context.Context, logger *slog.Logger, leader
 		Host:     info.Host,
 		Port:     info.Port,
 	}
+
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
+
 	req.Header.Set("Content-Type", "application/json")
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("leader register broker http status %d", resp.StatusCode)
 	}
+
 	logger.Info("broker registered via raft leader", "leader", host, "brokerID", info.BrokerID)
+
 	return nil
 }

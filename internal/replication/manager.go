@@ -42,10 +42,12 @@ func (m *Manager) Run(ctx context.Context) error {
 	if m.ctrl == nil || m.repl == nil || m.store == nil {
 		return fmt.Errorf("replication manager missing dependencies")
 	}
+
 	updates, err := m.ctrl.WatchClusterMetadata(ctx, 0)
 	if err != nil {
 		return err
 	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -56,6 +58,7 @@ func (m *Manager) Run(ctx context.Context) error {
 				m.stopAll()
 				return nil
 			}
+
 			m.applyMetadata(ctx, meta)
 		}
 	}
@@ -63,6 +66,7 @@ func (m *Manager) Run(ctx context.Context) error {
 
 func (m *Manager) applyMetadata(ctx context.Context, meta api.ClusterMetadata) {
 	desired := make(map[string]api.PartitionAssignment)
+
 	for _, p := range meta.Partitions {
 		if containsInt(p.Replicas, m.cfg.BrokerID) && p.Leader != m.cfg.BrokerID {
 			key := fmt.Sprintf("%s:%d", p.Topic, p.Partition)
@@ -86,13 +90,16 @@ func (m *Manager) applyMetadata(ctx context.Context, meta api.ClusterMetadata) {
 		if _, ok := m.running[key]; ok {
 			continue
 		}
+
 		leaderInfo := findBroker(meta.Brokers, p.Leader)
 		if leaderInfo == nil {
 			continue
 		}
+
 		ctxRep, cancel := context.WithCancel(ctx)
 		sink := NewWALSink(m.store, p.Topic, p.Partition)
 		sink = NewReportingSink(sink, m.ctrl, p.Topic, p.Partition, m.cfg.BrokerID)
+
 		pr := NewPartitionReplicator(m.repl, *leaderInfo, p.Topic, p.Partition, sink)
 		go func(repKey string, assign api.PartitionAssignment) {
 			_ = pr.Run(ctxRep)
@@ -103,6 +110,7 @@ func (m *Manager) applyMetadata(ctx context.Context, meta api.ClusterMetadata) {
 			}
 			m.mu.Unlock()
 		}(key, p)
+
 		m.running[key] = runningReplicator{cancel: cancel, assignment: p}
 	}
 }
@@ -110,6 +118,7 @@ func (m *Manager) applyMetadata(ctx context.Context, meta api.ClusterMetadata) {
 func (m *Manager) stopAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	for key, running := range m.running {
 		running.cancel()
 		delete(m.running, key)
@@ -120,6 +129,7 @@ func sameAssignment(a, b api.PartitionAssignment) bool {
 	if a.Topic != b.Topic || a.Partition != b.Partition || a.Leader != b.Leader {
 		return false
 	}
+
 	return slices.Equal(a.Replicas, b.Replicas)
 }
 
@@ -130,6 +140,7 @@ func findBroker(list []api.BrokerInfo, id int) *api.BrokerInfo {
 			return &cp
 		}
 	}
+
 	return nil
 }
 
@@ -139,5 +150,6 @@ func containsInt(list []int, id int) bool {
 			return true
 		}
 	}
+
 	return false
 }

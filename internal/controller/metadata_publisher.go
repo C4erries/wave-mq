@@ -48,6 +48,7 @@ func (p *metadataPublisher) publish(meta api.ClusterMetadata) {
 		if meta.Version <= w.lastSent.Load() {
 			continue
 		}
+
 		if !w.send(meta) {
 			p.removeWatcher(w)
 		}

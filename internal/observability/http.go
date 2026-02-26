@@ -17,6 +17,7 @@ func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool, ex
 	if addr == "" {
 		return fmt.Errorf("http addr is required")
 	}
+
 	if readyFunc == nil {
 		readyFunc = func() bool { return true }
 	}
@@ -27,8 +28,10 @@ func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool, ex
 		if readyFunc() {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("ok"))
+
 			return
 		}
+
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("not ready"))
 	})
@@ -37,6 +40,7 @@ func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool, ex
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
 	if extra != nil {
 		extra(mux)
 	}
@@ -48,10 +52,12 @@ func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool, ex
 	}
 
 	errCh := make(chan error, 1)
+
 	go func() {
 		if onStarted != nil {
 			onStarted()
 		}
+
 		errCh <- srv.ListenAndServe()
 	}()
 
@@ -59,12 +65,15 @@ func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool, ex
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
 		_ = srv.Shutdown(shutdownCtx)
+
 		return nil
 	case err := <-errCh:
 		if err == http.ErrServerClosed {
 			return nil
 		}
+
 		return err
 	}
 }

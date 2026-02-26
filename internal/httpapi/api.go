@@ -11,12 +11,13 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/c4erries/wave-mq/internal/broker"
 	"github.com/c4erries/wave-mq/internal/controller"
 	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/pkg/api"
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 )
 
 type Handler struct {
@@ -59,14 +60,17 @@ func (h *Handler) handleControllerStatus(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+
 	mode := h.cfg.ControllerMode
 	if mode == "" {
 		mode = "single"
 	}
+
 	raftState := "none"
 	term := uint64(0)
 	peers := []controller.PeerInfo{}
 	leader := ""
+
 	if rc, ok := h.ctrl.(interface {
 		ControllerMode() string
 		RaftState() string
@@ -78,15 +82,18 @@ func (h *Handler) handleControllerStatus(w http.ResponseWriter, r *http.Request)
 		term = rc.RaftTerm()
 		peers = rc.RaftPeers()
 	}
+
 	if rl, ok := h.ctrl.(interface {
 		RaftLeader() string
 	}); ok {
 		leader = rl.RaftLeader()
 	}
+
 	meta, _ := h.ctrl.GetClusterMetadata(r.Context())
 	if h.ctrl == nil {
 		meta = api.ClusterMetadata{}
 	}
+
 	resp := map[string]interface{}{
 		"mode":      mode,
 		"raftState": raftState,
@@ -104,10 +111,12 @@ func (h *Handler) handleControllerRegisterBroker(w http.ResponseWriter, r *http.
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+
 	if h.ctrl == nil {
 		http.Error(w, "controller not configured", http.StatusInternalServerError)
 		return
 	}
+
 	var req struct {
 		BrokerID int    `json:"brokerID"`
 		Host     string `json:"host"`
@@ -117,10 +126,12 @@ func (h *Handler) handleControllerRegisterBroker(w http.ResponseWriter, r *http.
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
+
 	if req.BrokerID == 0 || req.Host == "" {
 		http.Error(w, "brokerID and host required", http.StatusBadRequest)
 		return
 	}
+
 	info := api.BrokerInfo{
 		BrokerID: req.BrokerID,
 		Host:     req.Host,
@@ -130,6 +141,7 @@ func (h *Handler) handleControllerRegisterBroker(w http.ResponseWriter, r *http.
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -138,15 +150,18 @@ func (h *Handler) handleClusterMetadata(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+
 	if h.ctrl == nil {
 		http.Error(w, "controller not configured", http.StatusInternalServerError)
 		return
 	}
+
 	meta, err := h.ctrl.GetClusterMetadata(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
 	writeJSON(w, meta)
 }
 
@@ -155,6 +170,7 @@ func (h *Handler) handleSummary(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+
 	topics, partitions := h.b.TopicAndPartitionCounts()
 	produced := sumCounter("wavemq_messages_produced_total")
 	consumed := sumCounter("wavemq_messages_consumed_total")
@@ -174,6 +190,7 @@ func (h *Handler) handleTopics(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+
 	switch r.Method {
 	case http.MethodGet:
 		topics := h.b.TopicsSnapshot()
@@ -191,20 +208,24 @@ func (h *Handler) handleTopicPaths(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+
 	name := parts[0]
 	if len(parts) == 1 {
 		h.topicDetail(w, r, name)
 		return
 	}
+
 	if len(parts) == 3 && parts[1] == "partitions" && parts[2] != "" && strings.HasSuffix(r.URL.Path, "/messages") {
 		// Will be handled by next branch.
 	}
+
 	if len(parts) == 4 && parts[1] == "partitions" && parts[3] == "messages" {
 		pid, err := strconv.Atoi(parts[2])
 		if err != nil {
 			http.Error(w, "invalid partition id", http.StatusBadRequest)
 			return
 		}
+
 		switch r.Method {
 		case http.MethodGet:
 			h.partitionMessages(w, r, name, pid)
@@ -213,8 +234,10 @@ func (h *Handler) handleTopicPaths(w http.ResponseWriter, r *http.Request) {
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
+
 		return
 	}
+
 	http.NotFound(w, r)
 }
 
@@ -224,6 +247,7 @@ func (h *Handler) topicDetail(w http.ResponseWriter, r *http.Request, name strin
 		http.NotFound(w, r)
 		return
 	}
+
 	writeJSON(w, detail)
 }
 
@@ -232,8 +256,10 @@ func (h *Handler) partitionMessages(w http.ResponseWriter, r *http.Request, topi
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+
 	q := r.URL.Query()
 	limit := 50
+
 	if l := q.Get("limit"); l != "" {
 		if v, err := strconv.Atoi(l); err == nil && v > 0 {
 			limit = v
@@ -242,7 +268,9 @@ func (h *Handler) partitionMessages(w http.ResponseWriter, r *http.Request, topi
 			return
 		}
 	}
+
 	offsetParam := q.Get("offset")
+
 	_, msgs, err := h.b.FetchMessages(r.Context(), topic, partition, offsetParam, limit)
 	if err != nil {
 		var nle broker.NotLeaderError
@@ -255,12 +283,14 @@ func (h *Handler) partitionMessages(w http.ResponseWriter, r *http.Request, topi
 				"topic":          topic,
 				"partition":      partition,
 			})
+
 			return
 		default:
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
+
 	var resp []map[string]interface{}
 	for _, m := range msgs {
 		resp = append(resp, map[string]interface{}{
@@ -275,6 +305,7 @@ func (h *Handler) partitionMessages(w http.ResponseWriter, r *http.Request, topi
 	sort.Slice(resp, func(i, j int) bool {
 		oi := resp[i]["offset"].(int64)
 		oj := resp[j]["offset"].(int64)
+
 		return oi > oj
 	})
 	writeJSON(w, resp)
@@ -285,6 +316,7 @@ func (h *Handler) handleConsumers(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+
 	groups := h.b.ConsumerGroupsSnapshot(r.Context())
 	writeJSON(w, groups)
 }
@@ -299,24 +331,31 @@ func (h *Handler) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
+
 	if req.Name == "" || req.Partitions < 1 {
 		http.Error(w, "name required and partitions>=1", http.StatusBadRequest)
 		return
 	}
+
 	cfg := api.TopicConfig{
 		Partitions:        req.Partitions,
 		ReplicationFactor: req.ReplicationFactor,
 	}
+
 	ctx := r.Context()
 	if err := h.b.CreateTopic(ctx, req.Name, cfg); err != nil {
 		if errors.Is(err, broker.ErrTopicExists) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
+
 		http.Error(w, err.Error(), http.StatusBadRequest)
+
 		return
 	}
+
 	detail, _ := h.b.TopicDetail(req.Name)
+
 	w.WriteHeader(http.StatusCreated)
 	writeJSON(w, detail)
 }
@@ -326,6 +365,7 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+
 	var req struct {
 		Key   *string `json:"key"`
 		Value string  `json:"value"`
@@ -334,10 +374,12 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
+
 	if req.Value == "" {
 		http.Error(w, "value is required", http.StatusBadRequest)
 		return
 	}
+
 	rec := api.Record{
 		Timestamp: time.Now().UTC(),
 		Value:     []byte(req.Value),
@@ -345,12 +387,15 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 	if req.Key != nil {
 		rec.Key = []byte(*req.Key)
 	}
+
 	base, err := h.b.Produce(r.Context(), topic, partition, []api.Record{rec})
 	if err != nil {
 		switch {
 		case errors.As(err, &broker.NotLeaderError{}):
 			var nle broker.NotLeaderError
+
 			_ = errors.As(err, &nle)
+
 			w.WriteHeader(http.StatusConflict)
 			writeJSON(w, map[string]interface{}{
 				"error":          "not_leader",
@@ -358,6 +403,7 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 				"topic":          topic,
 				"partition":      partition,
 			})
+
 			return
 		case errors.Is(err, broker.ErrTopicNotFound), errors.Is(err, broker.ErrPartitionNotFound):
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -367,6 +413,7 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 			return
 		}
 	}
+
 	writeJSON(w, map[string]interface{}{
 		"partition":  partition,
 		"baseOffset": base,
@@ -377,9 +424,11 @@ func encodeMaybeBase64(b []byte) interface{} {
 	if len(b) == 0 {
 		return ""
 	}
+
 	if utf8.Valid(b) {
 		return string(b)
 	}
+
 	return "base64:" + base64.StdEncoding.EncodeToString(b)
 }
 
@@ -389,6 +438,7 @@ func containsInt(list []int, id int) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -402,17 +452,21 @@ func withCORS(h http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+
 		h.ServeHTTP(w, r)
 	})
 }
 
 func sumCounter(metricName string) float64 {
 	var total float64
+
 	metricCh := make(chan prometheus.Metric, 10)
+
 	go func() {
 		switch metricName {
 		case "wavemq_messages_produced_total":
@@ -422,13 +476,16 @@ func sumCounter(metricName string) float64 {
 		case "wavemq_request_errors_total":
 			observability.RequestErrors.Collect(metricCh)
 		}
+
 		close(metricCh)
 	}()
+
 	for m := range metricCh {
 		var dtoMetric dto.Metric
 		if err := m.Write(&dtoMetric); err == nil && dtoMetric.Counter != nil {
 			total += dtoMetric.Counter.GetValue()
 		}
 	}
+
 	return total
 }

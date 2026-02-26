@@ -27,9 +27,11 @@ func NewWALSink(store *storage.Manager, topic string, part int) Sink {
 func (s *walSink) EnsureLeaderHighWatermark(ctx context.Context, leaderHighWatermark api.Offset) (api.Offset, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if err := s.ensureLogLocked(); err != nil {
 		return -1, err
 	}
+
 	return s.log.HighWatermark() + 1, nil
 }
 
@@ -37,6 +39,7 @@ func (s *walSink) ensureLogLocked() error {
 	if s.log != nil {
 		return nil
 	}
+
 	log, err := s.store.OpenLog(storage.LogOptions{
 		Topic:     s.topic,
 		Partition: s.part,
@@ -44,7 +47,9 @@ func (s *walSink) ensureLogLocked() error {
 	if err != nil {
 		return err
 	}
+
 	s.log = log
+
 	return nil
 }
 
@@ -52,22 +57,28 @@ func (s *walSink) ensureLogLocked() error {
 func (s *walSink) NextOffset() (api.Offset, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if err := s.ensureLogLocked(); err != nil {
 		return -1, err
 	}
+
 	return s.log.HighWatermark() + 1, nil
 }
 
 func (s *walSink) ApplyBatch(ctx context.Context, records []api.Record, highWatermark api.Offset) (api.Offset, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if err := s.ensureLogLocked(); err != nil {
 		return -1, err
 	}
+
 	base, err := s.log.AppendBatch(ctx, records)
 	if err != nil {
 		return -1, err
 	}
+
 	last := base + api.Offset(len(records)) - 1
+
 	return last, nil
 }

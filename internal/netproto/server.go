@@ -40,9 +40,11 @@ func NewServer(addr string, broker BrokerAPI) (*Server, error) {
 	if broker == nil {
 		return nil, fmt.Errorf("broker is required")
 	}
+
 	if addr == "" {
 		return nil, fmt.Errorf("addr is required")
 	}
+
 	return &Server{addr: addr, broker: broker}, nil
 }
 
@@ -53,6 +55,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		s.mu.Unlock()
 		return fmt.Errorf("server already started")
 	}
+
 	s.started = true
 	s.mu.Unlock()
 
@@ -61,11 +64,14 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		s.mu.Lock()
 		s.started = false
 		s.mu.Unlock()
+
 		return err
 	}
+
 	s.mu.Lock()
 	s.ln = ln
 	s.mu.Unlock()
+
 	defer func() {
 		s.mu.Lock()
 		s.ln = nil
@@ -75,6 +81,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
+
 		_ = ln.Close()
 	}()
 
@@ -86,8 +93,10 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 				return nil
 			default:
 			}
+
 			return err
 		}
+
 		go s.handleConnection(conn)
 	}
 }
@@ -97,9 +106,11 @@ func (s *Server) Close() error {
 	s.mu.RLock()
 	ln := s.ln
 	s.mu.RUnlock()
+
 	if ln != nil {
 		return ln.Close()
 	}
+
 	return nil
 }
 
@@ -108,18 +119,23 @@ func (s *Server) Addr() net.Addr {
 	s.mu.RLock()
 	ln := s.ln
 	s.mu.RUnlock()
+
 	if ln == nil {
 		return nil
 	}
+
 	addr := ln.Addr()
+
 	tcp, ok := addr.(*net.TCPAddr)
 	if !ok {
 		return addr
 	}
+
 	copied := *tcp
 	if tcp.IP != nil {
 		copied.IP = append(net.IP(nil), tcp.IP...)
 	}
+
 	return &copied
 }
 
@@ -131,25 +147,31 @@ type frame struct {
 
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
+
 	for {
 		apiKey, corr, payload, err := decodeRequestFrame(conn)
 		if err != nil {
 			if err == io.EOF {
 				return
 			}
+
 			observability.RequestErrors.WithLabelValues("netproto", "decode_frame").Inc()
+
 			return
 		}
+
 		respPayload, err := s.dispatch(conn, apiKey, payload)
 		if err != nil {
 			observability.RequestErrors.WithLabelValues("netproto", "encode_response").Inc()
 			return
 		}
+
 		frame, err := encodeResponseFrame(apiKey, corr, respPayload)
 		if err != nil {
 			observability.RequestErrors.WithLabelValues("netproto", "encode_response").Inc()
 			return
 		}
+
 		if _, err := conn.Write(frame); err != nil {
 			return
 		}
@@ -158,6 +180,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]byte, error) {
 	ctx := context.Background()
+
 	switch apiKey {
 	case api.APIKeyCreateTopic:
 		req, err := decodeCreateTopicRequest(payload)
@@ -165,12 +188,16 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
 			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
 		}
+
 		err = s.broker.CreateTopic(ctx, req.Topic, api.TopicConfig{Partitions: req.Partitions, ReplicationFactor: req.ReplicationFactor})
+
 		resp := &CreateTopicResponse{}
 		if err != nil {
 			resp.Error = mapError(err)
+
 			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 		}
+
 		return encodeCreateTopicResponse(resp)
 	case api.APIKeyProduce:
 		req, err := decodeProduceRequest(payload)
@@ -178,12 +205,16 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
 			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
 		}
+
 		base, err := s.broker.Produce(ctx, req.Topic, req.Partition, req.Records)
+
 		resp := &ProduceResponse{BaseOffset: base}
 		if err != nil {
 			resp.Error = mapError(err)
+
 			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 		}
+
 		return encodeProduceResponse(resp)
 	case api.APIKeyFetch:
 		req, err := decodeFetchRequest(payload)
@@ -191,10 +222,13 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
 			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
 		}
+
 		recs, err := s.broker.Fetch(ctx, req.Topic, req.Partition, req.Offset, req.MaxBytes)
+
 		resp := &FetchResponse{Records: recs}
 		if err != nil {
 			resp.Error = mapError(err)
+
 			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 		} else {
 			_, latest, offErr := s.broker.ListOffsets(ctx, req.Topic, req.Partition)
@@ -202,6 +236,7 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 				resp.HighWatermark = latest
 			}
 		}
+
 		return encodeFetchResponse(resp)
 	case api.APIKeyMetadata:
 		req, err := decodeMetadataRequest(payload)
@@ -209,12 +244,16 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
 			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
 		}
+
 		md, err := s.broker.Metadata(ctx, req.Topics)
+
 		resp := &MetadataResponse{Partitions: md}
 		if err != nil {
 			resp.Error = mapError(err)
+
 			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 		}
+
 		return encodeMetadataResponse(resp)
 	case api.APIKeyPing:
 		req, err := decodePingRequest(payload)
@@ -222,7 +261,9 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
 			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
 		}
+
 		_ = req
+
 		return encodePingResponse(&PingResponse{Error: api.ErrNone})
 	case api.APIKeyCommitOffset:
 		req, err := decodeCommitOffsetRequest(payload)
@@ -230,11 +271,14 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
 			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
 		}
+
 		resp := &CommitOffsetResponse{}
 		if err := s.broker.CommitOffset(ctx, req.Group, req.Topic, req.Partition, req.Offset); err != nil {
 			resp.Error = mapError(err)
+
 			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 		}
+
 		return encodeCommitOffsetResponse(resp)
 	case api.APIKeyFetchCommitted:
 		req, err := decodeFetchCommittedRequest(payload)
@@ -242,12 +286,16 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
 			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
 		}
+
 		offset, err := s.broker.FetchCommitted(ctx, req.Group, req.Topic, req.Partition)
+
 		resp := &FetchCommittedResponse{Offset: offset}
 		if err != nil {
 			resp.Error = mapError(err)
+
 			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 		}
+
 		return encodeFetchCommittedResponse(resp)
 	case api.APIKeyListOffsets:
 		req, err := decodeListOffsetsRequest(payload)
@@ -255,12 +303,16 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
 			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
 		}
+
 		earliest, latest, err := s.broker.ListOffsets(ctx, req.Topic, req.Partition)
+
 		resp := &ListOffsetsResponse{Earliest: earliest, Latest: latest}
 		if err != nil {
 			resp.Error = mapError(err)
+
 			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 		}
+
 		return encodeListOffsetsResponse(resp)
 	default:
 		return nil, fmt.Errorf("unknown api key %d", apiKey)

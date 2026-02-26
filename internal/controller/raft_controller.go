@@ -48,7 +48,9 @@ func encodeCommand(cmd raftCommand) ([]byte, error) {
 
 func decodeCommand(b []byte) (raftCommand, error) {
 	var cmd raftCommand
+
 	err := json.Unmarshal(b, &cmd)
+
 	return cmd, err
 }
 
@@ -68,15 +70,18 @@ func (f *raftMetadataFSM) Apply(l *raft.Log) interface{} {
 	if err != nil {
 		return err
 	}
+
 	f.mu.Lock()
 	startVersion := f.meta.Version
 	changed := false
+
 	switch cmd.Type {
 	case cmdAssignTopic:
 		partitions := cmd.TopicConfig.Partitions
 		if partitions <= 0 {
 			partitions = 1
 		}
+
 		newParts := assignTopicPartitions(f.cfg, f.meta.Brokers, cmd.Topic, partitions, cmd.TopicConfig.ReplicationFactor, f.meta.Partitions)
 		f.meta.Partitions = append(f.meta.Partitions, newParts...)
 		f.meta.Version++
@@ -91,6 +96,7 @@ func (f *raftMetadataFSM) Apply(l *raft.Log) interface{} {
 	default:
 		err = fmt.Errorf("unknown command type %d", cmd.Type)
 	}
+
 	meta := f.meta
 	changed = changed || meta.Version != startVersion
 	f.mu.Unlock()
@@ -98,26 +104,32 @@ func (f *raftMetadataFSM) Apply(l *raft.Log) interface{} {
 	if err == nil && changed && f.pub != nil {
 		f.pub.publish(meta)
 	}
+
 	return err
 }
 
 func (f *raftMetadataFSM) applyReplicaProgressLocked(topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) error {
 	idx := -1
+
 	for i, p := range f.meta.Partitions {
 		if p.Topic == topic && p.Partition == partition {
 			idx = i
 			break
 		}
 	}
+
 	if idx == -1 {
 		return fmt.Errorf("partition not found")
 	}
+
 	assign := f.meta.Partitions[idx]
 	if !contains(assign.Replicas, brokerID) {
 		return fmt.Errorf("broker %d not in replicas", brokerID)
 	}
+
 	shouldBeISR := lastOffset >= leaderHighWatermark
 	assign.ISR = ensureLeaderInISR(assign.Leader, assign.ISR)
+
 	inISR := contains(assign.ISR, brokerID)
 	switch {
 	case shouldBeISR && !inISR:
@@ -125,53 +137,67 @@ func (f *raftMetadataFSM) applyReplicaProgressLocked(topic string, partition int
 	case !shouldBeISR && inISR && brokerID != assign.Leader:
 		assign.ISR = remove(assign.ISR, brokerID)
 	}
+
 	f.meta.Partitions[idx] = assign
 	f.meta.Version++
+
 	return nil
 }
 
 func (f *raftMetadataFSM) applyRegisterBrokerLocked(info api.BrokerInfo) error {
 	updated := false
+
 	for i, b := range f.meta.Brokers {
 		if b.BrokerID == info.BrokerID {
 			if b.Host == info.Host && b.Port == info.Port && b.Rack == info.Rack {
 				return nil
 			}
+
 			f.meta.Brokers[i] = info
 			updated = true
+
 			break
 		}
 	}
+
 	if !updated {
 		f.meta.Brokers = append(f.meta.Brokers, info)
 	}
+
 	sort.Slice(f.meta.Brokers, func(i, j int) bool { return f.meta.Brokers[i].BrokerID < f.meta.Brokers[j].BrokerID })
 	f.meta.Version++
+
 	return nil
 }
 
 func (f *raftMetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	b, err := json.Marshal(f.meta)
 	if err != nil {
 		return nil, err
 	}
+
 	return &metadataSnapshot{data: b}, nil
 }
 
 func (f *raftMetadataFSM) Restore(r io.ReadCloser) error {
 	defer r.Close()
+
 	var meta api.ClusterMetadata
 	if err := json.NewDecoder(r).Decode(&meta); err != nil {
 		return err
 	}
+
 	f.mu.Lock()
 	f.meta = meta
 	f.mu.Unlock()
+
 	if f.pub != nil {
 		f.pub.publish(meta)
 	}
+
 	return nil
 }
 
@@ -184,6 +210,7 @@ func (s *metadataSnapshot) Persist(sink raft.SnapshotSink) error {
 		_ = sink.Cancel()
 		return err
 	}
+
 	return sink.Close()
 }
 
@@ -202,8 +229,11 @@ type RaftController struct {
 func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, raftDir string) (*RaftController, error) {
 	rCfg := raft.DefaultConfig()
 	useInmem := cfg.RaftBindAddr == "" || len(cfg.RaftPeers) == 0
-	var localAddr raft.ServerAddress
-	var localID raft.ServerID
+
+	var (
+		localAddr raft.ServerAddress
+		localID   raft.ServerID
+	)
 
 	if useInmem {
 		localID = raft.ServerID(fmt.Sprintf("broker-%d", cfg.BrokerID))
@@ -211,6 +241,7 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 		localAddr = raft.ServerAddress(cfg.RaftBindAddr)
 		localID = raft.ServerID(localAddr)
 	}
+
 	rCfg.LocalID = localID
 	rCfg.SnapshotInterval = 2 * time.Second
 	rCfg.SnapshotThreshold = 64
@@ -223,7 +254,9 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 	if err != nil {
 		return nil, err
 	}
+
 	var transport raft.Transport
+
 	if useInmem {
 		addr, inmem := raft.NewInmemTransport(raft.ServerAddress(rCfg.LocalID))
 		transport = inmem
@@ -233,6 +266,7 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 		if err != nil {
 			return nil, err
 		}
+
 		transport = tcpTransport
 		localAddr = raft.ServerAddress(cfg.RaftBindAddr)
 	}
@@ -241,6 +275,7 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 	if err != nil {
 		return nil, err
 	}
+
 	initial := initialMeta
 	if stored != nil {
 		initial = *stored
@@ -254,16 +289,20 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 	if err != nil {
 		return nil, err
 	}
+
 	if !hasState {
 		if len(cfg.RaftPeers) == 0 {
 			cfg.RaftPeers = []string{string(localAddr)}
 		}
+
 		config := raft.Configuration{
 			Servers: buildServers(cfg, rCfg.LocalID, localAddr),
 		}
+
 		if err := persistInitialMetadata(stableStore, initial); err != nil {
 			return nil, err
 		}
+
 		if err := raft.BootstrapCluster(rCfg, logStore, stableStore, snapStore, transport, config); err != nil && err != raft.ErrCantBootstrap {
 			return nil, err
 		}
@@ -271,10 +310,12 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 
 	pub := metadataPublisher{}
 	fsm := newRaftMetadataFSM(cfg, initial, &pub)
+
 	r, err := raft.NewRaft(rCfg, fsm, logStore, stableStore, snapStore, transport)
 	if err != nil {
 		return nil, err
 	}
+
 	return &RaftController{cfg: cfg, fsm: fsm, raft: r, pub: &pub, closers: closers}, nil
 }
 
@@ -283,18 +324,23 @@ func buildStores(raftDir string) (raft.LogStore, raft.StableStore, raft.Snapshot
 		store := raft.NewInmemStore()
 		return store, store, raft.NewInmemSnapshotStore(), nil, nil
 	}
+
 	if err := os.MkdirAll(raftDir, 0o755); err != nil {
 		return nil, nil, nil, nil, err
 	}
+
 	dbPath := filepath.Join(raftDir, "raft.bolt")
+
 	logStore, err := raftboltdb.NewBoltStore(dbPath)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+
 	snapStore, err := raft.NewFileSnapshotStore(raftDir, 2, io.Discard)
 	if err != nil {
 		return nil, nil, nil, []io.Closer{logStore}, err
 	}
+
 	return logStore, logStore, snapStore, []io.Closer{logStore}, nil
 }
 
@@ -304,10 +350,12 @@ func persistInitialMetadata(store raft.StableStore, meta api.ClusterMetadata) er
 	if store == nil {
 		return nil
 	}
+
 	b, err := json.Marshal(meta)
 	if err != nil {
 		return err
 	}
+
 	return store.Set(initialMetadataKey, b)
 }
 
@@ -315,33 +363,41 @@ func loadInitialMetadata(store raft.StableStore) (*api.ClusterMetadata, error) {
 	if store == nil {
 		return nil, nil
 	}
+
 	b, err := store.Get(initialMetadataKey)
 	if err != nil {
 		if errors.Is(err, raftboltdb.ErrKeyNotFound) || err.Error() == "not found" {
 			return nil, nil
 		}
+
 		return nil, err
 	}
+
 	if len(b) == 0 {
 		return nil, nil
 	}
+
 	var meta api.ClusterMetadata
 	if err := json.Unmarshal(b, &meta); err != nil {
 		return nil, err
 	}
+
 	return &meta, nil
 }
 
 func (c *RaftController) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
 	_ = ctx
+
 	c.fsm.mu.Lock()
 	defer c.fsm.mu.Unlock()
+
 	return c.fsm.meta, nil
 }
 
 func (c *RaftController) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
 	meta, _ := c.GetClusterMetadata(ctx)
 	ch := c.pub.watch(ctx, sinceVersion, meta)
+
 	return ch, nil
 }
 
@@ -350,6 +406,7 @@ func (c *RaftController) RegisterBroker(ctx context.Context, info api.BrokerInfo
 		Type:       cmdRegisterBroker,
 		BrokerInfo: &info,
 	}
+
 	return c.applyCommand(ctx, cmd)
 }
 
@@ -362,6 +419,7 @@ func (c *RaftController) AssignTopic(ctx context.Context, name string, cfg api.T
 	if err := c.applyCommand(ctx, cmd); err != nil {
 		return api.ClusterMetadata{}, err
 	}
+
 	return c.GetClusterMetadata(ctx)
 }
 
@@ -377,6 +435,7 @@ func (c *RaftController) ReportReplicaProgress(ctx context.Context, topic string
 	if err := c.applyCommand(ctx, cmd); err != nil {
 		return api.ClusterMetadata{}, err
 	}
+
 	return c.GetClusterMetadata(ctx)
 }
 
@@ -384,15 +443,19 @@ func (c *RaftController) applyCommand(ctx context.Context, cmd raftCommand) erro
 	if err := c.waitForLeader(ctx); err != nil {
 		return err
 	}
+
 	data, err := encodeCommand(cmd)
 	if err != nil {
 		return err
 	}
+
 	future := c.raft.Apply(data, time.Second*5)
 	done := make(chan error, 1)
+
 	go func() {
 		done <- future.Error()
 	}()
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -400,9 +463,11 @@ func (c *RaftController) applyCommand(ctx context.Context, cmd raftCommand) erro
 		if err != nil {
 			return err
 		}
+
 		if applyErr, ok := future.Response().(error); ok && applyErr != nil {
 			return applyErr
 		}
+
 		return nil
 	}
 }
@@ -411,9 +476,12 @@ func (c *RaftController) waitForLeader(ctx context.Context) error {
 	if c.raft.State() == raft.Leader {
 		return nil
 	}
+
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
+
 	timeout := time.After(5 * time.Second)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -432,6 +500,7 @@ func (c *RaftController) waitForLeader(ctx context.Context) error {
 func (c *RaftController) SnapshotDump() ([]byte, error) {
 	c.fsm.mu.Lock()
 	defer c.fsm.mu.Unlock()
+
 	return json.Marshal(c.fsm.meta)
 }
 
@@ -452,18 +521,22 @@ func (c *RaftController) RaftTerm() uint64 {
 	if termStr, ok := stats["term"]; ok {
 		var term uint64
 		fmt.Sscanf(termStr, "%d", &term)
+
 		return term
 	}
+
 	return 0
 }
 
 // RaftPeers returns peer ids and addresses.
 func (c *RaftController) RaftPeers() []PeerInfo {
 	servers := c.raft.GetConfiguration().Configuration().Servers
+
 	out := make([]PeerInfo, 0, len(servers))
 	for _, s := range servers {
 		out = append(out, PeerInfo{ID: string(s.ID), Address: string(s.Address)})
 	}
+
 	return out
 }
 
@@ -471,27 +544,34 @@ func (c *RaftController) RaftPeers() []PeerInfo {
 func (c *RaftController) Close() error {
 	f := c.raft.Shutdown()
 	err := f.Error()
+
 	for _, cl := range c.closers {
 		_ = cl.Close()
 	}
+
 	return err
 }
 
 func buildServers(cfg api.BrokerConfig, localID raft.ServerID, localAddr raft.ServerAddress) []raft.Server {
 	seen := make(map[raft.ServerID]struct{})
+
 	var servers []raft.Server
+
 	add := func(id raft.ServerID, addr raft.ServerAddress) {
 		if _, ok := seen[id]; ok {
 			return
 		}
+
 		seen[id] = struct{}{}
 		servers = append(servers, raft.Server{Suffrage: raft.Voter, ID: id, Address: addr})
 	}
 	add(localID, localAddr)
+
 	for _, peer := range cfg.RaftPeers {
 		id := raft.ServerID(peer)
 		addr := raft.ServerAddress(peer)
 		add(id, addr)
 	}
+
 	return servers
 }

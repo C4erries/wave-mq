@@ -10,11 +10,14 @@ import (
 
 func TestOffsetStoreRecover(t *testing.T) {
 	dir := t.TempDir()
+
 	store, err := NewOffsetStore(dir)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
+
 	ctx := context.Background()
+
 	commits := []struct {
 		group     string
 		topic     string
@@ -31,6 +34,7 @@ func TestOffsetStoreRecover(t *testing.T) {
 			t.Fatalf("append: %v", err)
 		}
 	}
+
 	store.Close()
 
 	store, err = NewOffsetStore(dir)
@@ -38,16 +42,20 @@ func TestOffsetStoreRecover(t *testing.T) {
 		t.Fatalf("reopen store: %v", err)
 	}
 	defer store.Close()
+
 	offsets, err := store.Recover(ctx)
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
+
 	if offsets["g1"]["t1"][0] != 2 {
 		t.Fatalf("expected last offset 2, got %d", offsets["g1"]["t1"][0])
 	}
+
 	if offsets["g1"]["t1"][1] != 5 {
 		t.Fatalf("expected offset 5 for partition 1")
 	}
+
 	if offsets["g2"]["t1"][0] != 3 {
 		t.Fatalf("expected offset 3 for g2")
 	}
@@ -55,25 +63,31 @@ func TestOffsetStoreRecover(t *testing.T) {
 
 func TestOffsetStoreRecoverTruncatesTail(t *testing.T) {
 	dir := t.TempDir()
+
 	store, err := NewOffsetStore(dir)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
+
 	ctx := context.Background()
 	if err := store.AppendCommit(ctx, "g", "t", 0, 1); err != nil {
 		t.Fatalf("append: %v", err)
 	}
+
 	store.Close()
 
 	// Corrupt tail
 	path := store.path
+
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := f.Write([]byte("junk")); err != nil {
+
+	if _, err := f.WriteString("junk"); err != nil {
 		t.Fatalf("write junk: %v", err)
 	}
+
 	f.Close()
 
 	store, err = NewOffsetStore(dir)
@@ -81,10 +95,12 @@ func TestOffsetStoreRecoverTruncatesTail(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer store.Close()
+
 	offsets, err := store.Recover(ctx)
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
+
 	if offsets["g"]["t"][0] != 1 {
 		t.Fatalf("expected offset 1 after recovery, got %d", offsets["g"]["t"][0])
 	}
@@ -92,10 +108,12 @@ func TestOffsetStoreRecoverTruncatesTail(t *testing.T) {
 
 func TestOffsetStoreCompact(t *testing.T) {
 	dir := t.TempDir()
+
 	store, err := NewOffsetStore(dir)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
+
 	ctx := context.Background()
 	_ = store.AppendCommit(ctx, "g1", "t1", 0, 1)
 	_ = store.AppendCommit(ctx, "g1", "t1", 0, 2)
@@ -108,6 +126,7 @@ func TestOffsetStoreCompact(t *testing.T) {
 	if err := store.Compact(ctx, offsets); err != nil {
 		t.Fatalf("compact: %v", err)
 	}
+
 	store.Close()
 
 	store, err = NewOffsetStore(dir)
@@ -115,10 +134,12 @@ func TestOffsetStoreCompact(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer store.Close()
+
 	got, err := store.Recover(ctx)
 	if err != nil {
 		t.Fatalf("recover after compact: %v", err)
 	}
+
 	if got["g1"]["t1"][0] != 2 || got["g2"]["t2"][1] != 3 {
 		t.Fatalf("unexpected offsets after compact: %#v", got)
 	}

@@ -36,24 +36,31 @@ func encodeFrame(apiKey api.APIKey, correlationID int32, payload []byte) ([]byte
 	if err := binary.Write(buf, binary.BigEndian, uint32(0)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int16(apiKey)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, currentVersion); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, correlationID); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int16(0)); err != nil {
 		return nil, err
 	}
+
 	if _, err := buf.Write(payload); err != nil {
 		return nil, err
 	}
+
 	data := buf.Bytes()
 	length := uint32(len(data) - 4)
 	binary.BigEndian.PutUint32(data[0:4], length)
+
 	return data, nil
 }
 
@@ -70,24 +77,31 @@ func decodeFrame(r io.Reader) (api.APIKey, int32, []byte, error) {
 	if _, err := io.ReadFull(r, header); err != nil {
 		return 0, 0, nil, err
 	}
+
 	length := binary.BigEndian.Uint32(header[0:4])
 	if length < uint32(frameHeaderSize-4) {
 		return 0, 0, nil, fmt.Errorf("invalid frame length %d", length)
 	}
+
 	apiKey := api.APIKey(int16(binary.BigEndian.Uint16(header[4:6])))
+
 	version := int16(binary.BigEndian.Uint16(header[6:8]))
 	if version != currentVersion {
 		return 0, 0, nil, fmt.Errorf("unsupported version %d", version)
 	}
+
 	corr := int32(binary.BigEndian.Uint32(header[8:12]))
+
 	payloadLen := int(length) - (frameHeaderSize - 4)
 	if payloadLen < 0 {
 		return 0, 0, nil, fmt.Errorf("invalid payload length")
 	}
+
 	payload := make([]byte, payloadLen)
 	if _, err := io.ReadFull(r, payload); err != nil {
 		return 0, 0, nil, err
 	}
+
 	return apiKey, corr, payload, nil
 }
 
@@ -97,10 +111,12 @@ func putString(w io.Writer, s string) error {
 	if err := binary.Write(w, binary.BigEndian, int16(len(s))); err != nil {
 		return err
 	}
+
 	if len(s) > 0 {
 		_, err := w.Write([]byte(s))
 		return err
 	}
+
 	return nil
 }
 
@@ -109,16 +125,20 @@ func readString(r io.Reader) (string, error) {
 	if err := binary.Read(r, binary.BigEndian, &l); err != nil {
 		return "", err
 	}
+
 	if l < 0 {
 		return "", fmt.Errorf("invalid string length %d", l)
 	}
+
 	if l == 0 {
 		return "", nil
 	}
+
 	buf := make([]byte, l)
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return "", err
 	}
+
 	return string(buf), nil
 }
 
@@ -126,13 +146,16 @@ func putBytes(w io.Writer, b []byte) error {
 	if b == nil {
 		return binary.Write(w, binary.BigEndian, int32(-1))
 	}
+
 	if err := binary.Write(w, binary.BigEndian, int32(len(b))); err != nil {
 		return err
 	}
+
 	if len(b) > 0 {
 		_, err := w.Write(b)
 		return err
 	}
+
 	return nil
 }
 
@@ -141,16 +164,20 @@ func readBytes(r io.Reader) ([]byte, error) {
 	if err := binary.Read(r, binary.BigEndian, &l); err != nil {
 		return nil, err
 	}
+
 	if l < 0 {
 		return nil, nil
 	}
+
 	if l == 0 {
 		return []byte{}, nil
 	}
+
 	buf := make([]byte, l)
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return nil, err
 	}
+
 	return buf, nil
 }
 
@@ -158,14 +185,17 @@ func putHeaders(w io.Writer, headers []api.Header) error {
 	if err := binary.Write(w, binary.BigEndian, int32(len(headers))); err != nil {
 		return err
 	}
+
 	for _, h := range headers {
 		if err := putString(w, h.Key); err != nil {
 			return err
 		}
+
 		if err := putBytes(w, h.Value); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -174,21 +204,26 @@ func readHeaders(r io.Reader) ([]api.Header, error) {
 	if err := binary.Read(r, binary.BigEndian, &n); err != nil {
 		return nil, err
 	}
+
 	if n < 0 {
 		return nil, fmt.Errorf("negative header count")
 	}
+
 	headers := make([]api.Header, 0, n)
 	for i := int32(0); i < n; i++ {
 		k, err := readString(r)
 		if err != nil {
 			return nil, err
 		}
+
 		v, err := readBytes(r)
 		if err != nil {
 			return nil, err
 		}
+
 		headers = append(headers, api.Header{Key: k, Value: v})
 	}
+
 	return headers, nil
 }
 
@@ -197,48 +232,64 @@ func encodeRecord(r api.Record) ([]byte, error) {
 	if err := binary.Write(buf, binary.BigEndian, r.Offset); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, r.Timestamp.UnixNano()); err != nil {
 		return nil, err
 	}
+
 	if err := putBytes(buf, r.Key); err != nil {
 		return nil, err
 	}
+
 	if err := putBytes(buf, r.Value); err != nil {
 		return nil, err
 	}
+
 	if err := putHeaders(buf, r.Headers); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeRecord(r io.Reader) (api.Record, error) {
-	var res api.Record
-	var offset int64
+	var (
+		res    api.Record
+		offset int64
+	)
+
 	if err := binary.Read(r, binary.BigEndian, &offset); err != nil {
 		return res, err
 	}
+
 	res.Offset = api.Offset(offset)
+
 	var ts int64
 	if err := binary.Read(r, binary.BigEndian, &ts); err != nil {
 		return res, err
 	}
+
 	res.Timestamp = time.Unix(0, ts)
+
 	key, err := readBytes(r)
 	if err != nil {
 		return res, err
 	}
+
 	val, err := readBytes(r)
 	if err != nil {
 		return res, err
 	}
+
 	headers, err := readHeaders(r)
 	if err != nil {
 		return res, err
 	}
+
 	res.Key = key
 	res.Value = val
 	res.Headers = headers
+
 	return res, nil
 }
 
@@ -249,29 +300,36 @@ func encodeCreateTopicRequest(req *CreateTopicRequest) ([]byte, error) {
 	if err := putString(buf, req.Topic); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int32(req.Partitions)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int32(req.ReplicationFactor)); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeCreateTopicRequest(payload []byte) (*CreateTopicRequest, error) {
 	buf := bytes.NewBuffer(payload)
+
 	topic, err := readString(buf)
 	if err != nil {
 		return nil, err
 	}
+
 	var partitions int32
 	if err := binary.Read(buf, binary.BigEndian, &partitions); err != nil {
 		return nil, err
 	}
+
 	var rf int32
 	if err := binary.Read(buf, binary.BigEndian, &rf); err != nil {
 		return nil, err
 	}
+
 	return &CreateTopicRequest{
 		Topic:             topic,
 		Partitions:        int(partitions),
@@ -284,15 +342,18 @@ func encodeCreateTopicResponse(resp *CreateTopicResponse) ([]byte, error) {
 	if err := binary.Write(buf, binary.BigEndian, int16(resp.Error)); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeCreateTopicResponse(payload []byte) (*CreateTopicResponse, error) {
 	buf := bytes.NewBuffer(payload)
+
 	var ec int16
 	if err := binary.Read(buf, binary.BigEndian, &ec); err != nil {
 		return nil, err
 	}
+
 	return &CreateTopicResponse{Error: api.ErrorCode(ec)}, nil
 }
 
@@ -301,61 +362,77 @@ func encodeProduceRequest(req *ProduceRequest) ([]byte, error) {
 	if err := putString(buf, req.Topic); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int32(len(req.Records))); err != nil {
 		return nil, err
 	}
+
 	for _, r := range req.Records {
 		if r.Timestamp.IsZero() {
 			r.Timestamp = time.Now()
 		}
+
 		recBytes, err := encodeRecord(r)
 		if err != nil {
 			return nil, err
 		}
+
 		if err := binary.Write(buf, binary.BigEndian, int32(len(recBytes))); err != nil {
 			return nil, err
 		}
+
 		if _, err := buf.Write(recBytes); err != nil {
 			return nil, err
 		}
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeProduceRequest(payload []byte) (*ProduceRequest, error) {
 	buf := bytes.NewBuffer(payload)
+
 	topic, err := readString(buf)
 	if err != nil {
 		return nil, err
 	}
+
 	var partition int32
 	if err := binary.Read(buf, binary.BigEndian, &partition); err != nil {
 		return nil, err
 	}
+
 	var n int32
 	if err := binary.Read(buf, binary.BigEndian, &n); err != nil {
 		return nil, err
 	}
+
 	recs := make([]api.Record, 0, n)
 	for i := int32(0); i < n; i++ {
 		var l int32
 		if err := binary.Read(buf, binary.BigEndian, &l); err != nil {
 			return nil, err
 		}
+
 		if l < 0 || int(l) > buf.Len() {
 			return nil, fmt.Errorf("invalid record length")
 		}
+
 		rBytes := buf.Next(int(l))
 		rbuf := bytes.NewBuffer(rBytes)
+
 		rec, err := decodeRecord(rbuf)
 		if err != nil {
 			return nil, err
 		}
+
 		recs = append(recs, rec)
 	}
+
 	return &ProduceRequest{
 		Topic:     topic,
 		Partition: int(partition),
@@ -368,22 +445,27 @@ func encodeProduceResponse(resp *ProduceResponse) ([]byte, error) {
 	if err := binary.Write(buf, binary.BigEndian, int64(resp.BaseOffset)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int16(resp.Error)); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeProduceResponse(payload []byte) (*ProduceResponse, error) {
 	buf := bytes.NewBuffer(payload)
+
 	var base int64
 	if err := binary.Read(buf, binary.BigEndian, &base); err != nil {
 		return nil, err
 	}
+
 	var ec int16
 	if err := binary.Read(buf, binary.BigEndian, &ec); err != nil {
 		return nil, err
 	}
+
 	return &ProduceResponse{BaseOffset: api.Offset(base), Error: api.ErrorCode(ec)}, nil
 }
 
@@ -392,36 +474,45 @@ func encodeFetchRequest(req *FetchRequest) ([]byte, error) {
 	if err := putString(buf, req.Topic); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int64(req.Offset)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, req.MaxBytes); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeFetchRequest(payload []byte) (*FetchRequest, error) {
 	buf := bytes.NewBuffer(payload)
+
 	topic, err := readString(buf)
 	if err != nil {
 		return nil, err
 	}
+
 	var partition int32
 	if err := binary.Read(buf, binary.BigEndian, &partition); err != nil {
 		return nil, err
 	}
+
 	var offset int64
 	if err := binary.Read(buf, binary.BigEndian, &offset); err != nil {
 		return nil, err
 	}
+
 	var maxBytes int32
 	if err := binary.Read(buf, binary.BigEndian, &maxBytes); err != nil {
 		return nil, err
 	}
+
 	return &FetchRequest{
 		Topic:     topic,
 		Partition: int(partition),
@@ -435,55 +526,69 @@ func encodeFetchResponse(resp *FetchResponse) ([]byte, error) {
 	if err := binary.Write(buf, binary.BigEndian, int16(resp.Error)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int32(len(resp.Records))); err != nil {
 		return nil, err
 	}
+
 	for _, r := range resp.Records {
 		recBytes, err := encodeRecord(r)
 		if err != nil {
 			return nil, err
 		}
+
 		if err := binary.Write(buf, binary.BigEndian, int32(len(recBytes))); err != nil {
 			return nil, err
 		}
+
 		if _, err := buf.Write(recBytes); err != nil {
 			return nil, err
 		}
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int64(resp.HighWatermark)); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeFetchResponse(payload []byte) (*FetchResponse, error) {
 	buf := bytes.NewBuffer(payload)
+
 	var ec int16
 	if err := binary.Read(buf, binary.BigEndian, &ec); err != nil {
 		return nil, err
 	}
+
 	var n int32
 	if err := binary.Read(buf, binary.BigEndian, &n); err != nil {
 		return nil, err
 	}
+
 	recs := make([]api.Record, 0, n)
 	for i := int32(0); i < n; i++ {
 		var l int32
 		if err := binary.Read(buf, binary.BigEndian, &l); err != nil {
 			return nil, err
 		}
+
 		rBytes := buf.Next(int(l))
 		rbuf := bytes.NewBuffer(rBytes)
+
 		rec, err := decodeRecord(rbuf)
 		if err != nil {
 			return nil, err
 		}
+
 		recs = append(recs, rec)
 	}
+
 	var hwm int64
 	if err := binary.Read(buf, binary.BigEndian, &hwm); err != nil {
 		return nil, err
 	}
+
 	return &FetchResponse{Error: api.ErrorCode(ec), Records: recs, HighWatermark: api.Offset(hwm)}, nil
 }
 
@@ -492,28 +597,34 @@ func encodeMetadataRequest(req *MetadataRequest) ([]byte, error) {
 	if err := binary.Write(buf, binary.BigEndian, int32(len(req.Topics))); err != nil {
 		return nil, err
 	}
+
 	for _, t := range req.Topics {
 		if err := putString(buf, t); err != nil {
 			return nil, err
 		}
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeMetadataRequest(payload []byte) (*MetadataRequest, error) {
 	buf := bytes.NewBuffer(payload)
+
 	var n int32
 	if err := binary.Read(buf, binary.BigEndian, &n); err != nil {
 		return nil, err
 	}
+
 	topics := make([]string, 0, n)
 	for i := int32(0); i < n; i++ {
 		s, err := readString(buf)
 		if err != nil {
 			return nil, err
 		}
+
 		topics = append(topics, s)
 	}
+
 	return &MetadataRequest{Topics: topics}, nil
 }
 
@@ -522,122 +633,153 @@ func encodeMetadataResponse(resp *MetadataResponse) ([]byte, error) {
 	if err := binary.Write(buf, binary.BigEndian, int16(resp.Error)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int32(len(resp.Partitions))); err != nil {
 		return nil, err
 	}
+
 	for _, p := range resp.Partitions {
 		if err := putString(buf, p.Replica.Topic); err != nil {
 			return nil, err
 		}
+
 		if err := binary.Write(buf, binary.BigEndian, int32(p.Replica.Partition)); err != nil {
 			return nil, err
 		}
+
 		if err := binary.Write(buf, binary.BigEndian, int32(p.Replica.BrokerID)); err != nil {
 			return nil, err
 		}
+
 		if err := binary.Write(buf, binary.BigEndian, int16(p.Replica.Role)); err != nil {
 			return nil, err
 		}
+
 		if err := binary.Write(buf, binary.BigEndian, p.Replica.LeaderEpoch); err != nil {
 			return nil, err
 		}
+
 		if err := binary.Write(buf, binary.BigEndian, int64(p.StartOffset)); err != nil {
 			return nil, err
 		}
+
 		if err := binary.Write(buf, binary.BigEndian, int64(p.HighWatermark)); err != nil {
 			return nil, err
 		}
+
 		if err := binary.Write(buf, binary.BigEndian, int32(p.Leader)); err != nil {
 			return nil, err
 		}
+
 		if err := binary.Write(buf, binary.BigEndian, int32(len(p.Replicas))); err != nil {
 			return nil, err
 		}
+
 		for _, r := range p.Replicas {
 			if err := binary.Write(buf, binary.BigEndian, int32(r)); err != nil {
 				return nil, err
 			}
 		}
+
 		if err := binary.Write(buf, binary.BigEndian, int32(len(p.ISR))); err != nil {
 			return nil, err
 		}
+
 		for _, r := range p.ISR {
 			if err := binary.Write(buf, binary.BigEndian, int32(r)); err != nil {
 				return nil, err
 			}
 		}
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeMetadataResponse(payload []byte) (*MetadataResponse, error) {
 	buf := bytes.NewBuffer(payload)
+
 	var ec int16
 	if err := binary.Read(buf, binary.BigEndian, &ec); err != nil {
 		return nil, err
 	}
+
 	var n int32
 	if err := binary.Read(buf, binary.BigEndian, &n); err != nil {
 		return nil, err
 	}
+
 	parts := make([]api.PartitionMetadata, 0, n)
 	for i := int32(0); i < n; i++ {
 		topic, err := readString(buf)
 		if err != nil {
 			return nil, err
 		}
+
 		var partition int32
 		if err := binary.Read(buf, binary.BigEndian, &partition); err != nil {
 			return nil, err
 		}
+
 		var brokerID int32
 		if err := binary.Read(buf, binary.BigEndian, &brokerID); err != nil {
 			return nil, err
 		}
+
 		var role int16
 		if err := binary.Read(buf, binary.BigEndian, &role); err != nil {
 			return nil, err
 		}
+
 		var epoch int32
 		if err := binary.Read(buf, binary.BigEndian, &epoch); err != nil {
 			return nil, err
 		}
+
 		var start int64
 		if err := binary.Read(buf, binary.BigEndian, &start); err != nil {
 			return nil, err
 		}
+
 		var hwm int64
 		if err := binary.Read(buf, binary.BigEndian, &hwm); err != nil {
 			return nil, err
 		}
+
 		var leader int32
 		if err := binary.Read(buf, binary.BigEndian, &leader); err != nil {
 			return nil, err
 		}
+
 		var replicasN int32
 		if err := binary.Read(buf, binary.BigEndian, &replicasN); err != nil {
 			return nil, err
 		}
+
 		replicas := make([]int, 0, replicasN)
 		for i := int32(0); i < replicasN; i++ {
 			var rid int32
 			if err := binary.Read(buf, binary.BigEndian, &rid); err != nil {
 				return nil, err
 			}
+
 			replicas = append(replicas, int(rid))
 		}
+
 		var isrN int32
 		if err := binary.Read(buf, binary.BigEndian, &isrN); err != nil {
 			return nil, err
 		}
+
 		isr := make([]int, 0, isrN)
 		for i := int32(0); i < isrN; i++ {
 			var rid int32
 			if err := binary.Read(buf, binary.BigEndian, &rid); err != nil {
 				return nil, err
 			}
+
 			isr = append(isr, int(rid))
 		}
+
 		parts = append(parts, api.PartitionMetadata{
 			Replica: api.PartitionReplica{
 				Topic:       topic,
@@ -653,6 +795,7 @@ func decodeMetadataResponse(payload []byte) (*MetadataResponse, error) {
 			ISR:           isr,
 		})
 	}
+
 	return &MetadataResponse{
 		Error:      api.ErrorCode(ec),
 		Partitions: parts,
@@ -666,14 +809,18 @@ func encodePingResponse(resp *PingResponse) ([]byte, error) {
 	if err := binary.Write(buf, binary.BigEndian, int16(resp.Error)); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
+
 func decodePingResponse(payload []byte) (*PingResponse, error) {
 	buf := bytes.NewBuffer(payload)
+
 	var ec int16
 	if err := binary.Read(buf, binary.BigEndian, &ec); err != nil {
 		return nil, err
 	}
+
 	return &PingResponse{Error: api.ErrorCode(ec)}, nil
 }
 
@@ -682,36 +829,45 @@ func encodeCommitOffsetRequest(req *CommitOffsetRequest) ([]byte, error) {
 	if err := putString(buf, req.Group); err != nil {
 		return nil, err
 	}
+
 	if err := putString(buf, req.Topic); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int64(req.Offset)); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeCommitOffsetRequest(payload []byte) (*CommitOffsetRequest, error) {
 	buf := bytes.NewBuffer(payload)
+
 	group, err := readString(buf)
 	if err != nil {
 		return nil, err
 	}
+
 	topic, err := readString(buf)
 	if err != nil {
 		return nil, err
 	}
+
 	var partition int32
 	if err := binary.Read(buf, binary.BigEndian, &partition); err != nil {
 		return nil, err
 	}
+
 	var offset int64
 	if err := binary.Read(buf, binary.BigEndian, &offset); err != nil {
 		return nil, err
 	}
+
 	return &CommitOffsetRequest{
 		Group:     group,
 		Topic:     topic,
@@ -725,15 +881,18 @@ func encodeCommitOffsetResponse(resp *CommitOffsetResponse) ([]byte, error) {
 	if err := binary.Write(buf, binary.BigEndian, int16(resp.Error)); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeCommitOffsetResponse(payload []byte) (*CommitOffsetResponse, error) {
 	buf := bytes.NewBuffer(payload)
+
 	var ec int16
 	if err := binary.Read(buf, binary.BigEndian, &ec); err != nil {
 		return nil, err
 	}
+
 	return &CommitOffsetResponse{Error: api.ErrorCode(ec)}, nil
 }
 
@@ -742,29 +901,36 @@ func encodeFetchCommittedRequest(req *FetchCommittedRequest) ([]byte, error) {
 	if err := putString(buf, req.Group); err != nil {
 		return nil, err
 	}
+
 	if err := putString(buf, req.Topic); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeFetchCommittedRequest(payload []byte) (*FetchCommittedRequest, error) {
 	buf := bytes.NewBuffer(payload)
+
 	group, err := readString(buf)
 	if err != nil {
 		return nil, err
 	}
+
 	topic, err := readString(buf)
 	if err != nil {
 		return nil, err
 	}
+
 	var partition int32
 	if err := binary.Read(buf, binary.BigEndian, &partition); err != nil {
 		return nil, err
 	}
+
 	return &FetchCommittedRequest{
 		Group:     group,
 		Topic:     topic,
@@ -777,22 +943,27 @@ func encodeFetchCommittedResponse(resp *FetchCommittedResponse) ([]byte, error) 
 	if err := binary.Write(buf, binary.BigEndian, int64(resp.Offset)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int16(resp.Error)); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeFetchCommittedResponse(payload []byte) (*FetchCommittedResponse, error) {
 	buf := bytes.NewBuffer(payload)
+
 	var offset int64
 	if err := binary.Read(buf, binary.BigEndian, &offset); err != nil {
 		return nil, err
 	}
+
 	var ec int16
 	if err := binary.Read(buf, binary.BigEndian, &ec); err != nil {
 		return nil, err
 	}
+
 	return &FetchCommittedResponse{
 		Offset: api.Offset(offset),
 		Error:  api.ErrorCode(ec),
@@ -804,22 +975,27 @@ func encodeListOffsetsRequest(req *ListOffsetsRequest) ([]byte, error) {
 	if err := putString(buf, req.Topic); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int32(req.Partition)); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeListOffsetsRequest(payload []byte) (*ListOffsetsRequest, error) {
 	buf := bytes.NewBuffer(payload)
+
 	topic, err := readString(buf)
 	if err != nil {
 		return nil, err
 	}
+
 	var partition int32
 	if err := binary.Read(buf, binary.BigEndian, &partition); err != nil {
 		return nil, err
 	}
+
 	return &ListOffsetsRequest{
 		Topic:     topic,
 		Partition: int(partition),
@@ -831,29 +1007,36 @@ func encodeListOffsetsResponse(resp *ListOffsetsResponse) ([]byte, error) {
 	if err := binary.Write(buf, binary.BigEndian, int16(resp.Error)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int64(resp.Earliest)); err != nil {
 		return nil, err
 	}
+
 	if err := binary.Write(buf, binary.BigEndian, int64(resp.Latest)); err != nil {
 		return nil, err
 	}
+
 	return buf.Bytes(), nil
 }
 
 func decodeListOffsetsResponse(payload []byte) (*ListOffsetsResponse, error) {
 	buf := bytes.NewBuffer(payload)
+
 	var ec int16
 	if err := binary.Read(buf, binary.BigEndian, &ec); err != nil {
 		return nil, err
 	}
+
 	var earliest int64
 	if err := binary.Read(buf, binary.BigEndian, &earliest); err != nil {
 		return nil, err
 	}
+
 	var latest int64
 	if err := binary.Read(buf, binary.BigEndian, &latest); err != nil {
 		return nil, err
 	}
+
 	return &ListOffsetsResponse{
 		Error:    api.ErrorCode(ec),
 		Earliest: api.Offset(earliest),
@@ -873,9 +1056,11 @@ func DecodeResponseFrame(r io.Reader) (api.APIKey, int32, []byte, error) {
 func EncodeCreateTopicRequest(req *CreateTopicRequest) ([]byte, error) {
 	return encodeCreateTopicRequest(req)
 }
+
 func EncodeCreateTopicResponse(resp *CreateTopicResponse) ([]byte, error) {
 	return encodeCreateTopicResponse(resp)
 }
+
 func DecodeCreateTopicResponse(p []byte) (*CreateTopicResponse, error) {
 	return decodeCreateTopicResponse(p)
 }
@@ -898,12 +1083,15 @@ func DecodePingResponse(p []byte) (*PingResponse, error)    { return decodePingR
 func EncodeCommitOffsetRequest(req *CommitOffsetRequest) ([]byte, error) {
 	return encodeCommitOffsetRequest(req)
 }
+
 func DecodeCommitOffsetRequest(p []byte) (*CommitOffsetRequest, error) {
 	return decodeCommitOffsetRequest(p)
 }
+
 func EncodeCommitOffsetResponse(resp *CommitOffsetResponse) ([]byte, error) {
 	return encodeCommitOffsetResponse(resp)
 }
+
 func DecodeCommitOffsetResponse(p []byte) (*CommitOffsetResponse, error) {
 	return decodeCommitOffsetResponse(p)
 }
@@ -911,12 +1099,15 @@ func DecodeCommitOffsetResponse(p []byte) (*CommitOffsetResponse, error) {
 func EncodeFetchCommittedRequest(req *FetchCommittedRequest) ([]byte, error) {
 	return encodeFetchCommittedRequest(req)
 }
+
 func DecodeFetchCommittedRequest(p []byte) (*FetchCommittedRequest, error) {
 	return decodeFetchCommittedRequest(p)
 }
+
 func EncodeFetchCommittedResponse(resp *FetchCommittedResponse) ([]byte, error) {
 	return encodeFetchCommittedResponse(resp)
 }
+
 func DecodeFetchCommittedResponse(p []byte) (*FetchCommittedResponse, error) {
 	return decodeFetchCommittedResponse(p)
 }
@@ -924,6 +1115,7 @@ func DecodeFetchCommittedResponse(p []byte) (*FetchCommittedResponse, error) {
 func EncodeListOffsetsRequest(req *ListOffsetsRequest) ([]byte, error) {
 	return encodeListOffsetsRequest(req)
 }
+
 func DecodeListOffsetsResponse(p []byte) (*ListOffsetsResponse, error) {
 	return decodeListOffsetsResponse(p)
 }

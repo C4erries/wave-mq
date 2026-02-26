@@ -17,6 +17,7 @@ func FuzzDecodeFrameDoesNotPanic(f *testing.F) {
 				t.Fatalf("panic in decodeFrame: %v", r)
 			}
 		}()
+
 		_, _, _, _ = decodeFrame(bytes.NewReader(data))
 	})
 }
@@ -35,6 +36,7 @@ func FuzzDecodeProduceRequestDoesNotPanic(f *testing.F) {
 				t.Fatalf("panic in decodeProduceRequest: %v", r)
 			}
 		}()
+
 		_, _ = decodeProduceRequest(data)
 	})
 }
