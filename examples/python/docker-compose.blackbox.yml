@@ -1,0 +1,21 @@
+services:
+  broker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command:
+      - "-data-dir=/data"
+      - "-bind=:7912"
+      - "-mqtt=:1883"
+      - "-http=:8090"
+      - "-controller=single"
+      - "-replication=false"
+    ports:
+      - "${WAVEMQ_BB_BINARY_PORT:-17912}:7912"
+      - "${WAVEMQ_BB_MQTT_PORT:-11883}:1883"
+      - "${WAVEMQ_BB_HTTP_PORT:-18090}:8090"
+    volumes:
+      - bb_wave_data:/data
+
+volumes:
+  bb_wave_data:

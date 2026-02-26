@@ -41,3 +41,48 @@ wave-mq/examples/matlab/mqtt_demo.m
 ```
 
 The script connects to `127.0.0.1:1883`, subscribes to `demo.mqtt`, publishes one test message, and waits for incoming data.
+
+## 4. Python blackbox suite (large e2e)
+
+`examples/python/blackbox_suite.py` runs broad blackbox checks:
+
+- control-plane endpoints (`/healthz`, `/api/*`);
+- heavy HTTP produce/fetch on many partitions;
+- MQTT QoS0/QoS1 pub/sub and consumer groups;
+- restart persistence (data + committed offsets);
+- parallel stress writers;
+- metrics and summary consistency.
+
+### Run with Docker (recommended)
+
+From `wave-mq/examples/python`:
+
+```sh
+python blackbox_suite.py --profile full
+```
+
+Profiles:
+
+- `smoke` - quick check
+- `full` - default broad run
+- `massive` - heavy load
+
+Useful flags:
+
+```sh
+python blackbox_suite.py --profile massive --keep-stack
+python blackbox_suite.py --profile full --skip-restart
+python blackbox_suite.py --profile smoke --http-port 28090 --mqtt-port 21883 --binary-port 27912
+```
+
+The script uses `docker-compose.blackbox.yml` and maps ports to host defaults:
+
+- HTTP `18090`
+- MQTT `11883`
+- Binary `17912` (reserved by compose, not used by suite directly)
+
+### Run against already running broker (without Docker orchestration)
+
+```sh
+python blackbox_suite.py --no-docker --http-port 8090 --mqtt-port 1883 --skip-restart
+```
