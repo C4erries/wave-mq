@@ -163,13 +163,17 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 
 	ctxSrv, cancelSrv := context.WithCancel(ctx)
 	defer cancelSrv()
+	srv1Err := make(chan error, 1)
+	srv2Err := make(chan error, 1)
 
 	go func() {
-		_ = srv1.ListenAndServe(ctxSrv)
+		srv1Err <- srv1.ListenAndServe(ctxSrv)
 	}()
 	go func() {
-		_ = srv2.ListenAndServe(ctxSrv)
+		srv2Err <- srv2.ListenAndServe(ctxSrv)
 	}()
+	waitForServerReady(t, cfg1.BinaryAddr, srv1Err)
+	waitForServerReady(t, cfg2.BinaryAddr, srv2Err)
 
 	meta, _ := rc1.GetClusterMetadata(ctx)
 
@@ -562,10 +566,12 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 
 	ctxSrv, cancelSrv := context.WithCancel(ctx)
 	defer cancelSrv()
+	serverErr := make(chan error, 1)
 
 	go func() {
-		_ = server.ListenAndServe(ctxSrv)
+		serverErr <- server.ListenAndServe(ctxSrv)
 	}()
+	waitForServerReady(t, leaderAddr, serverErr)
 
 	rep := replication.NewBinaryReplicator()
 	startReplication := func(fStore *storage.Manager, fCtrl controller.MetadataStore) (context.CancelFunc, <-chan struct{}, <-chan error) {
@@ -639,7 +645,12 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 	}
 
 	if recs, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0}); len(offsetsOf(mustRead(ctx, recs))) != 4 {
-		t.Fatalf("unexpected follower offsets after catch-up: start=%d hwm=%d offsets=%v", recs.StartOffset(), recs.HighWatermark(), offsetsOf(mustRead(ctx, recs)))
+		t.Fatalf(
+			"unexpected follower offsets after catch-up: start=%d hwm=%d offsets=%v",
+			recs.StartOffset(),
+			recs.HighWatermark(),
+			offsetsOf(mustRead(ctx, recs)),
+		)
 	}
 
 	cancelRep()
@@ -680,7 +691,12 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 	}
 
 	if recs, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0}); len(offsetsOf(mustRead(ctx, recs))) != 6 {
-		t.Fatalf("unexpected follower offsets after final catch-up: start=%d hwm=%d offsets=%v", recs.StartOffset(), recs.HighWatermark(), offsetsOf(mustRead(ctx, recs)))
+		t.Fatalf(
+			"unexpected follower offsets after final catch-up: start=%d hwm=%d offsets=%v",
+			recs.StartOffset(),
+			recs.HighWatermark(),
+			offsetsOf(mustRead(ctx, recs)),
+		)
 	}
 
 	cancelRep()
@@ -701,7 +717,13 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 			followerOffsets = append(followerOffsets, r.Offset)
 		}
 
-		t.Fatalf("record count mismatch leader=%d follower=%d hwm=%d offsets=%v", len(leadRecords), len(follRecords), followerLog.HighWatermark(), followerOffsets)
+		t.Fatalf(
+			"record count mismatch leader=%d follower=%d hwm=%d offsets=%v",
+			len(leadRecords),
+			len(follRecords),
+			followerLog.HighWatermark(),
+			followerOffsets,
+		)
 	}
 
 	for i := range leadRecords {
@@ -808,4 +830,31 @@ func waitUntil(t *testing.T, pred func() bool, timeout time.Duration) bool {
 	}
 
 	return false
+}
+
+func waitForServerReady(t *testing.T, addr string, errCh <-chan error) {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("server %s failed before ready: %v", addr, err)
+			}
+
+			t.Fatalf("server %s stopped before ready", addr)
+		default:
+		}
+
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatalf("server %s did not become ready in time", addr)
 }

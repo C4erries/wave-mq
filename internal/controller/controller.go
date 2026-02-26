@@ -16,14 +16,28 @@ type MetadataStore interface {
 	WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error)
 	RegisterBroker(ctx context.Context, info api.BrokerInfo) error
 	AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error)
-	ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error)
+	ReportReplicaProgress(
+		ctx context.Context,
+		topic string,
+		partition int,
+		brokerID int,
+		lastOffset api.Offset,
+		leaderHighWatermark api.Offset,
+	) (api.ClusterMetadata, error)
 }
 
 // Controller manages brokers, topics and assignments.
 type Controller interface {
 	RegisterBroker(ctx context.Context, info api.BrokerInfo) error
 	AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error)
-	ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error)
+	ReportReplicaProgress(
+		ctx context.Context,
+		topic string,
+		partition int,
+		brokerID int,
+		lastOffset api.Offset,
+		leaderHighWatermark api.Offset,
+	) (api.ClusterMetadata, error)
 }
 
 // SingleNodeController is a placeholder controller for single-node deployments.
@@ -114,7 +128,14 @@ func (c *SingleNodeController) AssignTopic(ctx context.Context, name string, cfg
 }
 
 // ReportReplicaProgress updates ISR based on follower progress relative to leader high watermark.
-func (c *SingleNodeController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+func (c *SingleNodeController) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition int,
+	brokerID int,
+	lastOffset api.Offset,
+	leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
 	_ = ctx
 
 	c.mu.Lock()

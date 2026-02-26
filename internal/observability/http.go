@@ -24,7 +24,7 @@ func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool, ex
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		if readyFunc() {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("ok"))

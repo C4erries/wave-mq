@@ -19,6 +19,7 @@ func (p *partitionAwareCluster) GetClusterMetadata(ctx context.Context) (api.Clu
 }
 
 func (p *partitionAwareCluster) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
+	_ = ctx
 	_ = sinceVersion
 
 	ch := make(chan api.ClusterMetadata, 1)

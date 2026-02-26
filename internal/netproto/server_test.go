@@ -89,6 +89,7 @@ func (b *fakeBroker) Produce(ctx context.Context, topic string, partition int, r
 
 func (b *fakeBroker) Fetch(ctx context.Context, topic string, partition int, offset api.Offset, maxBytes int32) ([]api.Record, error) {
 	_ = ctx
+	_ = maxBytes
 
 	if _, ok := b.notLeader[fmt.Sprintf("%s:%d", topic, partition)]; ok {
 		return nil, broker.NotLeaderError{Topic: topic, Partition: partition, Leader: 99}

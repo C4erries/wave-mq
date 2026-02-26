@@ -19,7 +19,10 @@ func setupTestServer(t *testing.T) (*httptest.Server, *broker.Broker, *storage.M
 	return setupTestServerWithRF(t, 1)
 }
 
-func setupTestServerWithRF(t *testing.T, rf int) (*httptest.Server, *broker.Broker, *storage.Manager, *broker.OffsetStore, *metadata.Store) {
+func setupTestServerWithRF(
+	t *testing.T,
+	rf int,
+) (*httptest.Server, *broker.Broker, *storage.Manager, *broker.OffsetStore, *metadata.Store) {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -47,7 +50,15 @@ func setupTestServerWithRF(t *testing.T, rf int) (*httptest.Server, *broker.Brok
 		t.Fatalf("recover topics: %v", err)
 	}
 
-	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: rf, ControllerMode: "single", ClusterID: "test-cluster"}
+	cfg := api.BrokerConfig{
+		BrokerID:          1,
+		BinaryAddr:        ":7912",
+		MQTTAddr:          ":1883",
+		HTTPAddr:          ":8090",
+		ReplicationFactor: rf,
+		ControllerMode:    "single",
+		ClusterID:         "test-cluster",
+	}
 
 	ctrl, err := controller.NewSingleNodeController(cfg, recovered.Topics)
 	if err != nil {
@@ -75,10 +86,15 @@ type followerCtrl struct {
 }
 
 func (f *followerCtrl) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
+	_ = ctx
+
 	return f.meta, nil
 }
 
 func (f *followerCtrl) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
+	_ = ctx
+	_ = sinceVersion
+
 	ch := make(chan api.ClusterMetadata, 1)
 	ch <- f.meta
 
@@ -86,12 +102,30 @@ func (f *followerCtrl) WatchClusterMetadata(ctx context.Context, sinceVersion in
 
 	return ch, nil
 }
-func (f *followerCtrl) RegisterBroker(ctx context.Context, info api.BrokerInfo) error { return nil }
+
+func (f *followerCtrl) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
+	_ = ctx
+	_ = info
+
+	return nil
+}
+
 func (f *followerCtrl) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = name
+	_ = cfg
+
 	return f.meta, nil
 }
 
 func (f *followerCtrl) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = topic
+	_ = partition
+	_ = brokerID
+	_ = lastOffset
+	_ = leaderHighWatermark
+
 	return f.meta, nil
 }
 
@@ -102,10 +136,13 @@ type assignmentController struct {
 }
 
 func (a *assignmentController) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
+	_ = ctx
+
 	return a.meta, nil
 }
 
 func (a *assignmentController) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
+	_ = ctx
 	_ = sinceVersion
 
 	ch := make(chan api.ClusterMetadata, 1)
@@ -138,6 +175,13 @@ func (a *assignmentController) AssignTopic(ctx context.Context, name string, cfg
 }
 
 func (a *assignmentController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = topic
+	_ = partition
+	_ = brokerID
+	_ = lastOffset
+	_ = leaderHighWatermark
+
 	return a.meta, nil
 }
 
@@ -188,7 +232,14 @@ func TestHTTPProduceNotLeader(t *testing.T) {
 		},
 	}
 	ctrl := &followerCtrl{meta: meta}
-	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 2, ControllerMode: "raft"}
+	cfg := api.BrokerConfig{
+		BrokerID:          1,
+		BinaryAddr:        ":7912",
+		MQTTAddr:          ":1883",
+		HTTPAddr:          ":8090",
+		ReplicationFactor: 2,
+		ControllerMode:    "raft",
+	}
 
 	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
 	if err != nil {
@@ -277,7 +328,14 @@ func TestHTTPFetchNotLeader(t *testing.T) {
 		},
 	}
 	ctrl := &followerCtrl{meta: meta}
-	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 2, ControllerMode: "raft"}
+	cfg := api.BrokerConfig{
+		BrokerID:          1,
+		BinaryAddr:        ":7912",
+		MQTTAddr:          ":1883",
+		HTTPAddr:          ":8090",
+		ReplicationFactor: 2,
+		ControllerMode:    "raft",
+	}
 
 	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
 	if err != nil {
@@ -534,7 +592,14 @@ func TestControllerStatusEndpointRaft(t *testing.T) {
 	}
 
 	initial := api.ClusterMetadata{ClusterID: "cluster-raft", Version: 1, Brokers: []api.BrokerInfo{{BrokerID: 1}}}
-	cfg := api.BrokerConfig{BrokerID: 1, BinaryAddr: ":7912", MQTTAddr: ":1883", HTTPAddr: ":8090", ReplicationFactor: 1, ControllerMode: "raft"}
+	cfg := api.BrokerConfig{
+		BrokerID:          1,
+		BinaryAddr:        ":7912",
+		MQTTAddr:          ":1883",
+		HTTPAddr:          ":8090",
+		ReplicationFactor: 1,
+		ControllerMode:    "raft",
+	}
 
 	ctrl, err := controller.NewRaftController(cfg, initial, "")
 	if err != nil {

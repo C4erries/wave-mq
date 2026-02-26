@@ -100,7 +100,14 @@ func TestRaftReplicationSurvivesRestarts(t *testing.T) {
 		t.Fatalf("prepare topic event: %v", err)
 	}
 
-	nodes := startBrokerNodes(t, ctx, []api.BrokerConfig{cfg1, cfg2}, []string{binaryAddr1, binaryAddr2}, []*controller.RaftController{rc1, rc2}, topicEvent)
+	nodes := startBrokerNodes(
+		ctx,
+		t,
+		[]api.BrokerConfig{cfg1, cfg2},
+		[]string{binaryAddr1, binaryAddr2},
+		[]*controller.RaftController{rc1, rc2},
+		topicEvent,
+	)
 
 	defer func() {
 		for _, n := range nodes {
@@ -111,7 +118,7 @@ func TestRaftReplicationSurvivesRestarts(t *testing.T) {
 	leaderID, followerID := leaderFollowerIDs(topicEvent)
 	leaderNode := nodes[leaderID]
 	followerNode := nodes[followerID]
-	waitForBrokerPartitions(t, ctx, leaderNode, followerNode)
+	waitForBrokerPartitions(ctx, t, leaderNode, followerNode)
 
 	repCancel, repErr := startReplication(ctx, leaderNode, followerNode, followerID)
 	defer repCancel()
@@ -119,11 +126,14 @@ func TestRaftReplicationSurvivesRestarts(t *testing.T) {
 	sendProduce := makeProduceFunc(t, "alpha")
 	sendFetch := makeFetchFunc(t, "alpha")
 
-	if resp, err := sendProduce(leaderNode.cfg.BinaryAddr, []api.Record{{Value: []byte("one")}, {Value: []byte("two")}}); err != nil || resp.Error != api.ErrNone {
+	if resp, err := sendProduce(
+		leaderNode.cfg.BinaryAddr,
+		[]api.Record{{Value: []byte("one")}, {Value: []byte("two")}},
+	); err != nil || resp.Error != api.ErrNone {
 		t.Fatalf("produce on leader: resp=%+v err=%v", resp, err)
 	}
 
-	awaitReplication(t, ctx, followerNode.store, repErr, 1)
+	awaitReplication(ctx, t, followerNode.store, repErr, 1)
 	assertNotLeaderResponses(t, followerNode.cfg.BinaryAddr, sendProduce, sendFetch)
 
 	// Simulate full restart of brokers and controllers.
@@ -177,7 +187,14 @@ func TestRaftReplicationSurvivesRestarts(t *testing.T) {
 		t.Fatalf("topic event after restart: %v", err)
 	}
 
-	nodes = startBrokerNodes(t, ctx, []api.BrokerConfig{cfg1, cfg2}, []string{binaryAddr1, binaryAddr2}, []*controller.RaftController{rc1, rc2}, topicEvent)
+	nodes = startBrokerNodes(
+		ctx,
+		t,
+		[]api.BrokerConfig{cfg1, cfg2},
+		[]string{binaryAddr1, binaryAddr2},
+		[]*controller.RaftController{rc1, rc2},
+		topicEvent,
+	)
 
 	defer func() {
 		for _, n := range nodes {
@@ -188,16 +205,19 @@ func TestRaftReplicationSurvivesRestarts(t *testing.T) {
 	leaderID, followerID = leaderFollowerIDs(topicEvent)
 	leaderNode = nodes[leaderID]
 	followerNode = nodes[followerID]
-	waitForBrokerPartitions(t, ctx, leaderNode, followerNode)
+	waitForBrokerPartitions(ctx, t, leaderNode, followerNode)
 
 	repCancel, repErr = startReplication(ctx, leaderNode, followerNode, followerID)
 	defer repCancel()
 
-	if resp, err := sendProduce(leaderNode.cfg.BinaryAddr, []api.Record{{Value: []byte("three")}, {Value: []byte("four")}}); err != nil || resp.Error != api.ErrNone {
+	if resp, err := sendProduce(
+		leaderNode.cfg.BinaryAddr,
+		[]api.Record{{Value: []byte("three")}, {Value: []byte("four")}},
+	); err != nil || resp.Error != api.ErrNone {
 		t.Fatalf("produce on leader after restart: resp=%+v err=%v", resp, err)
 	}
 
-	awaitReplication(t, ctx, followerNode.store, repErr, 3)
+	awaitReplication(ctx, t, followerNode.store, repErr, 3)
 	assertNotLeaderResponses(t, followerNode.cfg.BinaryAddr, sendProduce, sendFetch)
 }
 
@@ -242,7 +262,14 @@ func (n *brokerNode) shutdown() {
 	}
 }
 
-func startBrokerNodes(t *testing.T, ctx context.Context, cfgs []api.BrokerConfig, addrs []string, ctrls []*controller.RaftController, topic metadata.CreateTopicEvent) map[int]*brokerNode {
+func startBrokerNodes(
+	ctx context.Context,
+	t *testing.T,
+	cfgs []api.BrokerConfig,
+	addrs []string,
+	ctrls []*controller.RaftController,
+	topic metadata.CreateTopicEvent,
+) map[int]*brokerNode {
 	t.Helper()
 
 	nodes := make(map[int]*brokerNode)
@@ -287,7 +314,16 @@ func startBrokerNodes(t *testing.T, ctx context.Context, cfgs []api.BrokerConfig
 			_ = srv.ListenAndServe(srvCtx)
 		}()
 
-		nodes[cfg.BrokerID] = &brokerNode{cfg: cfg, meta: meta, store: store, offsets: offsets, broker: b, server: srv, srvCancel: srvCancel, ctrl: ctrls[idx]}
+		nodes[cfg.BrokerID] = &brokerNode{
+			cfg:       cfg,
+			meta:      meta,
+			store:     store,
+			offsets:   offsets,
+			broker:    b,
+			server:    srv,
+			srvCancel: srvCancel,
+			ctrl:      ctrls[idx],
+		}
 	}
 
 	return nodes
@@ -337,7 +373,15 @@ func startReplication(ctx context.Context, leader *brokerNode, follower *brokerN
 	return cancel, repErr
 }
 
-func awaitReplication(t *testing.T, ctx context.Context, store *storage.Manager, repErr <-chan error, expectedHWM api.Offset) {
+func awaitReplication(
+	ctx context.Context,
+	t *testing.T,
+	store *storage.Manager,
+	repErr <-chan error,
+	expectedHWM api.Offset,
+) {
+	_ = ctx
+
 	t.Helper()
 
 	var replicationErr error
@@ -364,7 +408,12 @@ func awaitReplication(t *testing.T, ctx context.Context, store *storage.Manager,
 	}
 }
 
-func assertNotLeaderResponses(t *testing.T, followerAddr string, sendProduce func(string, []api.Record) (*netproto.ProduceResponse, error), sendFetch func(string, api.Offset) (*netproto.FetchResponse, error)) {
+func assertNotLeaderResponses(
+	t *testing.T,
+	followerAddr string,
+	sendProduce func(string, []api.Record) (*netproto.ProduceResponse, error),
+	sendFetch func(string, api.Offset) (*netproto.FetchResponse, error),
+) {
 	t.Helper()
 
 	prodResp, err := sendProduce(followerAddr, []api.Record{{Value: []byte("forbidden")}})
@@ -386,7 +435,7 @@ func assertNotLeaderResponses(t *testing.T, followerAddr string, sendProduce fun
 	}
 }
 
-func waitForBrokerPartitions(t *testing.T, ctx context.Context, nodes ...*brokerNode) {
+func waitForBrokerPartitions(ctx context.Context, t *testing.T, nodes ...*brokerNode) {
 	t.Helper()
 
 	ok := waitUntil(t, func() bool {

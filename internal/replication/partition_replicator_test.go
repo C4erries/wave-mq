@@ -27,6 +27,9 @@ type testReplicator struct {
 }
 
 func (f *testReplicator) FetchFromLeader(ctx context.Context, leader api.BrokerInfo, req FetchRequest) (FetchResponse, error) {
+	_ = ctx
+	_ = leader
+
 	f.mu.Lock()
 	f.fetch = append(f.fetch, req)
 	f.mu.Unlock()
@@ -295,14 +298,14 @@ func TestPartitionReplicatorResumesFromNextOffset(t *testing.T) {
 	initial := []string{"msg-0", "msg-1"}
 	newRecords := []string{"msg-2", "msg-3"}
 
-	addr, cleanup, leader := startLeader(t, ctx)
+	addr, cleanup, leader := startLeader(ctx, t)
 	defer cleanup()
 
 	if err := leader.CreateTopic(ctx, "alpha", api.TopicConfig{Partitions: 1}); err != nil {
 		t.Fatalf("create topic: %v", err)
 	}
 
-	produceValues(t, ctx, leader, "alpha", 0, initial)
+	produceValues(ctx, t, leader, "alpha", 0, initial)
 
 	followerStore, err := storage.NewManager(storage.Config{DataDir: t.TempDir()})
 	if err != nil {
@@ -319,11 +322,11 @@ func TestPartitionReplicatorResumesFromNextOffset(t *testing.T) {
 	sink1 := NewReportingSink(ws1, ctrl, "alpha", 0, 2)
 	rep1 := NewPartitionReplicator(NewBinaryReplicator(), api.BrokerInfo{Host: addr}, "alpha", 0, sink1)
 	initialTarget := api.Offset(len(initial) - 1)
-	runReplicatorUntil(t, ctx, rep1, ws1, initialTarget)
+	runReplicatorUntil(ctx, t, rep1, ws1, initialTarget)
 
 	callsBefore := len(ctrl.calls)
 
-	produceValues(t, ctx, leader, "alpha", 0, newRecords)
+	produceValues(ctx, t, leader, "alpha", 0, newRecords)
 	total := append(append([]string(nil), initial...), newRecords...)
 	finalHWM := api.Offset(len(total) - 1)
 
@@ -340,9 +343,9 @@ func TestPartitionReplicatorResumesFromNextOffset(t *testing.T) {
 
 	sink2 := NewReportingSink(ws2, ctrl, "alpha", 0, 2)
 	rep2 := NewPartitionReplicator(NewBinaryReplicator(), api.BrokerInfo{Host: addr}, "alpha", 0, sink2)
-	runReplicatorUntil(t, ctx, rep2, ws2, finalHWM)
+	runReplicatorUntil(ctx, t, rep2, ws2, finalHWM)
 
-	records := readLogValues(t, ctx, followerStore)
+	records := readLogValues(ctx, t, followerStore)
 	if len(records) != len(total) {
 		t.Fatalf("expected %d records, got %d", len(total), len(records))
 	}
@@ -367,14 +370,14 @@ func TestPartitionReplicatorDoesNotDuplicateAfterCatchUp(t *testing.T) {
 	ctx := context.Background()
 	values := []string{"foo", "bar", "baz"}
 
-	addr, cleanup, leader := startLeader(t, ctx)
+	addr, cleanup, leader := startLeader(ctx, t)
 	defer cleanup()
 
 	if err := leader.CreateTopic(ctx, "alpha", api.TopicConfig{Partitions: 1}); err != nil {
 		t.Fatalf("create topic: %v", err)
 	}
 
-	produceValues(t, ctx, leader, "alpha", 0, values)
+	produceValues(ctx, t, leader, "alpha", 0, values)
 	finalHWM := api.Offset(len(values) - 1)
 
 	followerStore, err := storage.NewManager(storage.Config{DataDir: t.TempDir()})
@@ -391,7 +394,7 @@ func TestPartitionReplicatorDoesNotDuplicateAfterCatchUp(t *testing.T) {
 	ws1 := NewWALSink(followerStore, "alpha", 0).(*walSink)
 	sink := NewReportingSink(ws1, ctrl, "alpha", 0, 2)
 	rep := NewPartitionReplicator(NewBinaryReplicator(), api.BrokerInfo{Host: addr}, "alpha", 0, sink)
-	runReplicatorUntil(t, ctx, rep, ws1, finalHWM)
+	runReplicatorUntil(ctx, t, rep, ws1, finalHWM)
 
 	callsBefore := len(ctrl.calls)
 
@@ -422,7 +425,7 @@ func TestPartitionReplicatorDoesNotDuplicateAfterCatchUp(t *testing.T) {
 
 	<-done
 
-	records := readLogValues(t, ctx, followerStore)
+	records := readLogValues(ctx, t, followerStore)
 	if len(records) != len(values) {
 		t.Fatalf("expected %d records after restart, got %d", len(values), len(records))
 	}
@@ -432,7 +435,7 @@ func TestPartitionReplicatorDoesNotDuplicateAfterCatchUp(t *testing.T) {
 	}
 }
 
-func startLeader(t *testing.T, ctx context.Context) (string, func(), *broker.Broker) {
+func startLeader(ctx context.Context, t *testing.T) (string, func(), *broker.Broker) {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -495,7 +498,7 @@ func startLeader(t *testing.T, ctx context.Context) (string, func(), *broker.Bro
 	return addr, cleanup, b
 }
 
-func produceValues(t *testing.T, ctx context.Context, b *broker.Broker, topic string, partition int, values []string) {
+func produceValues(ctx context.Context, t *testing.T, b *broker.Broker, topic string, partition int, values []string) {
 	t.Helper()
 
 	for _, val := range values {
@@ -505,7 +508,7 @@ func produceValues(t *testing.T, ctx context.Context, b *broker.Broker, topic st
 	}
 }
 
-func readLogValues(t *testing.T, ctx context.Context, store *storage.Manager) []string {
+func readLogValues(ctx context.Context, t *testing.T, store *storage.Manager) []string {
 	t.Helper()
 
 	log, err := store.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
@@ -527,7 +530,7 @@ func readLogValues(t *testing.T, ctx context.Context, store *storage.Manager) []
 	return res
 }
 
-func runReplicatorUntil(t *testing.T, ctx context.Context, rep *PartitionReplicator, sink *walSink, target api.Offset) {
+func runReplicatorUntil(ctx context.Context, t *testing.T, rep *PartitionReplicator, sink *walSink, target api.Offset) {
 	t.Helper()
 
 	ctxRep, cancel := context.WithCancel(ctx)

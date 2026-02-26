@@ -129,6 +129,11 @@ func (f *fakeBroker) CommitOffset(ctx context.Context, group string, topic strin
 }
 
 func (f *fakeBroker) FetchCommitted(ctx context.Context, group string, topic string, partition int) (api.Offset, error) {
+	_ = ctx
+	_ = group
+	_ = topic
+	_ = partition
+
 	return -1, errors.New("not implemented")
 }
 

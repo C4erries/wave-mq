@@ -35,7 +35,9 @@ func (s *reportingSink) ApplyBatch(ctx context.Context, records []api.Record, hi
 	}
 
 	if len(records) > 0 {
-		observability.ReplicationApplied.WithLabelValues(s.topic, fmt.Sprintf("%d", s.part), fmt.Sprintf("%d", s.brokerID)).Add(float64(len(records)))
+		observability.ReplicationApplied.
+			WithLabelValues(s.topic, fmt.Sprintf("%d", s.part), fmt.Sprintf("%d", s.brokerID)).
+			Add(float64(len(records)))
 	}
 
 	lag := highWatermark - last

@@ -280,7 +280,12 @@ func (b *Broker) createTopicFromClusterAssignments(ctx context.Context, name str
 
 // CreateTopicWithAssignments initializes local partitions based on controller assignments.
 // If assignments are empty or the broker is not clustered, it falls back to CreateTopic.
-func (b *Broker) CreateTopicWithAssignments(ctx context.Context, name string, cfg api.TopicConfig, assignments map[int]api.PartitionAssignment) error {
+func (b *Broker) CreateTopicWithAssignments(
+	ctx context.Context,
+	name string,
+	cfg api.TopicConfig,
+	assignments map[int]api.PartitionAssignment,
+) error {
 	if b.cluster == nil || len(assignments) == 0 {
 		return b.CreateTopic(ctx, name, cfg)
 	}
@@ -334,7 +339,11 @@ func (b *Broker) CreateTopicWithAssignments(ctx context.Context, name string, cf
 	return b.loadTopicLocked(ctx, state, filtered)
 }
 
-func (b *Broker) bootstrapTopicsFromMetadata(ctx context.Context, topics map[string]metadata.TopicState, assignments map[string]map[int]api.PartitionAssignment) error {
+func (b *Broker) bootstrapTopicsFromMetadata(
+	ctx context.Context,
+	topics map[string]metadata.TopicState,
+	assignments map[string]map[int]api.PartitionAssignment,
+) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -362,7 +371,11 @@ func (b *Broker) bootstrapTopicsFromMetadata(ctx context.Context, topics map[str
 	return nil
 }
 
-func (b *Broker) reconcileClusterMetadata(ctx context.Context, local map[string]metadata.TopicState, initial *api.ClusterMetadata) (map[string]metadata.TopicState, map[string]map[int]api.PartitionAssignment, error) {
+func (b *Broker) reconcileClusterMetadata(
+	ctx context.Context,
+	_ map[string]metadata.TopicState,
+	initial *api.ClusterMetadata,
+) (map[string]metadata.TopicState, map[string]map[int]api.PartitionAssignment, error) {
 	var meta api.ClusterMetadata
 	if initial != nil {
 		meta = *initial
@@ -428,7 +441,10 @@ func assignmentsForBroker(meta api.ClusterMetadata, topic string, brokerID int) 
 	return result
 }
 
-func topicsFromClusterMetadata(meta api.ClusterMetadata, brokerID int) (map[string]metadata.TopicState, map[string]map[int]api.PartitionAssignment) {
+func topicsFromClusterMetadata(
+	meta api.ClusterMetadata,
+	brokerID int,
+) (map[string]metadata.TopicState, map[string]map[int]api.PartitionAssignment) {
 	assignments := make(map[string]map[int]api.PartitionAssignment)
 	topics := make(map[string]metadata.TopicState)
 
@@ -1338,7 +1354,13 @@ func (b *Broker) partitionAssignments(topic string) map[int]api.PartitionAssignm
 }
 
 // FetchMessages fetches up to limit messages ending at offset (if provided) from a partition.
-func (b *Broker) FetchMessages(ctx context.Context, topic string, partition int, offsetParam string, limit int) (api.Offset, []api.Record, error) {
+func (b *Broker) FetchMessages(
+	ctx context.Context,
+	topic string,
+	partition int,
+	offsetParam string,
+	limit int,
+) (api.Offset, []api.Record, error) {
 	earliest, latest, err := b.ListOffsets(ctx, topic, partition)
 	if err != nil {
 		return 0, nil, err

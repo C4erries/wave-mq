@@ -22,10 +22,15 @@ type fakeController struct {
 }
 
 func (f *fakeController) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
+	_ = ctx
+
 	return api.ClusterMetadata{}, nil
 }
 
 func (f *fakeController) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
+	_ = ctx
+	_ = sinceVersion
+
 	ch := make(chan api.ClusterMetadata)
 	close(ch)
 
@@ -33,10 +38,16 @@ func (f *fakeController) WatchClusterMetadata(ctx context.Context, sinceVersion 
 }
 
 func (f *fakeController) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = name
+	_ = cfg
+
 	return api.ClusterMetadata{}, nil
 }
 
 func (f *fakeController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+	_ = ctx
+
 	f.calls = append(f.calls, struct {
 		topic string
 		part  int

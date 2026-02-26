@@ -117,6 +117,8 @@ type Record struct {
 }
 
 // APIKey identifies a request type in the binary protocol.
+//
+//nolint:revive // Protocol naming is intentionally APIKey across the project.
 type APIKey int16
 
 const (

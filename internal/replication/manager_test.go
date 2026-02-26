@@ -15,10 +15,14 @@ type fakeMetadataStore struct {
 }
 
 func (f *fakeMetadataStore) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
+	_ = ctx
+
 	return f.meta, nil
 }
 
 func (f *fakeMetadataStore) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
+	_ = sinceVersion
+
 	ch := make(chan api.ClusterMetadata, 1)
 
 	go func() {
@@ -32,10 +36,21 @@ func (f *fakeMetadataStore) WatchClusterMetadata(ctx context.Context, sinceVersi
 }
 
 func (f *fakeMetadataStore) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = name
+	_ = cfg
+
 	return f.meta, nil
 }
 
 func (f *fakeMetadataStore) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = topic
+	_ = partition
+	_ = brokerID
+	_ = lastOffset
+	_ = leaderHighWatermark
+
 	return f.meta, nil
 }
 
@@ -54,6 +69,9 @@ type fakeReplicator struct {
 }
 
 func (f *fakeReplicator) FetchFromLeader(ctx context.Context, leader api.BrokerInfo, req FetchRequest) (FetchResponse, error) {
+	_ = ctx
+	_ = leader
+
 	f.mu.Lock()
 	f.fetch = append(f.fetch, req)
 	f.mu.Unlock()
@@ -68,6 +86,8 @@ type trackingReplicator struct {
 }
 
 func (t *trackingReplicator) FetchFromLeader(ctx context.Context, leader api.BrokerInfo, req FetchRequest) (FetchResponse, error) {
+	_ = req
+
 	t.mu.Lock()
 	t.leaders = append(t.leaders, leader.BrokerID)
 	t.contexts = append(t.contexts, ctx)
@@ -166,10 +186,19 @@ func (s *streamMetadataStore) WatchClusterMetadata(ctx context.Context, sinceVer
 }
 
 func (s *streamMetadataStore) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
+	_ = name
+	_ = cfg
+
 	return s.GetClusterMetadata(ctx)
 }
 
 func (s *streamMetadataStore) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+	_ = topic
+	_ = partition
+	_ = brokerID
+	_ = lastOffset
+	_ = leaderHighWatermark
+
 	return s.GetClusterMetadata(ctx)
 }
 
@@ -313,9 +342,9 @@ func TestManagerRestartsOnLeaderChange(t *testing.T) {
 		Partitions: []api.PartitionAssignment{{Topic: "a", Partition: 0, Leader: 3, Replicas: []int{1, 2, 3}, ISR: []int{3}}},
 	})
 
-	waitForContextCanceled(t, firstCtx)
+	waitForContextCanceled(firstCtx, t)
 	waitForLeader(t, repl, 3)
-	waitForNewContext(t, repl, firstCtx)
+	waitForNewContext(firstCtx, t, repl)
 }
 
 func TestManagerStopsReplicationWhenReplicaRemoved(t *testing.T) {
@@ -352,7 +381,7 @@ func TestManagerStopsReplicationWhenReplicaRemoved(t *testing.T) {
 		Partitions: []api.PartitionAssignment{{Topic: "a", Partition: 0, Leader: 1, Replicas: []int{1, 3}, ISR: []int{1}}},
 	})
 
-	waitForContextCanceled(t, firstCtx)
+	waitForContextCanceled(firstCtx, t)
 	ensureNoNewContexts(t, repl, len(repl.contextsSnapshot()))
 }
 
@@ -393,7 +422,7 @@ func waitForLeader(t *testing.T, repl *trackingReplicator, leader int) {
 	}
 }
 
-func waitForContextCanceled(t *testing.T, ctx context.Context) {
+func waitForContextCanceled(ctx context.Context, t *testing.T) {
 	t.Helper()
 
 	deadline := time.After(time.Second)
@@ -409,7 +438,7 @@ func waitForContextCanceled(t *testing.T, ctx context.Context) {
 	}
 }
 
-func waitForNewContext(t *testing.T, repl *trackingReplicator, old context.Context) {
+func waitForNewContext(old context.Context, t *testing.T, repl *trackingReplicator) {
 	t.Helper()
 
 	deadline := time.After(time.Second)

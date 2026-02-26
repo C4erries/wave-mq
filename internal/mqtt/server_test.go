@@ -103,6 +103,7 @@ func (b *fakeBroker) Metadata(ctx context.Context, topics []string) ([]api.Parti
 
 func (b *fakeBroker) JoinGroup(ctx context.Context, group, memberID string, topics []string) (map[string][]int, error) {
 	_ = ctx
+	_ = group
 	_ = memberID
 
 	assign := make(map[string][]int)
