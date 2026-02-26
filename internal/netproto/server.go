@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 
 	"github.com/c4erries/wave-mq/internal/broker"
 	"github.com/c4erries/wave-mq/internal/observability"
@@ -32,7 +31,6 @@ type Server struct {
 	broker  BrokerAPI
 	ln      net.Listener
 	started bool
-	corrID  int32
 }
 
 // NewServer constructs a TCP server bound to addr.
@@ -137,12 +135,6 @@ func (s *Server) Addr() net.Addr {
 	}
 
 	return &copied
-}
-
-// frame is a placeholder for length-prefixed protocol frames.
-type frame struct {
-	APIKey api.APIKey
-	// TODO: add version, correlation ID, flags and payload buffer.
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
@@ -340,10 +332,6 @@ func (s *Server) errorResponseForKey(apiKey api.APIKey, code api.ErrorCode) ([]b
 	default:
 		return encodePingResponse(&PingResponse{Error: code})
 	}
-}
-
-func (s *Server) nextCorrID() int32 {
-	return atomic.AddInt32(&s.corrID, 1)
 }
 
 func mapError(err error) api.ErrorCode {

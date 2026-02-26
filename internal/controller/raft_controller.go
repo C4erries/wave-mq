@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -519,10 +520,10 @@ func (c *RaftController) RaftLeader() string {
 func (c *RaftController) RaftTerm() uint64 {
 	stats := c.raft.Stats()
 	if termStr, ok := stats["term"]; ok {
-		var term uint64
-		fmt.Sscanf(termStr, "%d", &term)
-
-		return term
+		term, err := strconv.ParseUint(termStr, 10, 64)
+		if err == nil {
+			return term
+		}
 	}
 
 	return 0

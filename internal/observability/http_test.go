@@ -27,6 +27,8 @@ func TestHTTPServerHealthAndMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("healthz request: %v", err)
 	}
+	defer resp.Body.Close()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -78,6 +80,7 @@ func TestHealthzNotReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("healthz request: %v", err)
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", resp.StatusCode)

@@ -165,7 +165,9 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 	go srv.handleConnection(server)
 
 	sendPacket := func(p []byte) {
-		client.Write(p)
+		if _, err := client.Write(p); err != nil {
+			t.Fatalf("write packet: %v", err)
+		}
 	}
 	readPacketType := func() (byte, []byte, error) {
 		_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -271,7 +273,7 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 	sendPacket(append(pubHeader, pubBody.Bytes()...))
 
 	for {
-		tp, body, err = readPacketType()
+		tp, _, err = readPacketType()
 		if err != nil {
 			t.Fatalf("puback read: %v", err)
 		}
@@ -386,9 +388,14 @@ func TestMQTTServerTailVsBacklog(t *testing.T) {
 	go srv.handleConnection(server1)
 
 	_, _ = client1.Write(makeConnect(false))
-	_, _, _ = readPacketTypeClient(client1)
+	if _, _, err := readPacketTypeClient(client1); err != nil {
+		t.Fatalf("connack read (client1): %v", err)
+	}
+
 	_ = subscribe(client1)
-	_, _, _ = readPacketTypeClient(client1) // SUBACK
+	if _, _, err := readPacketTypeClient(client1); err != nil {
+		t.Fatalf("suback read (client1): %v", err)
+	}
 	// Expect backlog publish
 	tp, body, err := readPacketTypeClient(client1)
 	if err != nil || tp != packetTypePUBLISH {
@@ -414,9 +421,14 @@ func TestMQTTServerTailVsBacklog(t *testing.T) {
 	go srv.handleConnection(server2)
 
 	_, _ = client2.Write(makeConnect(true))
-	_, _, _ = readPacketTypeClient(client2)
+	if _, _, err := readPacketTypeClient(client2); err != nil {
+		t.Fatalf("connack read (client2): %v", err)
+	}
+
 	_ = subscribe(client2)
-	_, _, _ = readPacketTypeClient(client2) // SUBACK
+	if _, _, err := readPacketTypeClient(client2); err != nil {
+		t.Fatalf("suback read (client2): %v", err)
+	}
 	// Append new message after subscribe
 	b.records["topic"][0] = append(b.records["topic"][0], api.Record{Offset: 2, Value: []byte("new")})
 	// Expect to receive only "new"

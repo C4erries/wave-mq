@@ -910,7 +910,10 @@ func (b *Broker) CommitOffset(ctx context.Context, group string, topic string, p
 	b.commitCount++
 	if b.commitCount%1000 == 0 {
 		snapshot := b.snapshotOffsetsLocked()
-		go b.offsets.Compact(context.Background(), snapshot)
+
+		go func() {
+			_ = b.offsets.Compact(context.Background(), snapshot)
+		}()
 	}
 
 	return nil
@@ -975,7 +978,7 @@ func (b *Broker) Metadata(ctx context.Context, topics []string) ([]api.Partition
 			assign, hasAssign := topicAssignments[pid]
 			// Missing assignments fallback to local view; otherwise include follower metadata too for routing.
 			role := p.Metadata.Replica.Role
-			leader := int(p.Metadata.Replica.BrokerID)
+			leader := p.Metadata.Replica.BrokerID
 			replicas := []int{b.cfg.BrokerID}
 			isr := []int{b.cfg.BrokerID}
 			epoch := p.Metadata.Replica.LeaderEpoch

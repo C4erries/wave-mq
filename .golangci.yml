@@ -35,7 +35,6 @@ linters:
     - prealloc
     - revive
     - staticcheck
-    - testpackage
     - unconvert
     - unused
     - whitespace

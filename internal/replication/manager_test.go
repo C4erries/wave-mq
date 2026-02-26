@@ -208,7 +208,9 @@ func TestManagerStartsReplicatorsForFollowers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	go mgr.Run(ctx)
+	go func() {
+		_ = mgr.Run(ctx)
+	}()
 
 	time.Sleep(300 * time.Millisecond)
 	repl.mu.Lock()
@@ -254,7 +256,9 @@ func TestManagerStartsReplicatorsForMultipleFollowers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	go mgr.Run(ctx)
+	go func() {
+		_ = mgr.Run(ctx)
+	}()
 
 	time.Sleep(300 * time.Millisecond)
 	repl.mu.Lock()
@@ -291,7 +295,9 @@ func TestManagerRestartsOnLeaderChange(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	go mgr.Run(ctx)
+	go func() {
+		_ = mgr.Run(ctx)
+	}()
 
 	metaFeed.push(api.ClusterMetadata{
 		Version:    1,
@@ -328,7 +334,9 @@ func TestManagerStopsReplicationWhenReplicaRemoved(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	go mgr.Run(ctx)
+	go func() {
+		_ = mgr.Run(ctx)
+	}()
 
 	metaFeed.push(api.ClusterMetadata{
 		Version:    1,

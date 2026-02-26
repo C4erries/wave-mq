@@ -42,7 +42,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/api/topics/", withCORS(http.HandlerFunc(h.handleTopicPaths)))
 }
 
-func (h *Handler) handleBroker(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleBroker(w http.ResponseWriter, _ *http.Request) {
 	resp := map[string]interface{}{
 		"id":                h.cfg.BrokerID,
 		"binaryEndpoint":    h.cfg.BinaryAddr,
@@ -174,13 +174,13 @@ func (h *Handler) handleSummary(w http.ResponseWriter, r *http.Request) {
 	topics, partitions := h.b.TopicAndPartitionCounts()
 	produced := sumCounter("wavemq_messages_produced_total")
 	consumed := sumCounter("wavemq_messages_consumed_total")
-	errors := sumCounter("wavemq_request_errors_total")
+	reqErrors := sumCounter("wavemq_request_errors_total")
 	resp := map[string]interface{}{
 		"topics":     topics,
 		"partitions": partitions,
 		"produced":   produced,
 		"consumed":   consumed,
-		"errors":     errors,
+		"errors":     reqErrors,
 	}
 	writeJSON(w, resp)
 }
@@ -213,10 +213,6 @@ func (h *Handler) handleTopicPaths(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 1 {
 		h.topicDetail(w, r, name)
 		return
-	}
-
-	if len(parts) == 3 && parts[1] == "partitions" && parts[2] != "" && strings.HasSuffix(r.URL.Path, "/messages") {
-		// Will be handled by next branch.
 	}
 
 	if len(parts) == 4 && parts[1] == "partitions" && parts[3] == "messages" {
@@ -430,16 +426,6 @@ func encodeMaybeBase64(b []byte) interface{} {
 	}
 
 	return "base64:" + base64.StdEncoding.EncodeToString(b)
-}
-
-func containsInt(list []int, id int) bool {
-	for _, v := range list {
-		if v == id {
-			return true
-		}
-	}
-
-	return false
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {

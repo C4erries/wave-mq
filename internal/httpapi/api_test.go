@@ -331,6 +331,7 @@ func TestCreateTopicEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("expected 201, got %d", resp.StatusCode)
@@ -616,6 +617,7 @@ func TestProduceEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)

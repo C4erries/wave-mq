@@ -164,8 +164,12 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 	ctxSrv, cancelSrv := context.WithCancel(ctx)
 	defer cancelSrv()
 
-	go srv1.ListenAndServe(ctxSrv)
-	go srv2.ListenAndServe(ctxSrv)
+	go func() {
+		_ = srv1.ListenAndServe(ctxSrv)
+	}()
+	go func() {
+		_ = srv2.ListenAndServe(ctxSrv)
+	}()
 
 	meta, _ := rc1.GetClusterMetadata(ctx)
 
@@ -559,7 +563,9 @@ func TestReplicationResumesAfterRestarts(t *testing.T) {
 	ctxSrv, cancelSrv := context.WithCancel(ctx)
 	defer cancelSrv()
 
-	go server.ListenAndServe(ctxSrv)
+	go func() {
+		_ = server.ListenAndServe(ctxSrv)
+	}()
 
 	rep := replication.NewBinaryReplicator()
 	startReplication := func(fStore *storage.Manager, fCtrl controller.MetadataStore) (context.CancelFunc, <-chan struct{}, <-chan error) {

@@ -324,7 +324,7 @@ func encodeCreateTopicEvent(ev CreateTopicEvent) ([]byte, error) {
 			return nil, fmt.Errorf("partition %d replica count %d != rf %d", p.ID, len(p.Replicas), ev.ReplicationFactor)
 		}
 
-		if err := binary.Write(buf, binary.LittleEndian, int32(p.ID)); err != nil {
+		if err := binary.Write(buf, binary.LittleEndian, p.ID); err != nil {
 			return nil, err
 		}
 

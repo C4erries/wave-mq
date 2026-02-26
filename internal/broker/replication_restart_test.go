@@ -282,7 +282,10 @@ func startBrokerNodes(t *testing.T, ctx context.Context, cfgs []api.BrokerConfig
 		srv, _ := netproto.NewServer(addrs[idx], b)
 
 		srvCtx, srvCancel := context.WithCancel(ctx)
-		go srv.ListenAndServe(srvCtx)
+
+		go func() {
+			_ = srv.ListenAndServe(srvCtx)
+		}()
 
 		nodes[cfg.BrokerID] = &brokerNode{cfg: cfg, meta: meta, store: store, offsets: offsets, broker: b, server: srv, srvCancel: srvCancel, ctrl: ctrls[idx]}
 	}
