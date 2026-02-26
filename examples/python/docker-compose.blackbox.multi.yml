@@ -1,0 +1,50 @@
+services:
+  broker1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command:
+      - "-broker-id=1"
+      - "-controller=raft"
+      - "-raft-bind=broker1:9001"
+      - "-raft-peer=broker1:9001,broker2:9001"
+      - "-raft-dir=/data/raft"
+      - "-data-dir=/data"
+      - "-bind=:7912"
+      - "-advertise=broker1:7912"
+      - "-mqtt=:1883"
+      - "-http=:8090"
+      - "-replication=true"
+    ports:
+      - "${WAVEMQ_MBB_BINARY_PORT_1:-27912}:7912"
+      - "${WAVEMQ_MBB_MQTT_PORT_1:-21883}:1883"
+      - "${WAVEMQ_MBB_HTTP_PORT_1:-28091}:8090"
+    volumes:
+      - bbm_wave_data1:/data
+
+  broker2:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command:
+      - "-broker-id=2"
+      - "-controller=raft"
+      - "-raft-bind=broker2:9001"
+      - "-raft-peer=broker1:9001,broker2:9001"
+      - "-raft-dir=/data/raft"
+      - "-data-dir=/data"
+      - "-bind=:7912"
+      - "-advertise=broker2:7912"
+      - "-mqtt=:1883"
+      - "-http=:8090"
+      - "-replication=true"
+    ports:
+      - "${WAVEMQ_MBB_BINARY_PORT_2:-28912}:7912"
+      - "${WAVEMQ_MBB_MQTT_PORT_2:-22883}:1883"
+      - "${WAVEMQ_MBB_HTTP_PORT_2:-28092}:8090"
+    volumes:
+      - bbm_wave_data2:/data
+
+volumes:
+  bbm_wave_data1:
+  bbm_wave_data2:

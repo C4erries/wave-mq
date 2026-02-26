@@ -36,6 +36,7 @@ func main() {
 		readyFlag         atomic.Bool
 		dataDir           = flag.String("data-dir", "data", "path to broker data directory")
 		binaryAddr        = flag.String("bind", ":7912", "address for binary protocol listener")
+		advertisedAddr    = flag.String("advertise", "", "advertised binary address for cluster metadata (host:port)")
 		mqttAddr          = flag.String("mqtt", ":1883", "address for MQTT listener")
 		httpAddr          = flag.String("http", ":8090", "address for metrics/health HTTP listener")
 		brokerID          = flag.Int("broker-id", 1, "numeric broker id")
@@ -57,6 +58,7 @@ func main() {
 		ReplicationFactor: *replicationFactor,
 		DataDir:           *dataDir,
 		BinaryAddr:        *binaryAddr,
+		AdvertisedAddr:    *advertisedAddr,
 		MQTTAddr:          *mqttAddr,
 		HTTPAddr:          *httpAddr,
 		MaxSegmentBytes:   *segmentBytes,

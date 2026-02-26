@@ -47,11 +47,11 @@ type TopicConfig struct {
 
 // PartitionReplica identifies a concrete partition replica on a broker.
 type PartitionReplica struct {
-	Topic       string
-	Partition   int
-	BrokerID    int
-	Role        PartitionRole
-	LeaderEpoch int32
+	Topic       string        `json:"topic"`
+	Partition   int           `json:"partition"`
+	BrokerID    int           `json:"brokerID"`
+	Role        PartitionRole `json:"role"`
+	LeaderEpoch int32         `json:"leaderEpoch"`
 }
 
 // PartitionMetadata captures per-partition state that is exposed to clients.
@@ -59,38 +59,38 @@ type PartitionReplica struct {
 // describes the local replica (leader or follower) owned by the responding
 // broker.
 type PartitionMetadata struct {
-	Replica       PartitionReplica
-	StartOffset   Offset
-	HighWatermark Offset
-	Leader        int
-	Replicas      []int
-	ISR           []int
+	Replica       PartitionReplica `json:"replica"`
+	StartOffset   Offset           `json:"startOffset"`
+	HighWatermark Offset           `json:"highWatermark"`
+	Leader        int              `json:"leader"`
+	Replicas      []int            `json:"replicas"`
+	ISR           []int            `json:"isr"`
 }
 
 // BrokerInfo describes a broker in the cluster.
 type BrokerInfo struct {
-	BrokerID int
-	Host     string
-	Port     int
-	Rack     string
+	BrokerID int    `json:"brokerID"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Rack     string `json:"rack"`
 }
 
 // PartitionAssignment describes replica layout and leader/ISR for a partition.
 type PartitionAssignment struct {
-	Topic       string
-	Partition   int
-	Replicas    []int
-	ISR         []int
-	Leader      int
-	LeaderEpoch int32
+	Topic       string `json:"topic"`
+	Partition   int    `json:"partition"`
+	Replicas    []int  `json:"replicas"`
+	ISR         []int  `json:"isr"`
+	Leader      int    `json:"leader"`
+	LeaderEpoch int32  `json:"leaderEpoch"`
 }
 
 // ClusterMetadata captures cluster-wide broker and partition state.
 type ClusterMetadata struct {
-	ClusterID  string
-	Version    int64
-	Brokers    []BrokerInfo
-	Partitions []PartitionAssignment
+	ClusterID  string                `json:"clusterID"`
+	Version    int64                 `json:"version"`
+	Brokers    []BrokerInfo          `json:"brokers"`
+	Partitions []PartitionAssignment `json:"partitions"`
 }
 
 // StaticClusterConfig describes a preconfigured cluster layout used for bootstrapping.

@@ -257,7 +257,7 @@ class BlackboxSuite:
     def __init__(self, settings: SuiteSettings) -> None:
         self.settings = settings
         self.http = HTTPClient(settings.http_host, settings.http_port, settings.timeout_sec)
-        self.run_id = f"{int(time.time())}-{os.getpid()}"
+        self.run_id = f"{int(time.time() * 1000)}-{os.getpid()}"
         self.created_topics: set[str] = set()
         self.total_produced = 0
         self.restart_hook: Callable[[], None] | None = None
@@ -282,16 +282,24 @@ class BlackboxSuite:
         return f"bb_{self.run_id}_{suffix}"
 
     def create_topic(self, name: str, partitions: int, rf: int = 1) -> dict[str, Any]:
-        status, data = self.http.post_json(
+        status, body = self.http.request(
+            "POST",
             "/api/topics",
-            {"name": name, "partitions": partitions, "replicationFactor": rf},
+            json_body={"name": name, "partitions": partitions, "replicationFactor": rf},
             expected_status=None,
         )
         if status not in (201, 409):
-            raise BlackboxError(f"create topic {name} failed with status {status}: {data!r}")
+            raise BlackboxError(f"create topic {name} failed with status {status}: {body!r}")
         if status == 201:
             self.created_topics.add(name)
-        return data if isinstance(data, dict) else {}
+            if body.strip():
+                try:
+                    parsed = json.loads(body)
+                except json.JSONDecodeError:
+                    return {}
+                if isinstance(parsed, dict):
+                    return parsed
+        return {}
 
     def produce_http(self, topic: str, partition: int, value: str, *, retries: int = 2) -> dict[str, Any]:
         path = f"/api/topics/{topic}/partitions/{partition}/messages"

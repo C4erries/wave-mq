@@ -86,3 +86,42 @@ The script uses `docker-compose.blackbox.yml` and maps ports to host defaults:
 ```sh
 python blackbox_suite.py --no-docker --http-port 8090 --mqtt-port 1883 --skip-restart
 ```
+
+## 5. Multi-broker blackbox suite (Raft, 2 nodes)
+
+`examples/python/blackbox_multi_suite.py` runs distributed checks in 2-broker mode:
+
+- both brokers healthy with controller mode `raft`;
+- cluster metadata converges to brokers `1` and `2`;
+- topic creation with `replicationFactor=2`;
+- partition leaders spread across nodes;
+- heavy produce/fetch through real leaders;
+- `not_leader` checks on wrong broker endpoints;
+- ISR convergence to both replicas;
+- restart of one broker with post-restart traffic validation.
+
+Run from `wave-mq/examples/python`:
+
+```sh
+python blackbox_multi_suite.py --profile full
+```
+
+Profiles:
+
+- `smoke` - quick distributed validation
+- `full` - default
+- `massive` - heavy distributed load
+
+Useful flags:
+
+```sh
+python blackbox_multi_suite.py --profile massive --keep-stack
+python blackbox_multi_suite.py --profile full --skip-restart
+python blackbox_multi_suite.py --profile smoke --http-port-1 38091 --http-port-2 38092
+```
+
+Run against an already running 2-broker cluster (without Docker orchestration):
+
+```sh
+python blackbox_multi_suite.py --no-docker --skip-restart --http-port-1 8091 --http-port-2 8092
+```

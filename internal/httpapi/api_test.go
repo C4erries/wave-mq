@@ -811,6 +811,38 @@ func TestClusterMetadataEndpoint(t *testing.T) {
 	}
 }
 
+func TestClusterMetadataEndpointJSONKeys(t *testing.T) {
+	server, b, store, offsetStore, metaStore := setupTestServer(t)
+	defer server.Close()
+	defer b.Close()
+	defer store.Close()
+	defer offsetStore.Close()
+	defer metaStore.Close()
+
+	resp, err := http.Get(server.URL + "/api/cluster")
+	if err != nil {
+		t.Fatalf("get cluster: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	for _, key := range []string{"clusterID", "version", "brokers", "partitions"} {
+		if _, ok := raw[key]; !ok {
+			t.Fatalf("missing lowercase key %q in cluster response: %+v", key, raw)
+		}
+	}
+
+	for _, key := range []string{"ClusterID", "Version", "Brokers", "Partitions"} {
+		if _, ok := raw[key]; ok {
+			t.Fatalf("unexpected legacy key %q in cluster response", key)
+		}
+	}
+}
+
 func TestCreateTopicRespectsControllerAssignmentsAcrossBrokers(t *testing.T) {
 	assignments := []api.PartitionAssignment{
 		{Topic: "alpha", Partition: 0, Replicas: []int{1}, ISR: []int{1}, Leader: 1},
