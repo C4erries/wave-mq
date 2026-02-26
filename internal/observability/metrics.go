@@ -63,7 +63,9 @@ var (
 	)
 )
 
-func init() {
+var _ = registerMetrics()
+
+func registerMetrics() struct{} {
 	prometheus.MustRegister(
 		MessagesProduced,
 		MessagesConsumed,
@@ -73,4 +75,6 @@ func init() {
 		ReplicationLag,
 		ReplicationApplied,
 	)
+
+	return struct{}{}
 }

@@ -546,7 +546,7 @@ func TestRaftControllerFailoverApplyCommands(t *testing.T) {
 		Brokers:   static.Brokers,
 	}
 
-	var ctrls []*RaftController
+	ctrls := make([]*RaftController, 0, len(cfgs))
 
 	for _, cfg := range cfgs {
 		rc, err := NewRaftController(cfg, initial, "")

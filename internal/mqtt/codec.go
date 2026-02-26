@@ -280,7 +280,8 @@ func writeConnack(w io.Writer, pkt *ConnackPacket) error {
 	}
 
 	body := []byte{flags, pkt.ReturnCode}
-	header := []byte{packetTypeCONNACK << 4}
+	header := make([]byte, 0, 1+4)
+	header = append(header, packetTypeCONNACK<<4)
 
 	header = append(header, encodeRemainingLength(len(body))...)
 	if _, err := w.Write(header); err != nil {
@@ -300,7 +301,8 @@ func writeSuback(w io.Writer, pkt *SubackPacket) error {
 
 	body.Write(pkt.Granted)
 
-	header := []byte{packetTypeSUBACK << 4}
+	header := make([]byte, 0, 1+4)
+	header = append(header, packetTypeSUBACK<<4)
 
 	header = append(header, encodeRemainingLength(body.Len())...)
 	if _, err := w.Write(header); err != nil {
@@ -327,7 +329,8 @@ func writePublish(w io.Writer, pkt *PublishPacket) error {
 
 	body.Write(pkt.Payload)
 
-	header := []byte{flags}
+	header := make([]byte, 0, 1+4)
+	header = append(header, flags)
 
 	header = append(header, encodeRemainingLength(body.Len())...)
 	if _, err := w.Write(header); err != nil {
@@ -345,7 +348,8 @@ func writePuback(w io.Writer, pkt *PubackPacket) error {
 		return err
 	}
 
-	header := []byte{packetTypePUBACK << 4}
+	header := make([]byte, 0, 1+4)
+	header = append(header, packetTypePUBACK<<4)
 
 	header = append(header, encodeRemainingLength(body.Len())...)
 	if _, err := w.Write(header); err != nil {

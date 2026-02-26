@@ -1447,7 +1447,7 @@ func (b *Broker) ConsumerGroupsSnapshot(ctx context.Context) []ConsumerGroupInfo
 		hwm[m.Replica.Topic][m.Replica.Partition] = m.HighWatermark
 	}
 
-	var groups []ConsumerGroupInfo
+	groups := make([]ConsumerGroupInfo, 0, len(b.groups))
 	for name, g := range b.groups {
 		g.mu.RLock()
 

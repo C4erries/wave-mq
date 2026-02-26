@@ -200,7 +200,8 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 	connectBody.WriteByte(0b00000010) // clean start
 	connectBody.Write([]byte{0, 10})  // keepalive
 	_ = writeString(connectBody, "client-1")
-	connectHeader := []byte{packetTypeCONNECT << 4}
+	connectHeader := make([]byte, 0, 1+4)
+	connectHeader = append(connectHeader, packetTypeCONNECT<<4)
 	connectHeader = append(connectHeader, encodeRemainingLength(connectBody.Len())...)
 	sendPacket(append(connectHeader, connectBody.Bytes()...))
 
@@ -219,7 +220,8 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 	_ = writeString(subBody, "t/1")
 	subBody.WriteByte(0) // QoS0
 
-	subHeader := []byte{(packetTypeSUBSCRIBE << 4) | 0x02}
+	subHeader := make([]byte, 0, 1+4)
+	subHeader = append(subHeader, (packetTypeSUBSCRIBE<<4)|0x02)
 	subHeader = append(subHeader, encodeRemainingLength(subBody.Len())...)
 	sendPacket(append(subHeader, subBody.Bytes()...))
 
@@ -269,7 +271,8 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 	pubBody.Write([]byte{0, 10}) // packet ID
 	pubBody.WriteString("from-client")
 
-	pubHeader := []byte{(packetTypePUBLISH << 4) | (qos1 << 1)}
+	pubHeader := make([]byte, 0, 1+4)
+	pubHeader = append(pubHeader, (packetTypePUBLISH<<4)|(qos1<<1))
 	pubHeader = append(pubHeader, encodeRemainingLength(pubBody.Len())...)
 	sendPacket(append(pubHeader, pubBody.Bytes()...))
 
@@ -361,7 +364,8 @@ func TestMQTTServerTailVsBacklog(t *testing.T) {
 		body.WriteByte(flags)
 		body.Write([]byte{0, 10})
 		_ = writeString(body, "client-1")
-		header := []byte{packetTypeCONNECT << 4}
+		header := make([]byte, 0, 1+4)
+		header = append(header, packetTypeCONNECT<<4)
 		header = append(header, encodeRemainingLength(body.Len())...)
 
 		return append(header, body.Bytes()...)
@@ -373,7 +377,8 @@ func TestMQTTServerTailVsBacklog(t *testing.T) {
 		_ = writeString(subBody, "topic")
 		subBody.WriteByte(0) // QoS0
 
-		subHeader := []byte{(packetTypeSUBSCRIBE << 4) | 0x02}
+		subHeader := make([]byte, 0, 1+4)
+		subHeader = append(subHeader, (packetTypeSUBSCRIBE<<4)|0x02)
 		subHeader = append(subHeader, encodeRemainingLength(subBody.Len())...)
 		_, err := conn.Write(append(subHeader, subBody.Bytes()...))
 

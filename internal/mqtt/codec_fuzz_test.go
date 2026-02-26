@@ -32,7 +32,8 @@ func makeConnectPacket(cleanStart bool) []byte {
 	body.WriteByte(flags)
 	body.Write([]byte{0, 10})
 	_ = writeString(body, "fuzz-client")
-	header := []byte{packetTypeCONNECT << 4}
+	header := make([]byte, 0, 1+4)
+	header = append(header, packetTypeCONNECT<<4)
 	header = append(header, encodeRemainingLength(body.Len())...)
 
 	return append(header, body.Bytes()...)

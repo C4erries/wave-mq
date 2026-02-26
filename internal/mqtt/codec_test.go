@@ -14,7 +14,8 @@ func TestConnectRoundTrip(t *testing.T) {
 		AuthData:     []byte("p"),
 	}
 	buf := &bytes.Buffer{}
-	header := []byte{packetTypeCONNECT << 4}
+	header := make([]byte, 0, 1+4)
+	header = append(header, packetTypeCONNECT<<4)
 	body := &bytes.Buffer{}
 	_ = writeString(body, "MQTT")
 	body.WriteByte(4) // protocol level
@@ -50,7 +51,8 @@ func TestSubscribeRoundTrip(t *testing.T) {
 	_ = writeString(body, "c/d")
 	body.WriteByte(1)
 
-	header := []byte{(packetTypeSUBSCRIBE << 4) | 0x02}
+	header := make([]byte, 0, 1+4)
+	header = append(header, (packetTypeSUBSCRIBE<<4)|0x02)
 	header = append(header, encodeRemainingLength(body.Len())...)
 	header = append(header, body.Bytes()...)
 	all := header
@@ -76,7 +78,9 @@ func TestPublishRoundTripQoS1(t *testing.T) {
 	_ = writeString(body, orig.Topic)
 	body.Write([]byte{0, 5})
 	body.Write(orig.Payload)
-	header := []byte{(packetTypePUBLISH << 4) | (orig.QoS << 1)}
+
+	header := make([]byte, 0, 1+4)
+	header = append(header, (packetTypePUBLISH<<4)|(orig.QoS<<1))
 	header = append(header, encodeRemainingLength(body.Len())...)
 	header = append(header, body.Bytes()...)
 	all := header

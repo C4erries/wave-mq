@@ -522,7 +522,7 @@ func readLogValues(ctx context.Context, t *testing.T, store *storage.Manager) []
 		t.Fatalf("read log: %v", err)
 	}
 
-	var res []string
+	res := make([]string, 0, len(recs))
 	for _, r := range recs {
 		res = append(res, string(r.Value))
 	}
