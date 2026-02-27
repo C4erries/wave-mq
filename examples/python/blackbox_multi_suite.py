@@ -350,10 +350,21 @@ class MultiBlackboxSuite:
 
     def produce(self, broker_id: int, partition: int, value: str) -> dict[str, Any]:
         path = f"/api/topics/{self.topic}/partitions/{partition}/messages"
-        _, data = self.clients[broker_id].post_json(path, {"value": value}, expected_status=200)
-        if not isinstance(data, dict):
-            raise BlackboxError(f"produce response is invalid: {data!r}")
-        return data
+        last_err: Exception | None = None
+        for attempt in range(4):
+            try:
+                _, data = self.clients[broker_id].post_json(path, {"value": value}, expected_status=200)
+                if not isinstance(data, dict):
+                    raise BlackboxError(f"produce response is invalid: {data!r}")
+                return data
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                if attempt == 3:
+                    break
+                time.sleep(0.05 * (attempt + 1))
+
+        assert last_err is not None
+        raise BlackboxError(f"produce failed broker={broker_id} partition={partition}: {last_err}") from last_err
 
     def fetch(self, broker_id: int, partition: int, limit: int) -> list[dict[str, Any]]:
         data = self.clients[broker_id].get_json(
@@ -454,31 +465,62 @@ class MultiBlackboxSuite:
 
     def scenario_restart(self) -> None:
         cfg = self.settings.profile
+        if len(self.expected_per_partition) != cfg.partitions:
+            raise BlackboxError(
+                f"restart requires distributed flow baseline: expected {cfg.partitions} partitions, "
+                f"got {len(self.expected_per_partition)}"
+            )
+
+        expected_before_restart = dict(self.expected_per_partition)
         self.wait_broker_health(2)
 
         self.stack_restart("broker2")
         self.wait_broker_health(2, timeout_sec=120.0)
         self.wait_cluster_brokers()
+        self.wait_full_isr()
 
         leaders = self.partition_leaders()
+        expected_total = dict(expected_before_restart)
         produced_after_restart: dict[int, list[str]] = {pid: [] for pid in range(cfg.partitions)}
         for pid in range(cfg.partitions):
             leader = leaders[pid]
             for i in range(cfg.restart_messages_per_partition):
                 payload = f"after-restart|run={self.run_id}|p={pid}|i={i}"
                 self.produce(leader, pid, payload)
+                expected_total[pid] += 1
                 produced_after_restart[pid].append(payload)
 
         for pid in range(cfg.partitions):
             leader = leaders[pid]
-            messages = self.fetch(leader, pid, (cfg.restart_messages_per_partition * 3) + 20)
+            expected_count = expected_total[pid]
+            messages = self.fetch(leader, pid, expected_count + 20)
+            if len(messages) != expected_count:
+                raise BlackboxError(
+                    f"after restart partition {pid}: expected {expected_count} messages, got {len(messages)}"
+                )
+
+            offsets = [int(m.get("offset", -1)) for m in messages]
+            want_offsets = list(range(expected_count - 1, -1, -1))
+            if offsets != want_offsets:
+                raise BlackboxError(
+                    f"after restart partition {pid}: offsets mismatch, "
+                    f"want tail {want_offsets[:10]} got tail {offsets[:10]}"
+                )
+
             values = {str(m.get("value")) for m in messages if isinstance(m.get("value"), str)}
+            has_pre_restart = any(v.startswith(f"multi|run={self.run_id}|") for v in values)
+            if not has_pre_restart:
+                raise BlackboxError(
+                    f"after restart partition {pid}: pre-restart values are missing from partition snapshot"
+                )
+
             for payload in produced_after_restart[pid]:
                 if payload not in values:
                     raise BlackboxError(
                         f"after restart partition {pid}: marker {payload!r} not found in fetch window"
                     )
 
+        self.expected_per_partition = expected_total
         self.wait_full_isr()
 
     def scenario_metrics(self) -> None:
