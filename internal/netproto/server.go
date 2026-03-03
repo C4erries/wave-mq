@@ -261,10 +261,27 @@ func (s *Server) handleFetch(ctx context.Context, payload []byte) ([]byte, error
 		_, latest, offErr := s.broker.ListOffsets(ctx, req.Topic, req.Partition)
 		if offErr == nil {
 			resp.HighWatermark = latest
+		} else {
+			// Keep fetch successful even if latest-offset lookup failed, but avoid
+			// returning the zero-value HWM that can regress follower progress.
+			resp.HighWatermark = fallbackFetchHighWatermark(req.Offset, recs)
+			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 		}
 	}
 
 	return encodeFetchResponse(resp)
+}
+
+func fallbackFetchHighWatermark(requestOffset api.Offset, records []api.Record) api.Offset {
+	if n := len(records); n > 0 {
+		return records[n-1].Offset
+	}
+
+	if requestOffset <= 0 {
+		return -1
+	}
+
+	return requestOffset - 1
 }
 
 func (s *Server) handleMetadata(ctx context.Context, payload []byte) ([]byte, error) {

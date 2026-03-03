@@ -23,6 +23,8 @@ const (
 	maxInt16        = int(^uint16(0) >> 1)
 	maxInt32        = int(^uint32(0) >> 1)
 	maxUint32       = uint64(^uint32(0))
+	maxFrameLength  = uint32(16 << 20)
+	maxItemCount    = int32(100_000)
 )
 
 func encodeRequestFrame(apiKey api.APIKey, correlationID int32, payload []byte) ([]byte, error) {
@@ -89,6 +91,14 @@ func decodeFrame(r io.Reader) (api.APIKey, int32, []byte, error) {
 	length := binary.BigEndian.Uint32(header[0:4])
 	if length < uint32(frameHeaderSize-4) {
 		return 0, 0, nil, fmt.Errorf("invalid frame length %d", length)
+	}
+
+	if length > maxFrameLength {
+		return 0, 0, nil, fmt.Errorf("frame length %d exceeds max %d", length, maxFrameLength)
+	}
+
+	if uint64(length) > uint64(maxInt32) {
+		return 0, 0, nil, fmt.Errorf("frame length %d exceeds int32 max", length)
 	}
 
 	apiKeyRaw, err := uint16ToInt16(binary.BigEndian.Uint16(header[4:6]), "api key")
@@ -244,7 +254,11 @@ func readHeaders(r io.Reader) ([]api.Header, error) {
 		return nil, fmt.Errorf("negative header count")
 	}
 
-	headers := make([]api.Header, 0, n)
+	if n > maxItemCount {
+		return nil, fmt.Errorf("header count %d exceeds max %d", n, maxItemCount)
+	}
+
+	headers := make([]api.Header, 0, int(n))
 	for i := int32(0); i < n; i++ {
 		k, err := readString(r)
 		if err != nil {
@@ -471,7 +485,15 @@ func decodeProduceRequest(payload []byte) (*ProduceRequest, error) {
 		return nil, err
 	}
 
-	recs := make([]api.Record, 0, n)
+	if n < 0 {
+		return nil, fmt.Errorf("negative record count")
+	}
+
+	if n > maxItemCount {
+		return nil, fmt.Errorf("record count %d exceeds max %d", n, maxItemCount)
+	}
+
+	recs := make([]api.Record, 0, int(n))
 	for i := int32(0); i < n; i++ {
 		var l int32
 		if err := binary.Read(buf, binary.BigEndian, &l); err != nil {
@@ -641,11 +663,23 @@ func decodeFetchResponse(payload []byte) (*FetchResponse, error) {
 		return nil, err
 	}
 
-	recs := make([]api.Record, 0, n)
+	if n < 0 {
+		return nil, fmt.Errorf("negative record count")
+	}
+
+	if n > maxItemCount {
+		return nil, fmt.Errorf("record count %d exceeds max %d", n, maxItemCount)
+	}
+
+	recs := make([]api.Record, 0, int(n))
 	for i := int32(0); i < n; i++ {
 		var l int32
 		if err := binary.Read(buf, binary.BigEndian, &l); err != nil {
 			return nil, err
+		}
+
+		if l < 0 || int(l) > buf.Len() {
+			return nil, fmt.Errorf("invalid record length")
 		}
 
 		rBytes := buf.Next(int(l))
@@ -696,7 +730,15 @@ func decodeMetadataRequest(payload []byte) (*MetadataRequest, error) {
 		return nil, err
 	}
 
-	topics := make([]string, 0, n)
+	if n < 0 {
+		return nil, fmt.Errorf("negative topic count")
+	}
+
+	if n > maxItemCount {
+		return nil, fmt.Errorf("topic count %d exceeds max %d", n, maxItemCount)
+	}
+
+	topics := make([]string, 0, int(n))
 	for i := int32(0); i < n; i++ {
 		s, err := readString(buf)
 		if err != nil {
@@ -834,7 +876,15 @@ func decodeMetadataResponse(payload []byte) (*MetadataResponse, error) {
 		return nil, err
 	}
 
-	parts := make([]api.PartitionMetadata, 0, n)
+	if n < 0 {
+		return nil, fmt.Errorf("negative partition count")
+	}
+
+	if n > maxItemCount {
+		return nil, fmt.Errorf("partition count %d exceeds max %d", n, maxItemCount)
+	}
+
+	parts := make([]api.PartitionMetadata, 0, int(n))
 	for i := int32(0); i < n; i++ {
 		topic, err := readString(buf)
 		if err != nil {
@@ -881,7 +931,15 @@ func decodeMetadataResponse(payload []byte) (*MetadataResponse, error) {
 			return nil, err
 		}
 
-		replicas := make([]int, 0, replicasN)
+		if replicasN < 0 {
+			return nil, fmt.Errorf("negative replicas count")
+		}
+
+		if replicasN > maxItemCount {
+			return nil, fmt.Errorf("replicas count %d exceeds max %d", replicasN, maxItemCount)
+		}
+
+		replicas := make([]int, 0, int(replicasN))
 		for i := int32(0); i < replicasN; i++ {
 			var rid int32
 			if err := binary.Read(buf, binary.BigEndian, &rid); err != nil {
@@ -896,7 +954,15 @@ func decodeMetadataResponse(payload []byte) (*MetadataResponse, error) {
 			return nil, err
 		}
 
-		isr := make([]int, 0, isrN)
+		if isrN < 0 {
+			return nil, fmt.Errorf("negative isr count")
+		}
+
+		if isrN > maxItemCount {
+			return nil, fmt.Errorf("isr count %d exceeds max %d", isrN, maxItemCount)
+		}
+
+		isr := make([]int, 0, int(isrN))
 		for i := int32(0); i < isrN; i++ {
 			var rid int32
 			if err := binary.Read(buf, binary.BigEndian, &rid); err != nil {

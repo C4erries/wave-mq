@@ -2,6 +2,7 @@ package netproto
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 	"time"
 
@@ -331,5 +332,107 @@ func TestListOffsetsCodec(t *testing.T) {
 
 	if dr.Earliest != resp.Earliest || dr.Latest != resp.Latest || dr.Error != resp.Error {
 		t.Fatalf("resp mismatch")
+	}
+}
+
+func TestDecodeFrameRejectsOversizedLength(t *testing.T) {
+	header := make([]byte, frameHeaderSize)
+	binary.BigEndian.PutUint32(header[0:4], maxFrameLength+1)
+	binary.BigEndian.PutUint16(header[4:6], uint16(int16(api.APIKeyFetch)))
+	binary.BigEndian.PutUint16(header[6:8], uint16(currentVersion))
+	binary.BigEndian.PutUint32(header[8:12], 1)
+	binary.BigEndian.PutUint16(header[12:14], 0)
+
+	if _, _, _, err := decodeRequestFrame(bytes.NewReader(header)); err == nil {
+		t.Fatalf("expected oversized frame error")
+	}
+}
+
+func TestDecodeProduceRequestRejectsNegativeRecordCount(t *testing.T) {
+	buf := &bytes.Buffer{}
+	if err := putString(buf, "alpha"); err != nil {
+		t.Fatalf("put topic: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int32(0)); err != nil {
+		t.Fatalf("put partition: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int32(-1)); err != nil {
+		t.Fatalf("put record count: %v", err)
+	}
+
+	if _, err := decodeProduceRequest(buf.Bytes()); err == nil {
+		t.Fatalf("expected negative record count error")
+	}
+}
+
+func TestDecodeFetchResponseRejectsNegativeRecordLength(t *testing.T) {
+	buf := &bytes.Buffer{}
+	if err := binary.Write(buf, binary.BigEndian, int16(api.ErrNone)); err != nil {
+		t.Fatalf("put error code: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int32(1)); err != nil {
+		t.Fatalf("put record count: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int32(-1)); err != nil {
+		t.Fatalf("put record length: %v", err)
+	}
+
+	if _, err := decodeFetchResponse(buf.Bytes()); err == nil {
+		t.Fatalf("expected invalid record length error")
+	}
+}
+
+func TestDecodeMetadataResponseRejectsNegativeReplicaCount(t *testing.T) {
+	buf := &bytes.Buffer{}
+	if err := binary.Write(buf, binary.BigEndian, int16(api.ErrNone)); err != nil {
+		t.Fatalf("put error code: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int32(1)); err != nil {
+		t.Fatalf("put partition count: %v", err)
+	}
+
+	if err := putString(buf, "alpha"); err != nil {
+		t.Fatalf("put topic: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int32(0)); err != nil {
+		t.Fatalf("put partition: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int32(1)); err != nil {
+		t.Fatalf("put broker id: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int16(api.RoleLeader)); err != nil {
+		t.Fatalf("put role: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int32(1)); err != nil {
+		t.Fatalf("put leader epoch: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int64(0)); err != nil {
+		t.Fatalf("put start offset: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int64(0)); err != nil {
+		t.Fatalf("put high watermark: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int32(1)); err != nil {
+		t.Fatalf("put leader id: %v", err)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int32(-1)); err != nil {
+		t.Fatalf("put replicas count: %v", err)
+	}
+
+	if _, err := decodeMetadataResponse(buf.Bytes()); err == nil {
+		t.Fatalf("expected negative replicas count error")
 	}
 }

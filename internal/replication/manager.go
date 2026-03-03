@@ -2,9 +2,12 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/c4erries/wave-mq/internal/controller"
 	"github.com/c4erries/wave-mq/internal/storage"
@@ -17,8 +20,9 @@ type Manager struct {
 	ctrl  controller.MetadataStore
 	repl  Replicator
 
-	sinkFactory   SinkFactory
-	workerFactory WorkerFactory
+	sinkFactory    SinkFactory
+	workerFactory  WorkerFactory
+	restartBackoff time.Duration
 
 	mu      sync.Mutex
 	running map[partitionKey]runningReplicator
@@ -70,13 +74,14 @@ func NewManagerWithFactories(
 	}
 
 	return &Manager{
-		cfg:           cfg,
-		store:         store,
-		ctrl:          ctrl,
-		repl:          repl,
-		sinkFactory:   sinkFactory,
-		workerFactory: workerFactory,
-		running:       make(map[partitionKey]runningReplicator),
+		cfg:            cfg,
+		store:          store,
+		ctrl:           ctrl,
+		repl:           repl,
+		sinkFactory:    sinkFactory,
+		workerFactory:  workerFactory,
+		restartBackoff: 200 * time.Millisecond,
+		running:        make(map[partitionKey]runningReplicator),
 	}
 }
 
@@ -146,23 +151,78 @@ func (m *Manager) startReplicator(
 ) {
 	leaderInfo := findBroker(brokers, assign.Leader)
 	if leaderInfo == nil {
+		slog.Warn(
+			"replication leader broker not found; worker not started",
+			"topic", assign.Topic,
+			"partition", assign.Partition,
+			"leader", assign.Leader,
+		)
+
 		return
 	}
 
 	ctxRep, cancel := context.WithCancel(ctx)
-	sink := m.sinkFactory(assign.Topic, assign.Partition)
-	sink = NewReportingSink(sink, m.ctrl, assign.Topic, assign.Partition, m.cfg.BrokerID)
+	leader := *leaderInfo
 
-	worker := m.workerFactory(m.repl, *leaderInfo, assign.Topic, assign.Partition, sink)
-	go func(repKey partitionKey, assignment api.PartitionAssignment) {
-		_ = worker.Run(ctxRep)
-		// Once the replicator exits, clean up the reference if still present.
-		m.mu.Lock()
-		if current, ok := m.running[repKey]; ok && sameAssignment(current.assignment, assignment) {
-			delete(m.running, repKey)
+	go func(repKey partitionKey, assignment api.PartitionAssignment, leader api.BrokerInfo) {
+		defer func() {
+			m.mu.Lock()
+			if current, ok := m.running[repKey]; ok && sameAssignment(current.assignment, assignment) {
+				delete(m.running, repKey)
+			}
+			m.mu.Unlock()
+		}()
+
+		for {
+			sink := m.sinkFactory(assignment.Topic, assignment.Partition)
+			if sink == nil {
+				slog.Error(
+					"replication sink factory returned nil sink; worker stopped",
+					"topic", assignment.Topic,
+					"partition", assignment.Partition,
+					"leader", leader.BrokerID,
+				)
+
+				return
+			}
+
+			worker := m.workerFactory(m.repl, leader, assignment.Topic, assignment.Partition, NewReportingSink(sink, m.ctrl, assignment.Topic, assignment.Partition, m.cfg.BrokerID))
+			if worker == nil {
+				slog.Error(
+					"replication worker factory returned nil worker; worker stopped",
+					"topic", assignment.Topic,
+					"partition", assignment.Partition,
+					"leader", leader.BrokerID,
+				)
+
+				return
+			}
+
+			err := worker.Run(ctxRep)
+			if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+
+			slog.Warn(
+				"replication worker exited with error; scheduling restart",
+				"topic", assignment.Topic,
+				"partition", assignment.Partition,
+				"leader", leader.BrokerID,
+				"err", err,
+				"backoff", m.restartBackoff,
+			)
+
+			timer := time.NewTimer(m.restartBackoff)
+			select {
+			case <-ctxRep.Done():
+				timer.Stop()
+
+				return
+			case <-timer.C:
+			}
 		}
-		m.mu.Unlock()
-	}(key, assign)
+
+	}(key, assign, leader)
 
 	m.running[key] = runningReplicator{cancel: cancel, assignment: assign}
 }

@@ -100,6 +100,11 @@ func TestReportingSinkReportsProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close storage: %v", err)
+		}
+	}()
 
 	inner := NewWALSink(store, "alpha", 0)
 	ctrl := &fakeController{}
@@ -123,8 +128,14 @@ func TestReportingSinkReportsProgress(t *testing.T) {
 		t.Fatalf("unexpected call: %+v", call)
 	}
 
-	log, _ := store.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
-	_ = log.Close()
+	log, err := store.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+
+	if err := log.Close(); err != nil {
+		t.Fatalf("close log: %v", err)
+	}
 
 	applied := testutil.ToFloat64(observability.ReplicationApplied.WithLabelValues("alpha", "0", "2"))
 	if applied != 1 {

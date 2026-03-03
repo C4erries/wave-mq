@@ -56,7 +56,11 @@ func NewPartitionReplicator(rep Replicator, leader api.BrokerInfo, topic string,
 // Run starts the replication loop until the context is cancelled or an error occurs.
 func (p *PartitionReplicator) Run(ctx context.Context) error {
 	if p.rep == nil {
-		return nil
+		return fmt.Errorf("replicator is required")
+	}
+
+	if p.sink == nil {
+		return fmt.Errorf("sink is required")
 	}
 
 	if p.nextOffset == 0 {
@@ -109,10 +113,12 @@ func (p *PartitionReplicator) Run(ctx context.Context) error {
 		p.nextOffset = nextOffset
 		if len(fetchResp.Records) == 0 {
 			if p.Interval > 0 {
+				timer := time.NewTimer(p.Interval)
 				select {
 				case <-ctx.Done():
+					timer.Stop()
 					return ctx.Err()
-				case <-time.After(p.Interval):
+				case <-timer.C:
 				}
 			}
 

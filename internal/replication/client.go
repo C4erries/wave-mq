@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/c4erries/wave-mq/internal/netproto"
@@ -27,9 +27,9 @@ func NewBinaryReplicator() *BinaryReplicator {
 func (r *BinaryReplicator) FetchFromLeader(ctx context.Context, leader api.BrokerInfo, req FetchRequest) (FetchResponse, error) {
 	var resp FetchResponse
 
-	addr := leader.Host
-	if !strings.Contains(addr, ":") && leader.Port != 0 {
-		addr = fmt.Sprintf("%s:%d", addr, leader.Port)
+	addr, err := leaderAddress(leader)
+	if err != nil {
+		return resp, err
 	}
 
 	dialer := &net.Dialer{Timeout: r.DialTimeout}
@@ -41,7 +41,9 @@ func (r *BinaryReplicator) FetchFromLeader(ctx context.Context, leader api.Broke
 	defer conn.Close()
 
 	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
+		if err := conn.SetDeadline(deadline); err != nil {
+			return resp, err
+		}
 	}
 
 	payload, err := netproto.EncodeFetchRequest(&netproto.FetchRequest{
@@ -86,4 +88,19 @@ func (r *BinaryReplicator) FetchFromLeader(ctx context.Context, leader api.Broke
 	resp.HighWatermark = fr.HighWatermark
 
 	return resp, nil
+}
+
+func leaderAddress(leader api.BrokerInfo) (string, error) {
+	host := leader.Host
+	if host == "" {
+		return "", fmt.Errorf("leader host is empty")
+	}
+
+	if leader.Port != 0 {
+		if _, _, err := net.SplitHostPort(host); err != nil {
+			return net.JoinHostPort(host, strconv.Itoa(leader.Port)), nil
+		}
+	}
+
+	return host, nil
 }

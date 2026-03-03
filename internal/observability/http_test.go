@@ -21,12 +21,10 @@ func TestHTTPServerHealthAndMetrics(t *testing.T) {
 	}()
 
 	resp := waitHTTPStatus(t, "http://"+addr+"/healthz", http.StatusOK, 2*time.Second)
-	defer resp.Body.Close()
-
-	resp.Body.Close()
+	defer closeBody(t, resp.Body)
 
 	resp = waitHTTPStatus(t, "http://"+addr+"/metrics", http.StatusOK, 2*time.Second)
-	defer resp.Body.Close()
+	defer closeBody(t, resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -57,7 +55,7 @@ func TestHealthzNotReady(t *testing.T) {
 	}()
 
 	resp := waitHTTPStatus(t, "http://"+addr+"/healthz", http.StatusServiceUnavailable, 2*time.Second)
-	defer resp.Body.Close()
+	defer closeBody(t, resp.Body)
 
 	cancel()
 
@@ -82,7 +80,7 @@ func waitHTTPStatus(t *testing.T, url string, want int, timeout time.Duration) *
 				return resp
 			}
 
-			_ = resp.Body.Close()
+			closeBody(t, resp.Body)
 		}
 
 		select {
@@ -90,5 +88,13 @@ func waitHTTPStatus(t *testing.T, url string, want int, timeout time.Duration) *
 			t.Fatalf("timeout waiting for %s status %d", url, want)
 		case <-ticker.C:
 		}
+	}
+}
+
+func closeBody(t *testing.T, body io.Closer) {
+	t.Helper()
+
+	if err := body.Close(); err != nil {
+		t.Fatalf("close response body: %v", err)
 	}
 }

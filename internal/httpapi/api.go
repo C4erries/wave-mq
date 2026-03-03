@@ -660,14 +660,6 @@ func (h *Handler) forwardCreateTopicToLeader(
 
 		currentLeader = leaderAddr
 
-		httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, leaderURL, bytes.NewReader(data))
-		if err != nil {
-			return 0, nil, false
-		}
-
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set(forwardedCreateTopicHeader, "1")
-
 		status, payload, ok := h.forwardToURL(r, http.MethodPost, leaderURL, data)
 		if !ok {
 			currentLeader = ""

@@ -843,10 +843,13 @@ func (b *Broker) Produce(ctx context.Context, topic string, partition int, recor
 	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	if b.isClustered() && p.Metadata.Replica.Role != api.RoleLeader {
-		leader := b.leaderFor(topic, partition)
+		leader := p.Metadata.Leader
+		p.mu.Unlock()
+		if leader == 0 {
+			leader = b.leaderFor(topic, partition)
+		}
 
 		observability.RequestErrors.WithLabelValues("broker", "produce").Inc()
 
@@ -854,11 +857,15 @@ func (b *Broker) Produce(ctx context.Context, topic string, partition int, recor
 	}
 
 	if len(records) == 0 {
-		return p.Metadata.HighWatermark + 1, nil
+		next := p.Metadata.HighWatermark + 1
+		p.mu.Unlock()
+
+		return next, nil
 	}
 
 	base, err := p.Log.AppendBatch(ctx, records)
 	if err != nil {
+		p.mu.Unlock()
 		observability.RequestErrors.WithLabelValues("broker", "produce").Inc()
 		return -1, err
 	}
@@ -869,6 +876,8 @@ func (b *Broker) Produce(ctx context.Context, topic string, partition int, recor
 	if hw > p.Metadata.HighWatermark {
 		p.Metadata.HighWatermark = hw
 	}
+
+	p.mu.Unlock()
 
 	return base, nil
 }
@@ -915,10 +924,13 @@ func (b *Broker) Fetch(ctx context.Context, topic string, partition int, offset 
 	}
 
 	p.mu.RLock()
-	defer p.mu.RUnlock()
 
 	if b.isClustered() && p.Metadata.Replica.Role != api.RoleLeader {
-		leader := b.leaderFor(topic, partition)
+		leader := p.Metadata.Leader
+		p.mu.RUnlock()
+		if leader == 0 {
+			leader = b.leaderFor(topic, partition)
+		}
 
 		observability.RequestErrors.WithLabelValues("broker", "fetch").Inc()
 
@@ -926,10 +938,12 @@ func (b *Broker) Fetch(ctx context.Context, topic string, partition int, offset 
 	}
 
 	if offset > p.Metadata.HighWatermark {
+		p.mu.RUnlock()
 		return []api.Record{}, nil
 	}
 
 	recs, err := p.Log.Read(ctx, offset, maxBytes)
+	p.mu.RUnlock()
 	if err != nil {
 		observability.RequestErrors.WithLabelValues("broker", "fetch").Inc()
 		return nil, err
@@ -1015,7 +1029,9 @@ func (b *Broker) CommitOffset(ctx context.Context, group, topic string, partitio
 		snapshot := b.snapshotOffsetsLocked()
 
 		go func() {
-			_ = b.offsets.Compact(context.Background(), snapshot)
+			if err := b.offsets.Compact(context.Background(), snapshot); err != nil {
+				slog.Warn("offset compaction failed", "err", err)
+			}
 		}()
 	}
 
@@ -1130,16 +1146,27 @@ func (b *Broker) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if b.closed {
+		return nil
+	}
+
 	b.closed = true
+
+	var closeErr error
+
 	if b.offsets != nil {
-		_ = b.offsets.Close()
+		if err := b.offsets.Close(); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("close offset store: %w", err))
+		}
 	}
 
 	if b.meta != nil {
-		_ = b.meta.Close()
+		if err := b.meta.Close(); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("close metadata store: %w", err))
+		}
 	}
 
-	return nil
+	return closeErr
 }
 
 func (b *Broker) snapshotOffsetsLocked() map[string]map[string]map[int]api.Offset {
@@ -1510,22 +1537,17 @@ type ConsumerGroupInfo struct {
 }
 
 func (b *Broker) ConsumerGroupsSnapshot(ctx context.Context) []ConsumerGroupInfo {
+	hwm := b.consumerGroupHighWatermarks(ctx)
+
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	meta, _ := b.Metadata(ctx, nil)
-
-	hwm := make(map[string]map[int]api.Offset)
-	for _, m := range meta {
-		if _, ok := hwm[m.Replica.Topic]; !ok {
-			hwm[m.Replica.Topic] = make(map[int]api.Offset)
-		}
-
-		hwm[m.Replica.Topic][m.Replica.Partition] = m.HighWatermark
+	groupsSnapshot := make(map[string]*ConsumerGroup, len(b.groups))
+	for name, group := range b.groups {
+		groupsSnapshot[name] = group
 	}
+	b.mu.RUnlock()
 
-	groups := make([]ConsumerGroupInfo, 0, len(b.groups))
-	for name, g := range b.groups {
+	groups := make([]ConsumerGroupInfo, 0, len(groupsSnapshot))
+	for name, g := range groupsSnapshot {
 		g.mu.RLock()
 
 		info := ConsumerGroupInfo{
@@ -1560,6 +1582,43 @@ func (b *Broker) ConsumerGroupsSnapshot(ctx context.Context) []ConsumerGroupInfo
 	}
 
 	return groups
+}
+
+func (b *Broker) consumerGroupHighWatermarks(ctx context.Context) map[string]map[int]api.Offset {
+	meta, err := b.Metadata(ctx, nil)
+	if err != nil {
+		slog.Warn("consumer groups snapshot metadata unavailable, using local high watermarks", "err", err)
+
+		return b.localHighWatermarks()
+	}
+
+	hwm := make(map[string]map[int]api.Offset)
+	for _, m := range meta {
+		if _, ok := hwm[m.Replica.Topic]; !ok {
+			hwm[m.Replica.Topic] = make(map[int]api.Offset)
+		}
+
+		hwm[m.Replica.Topic][m.Replica.Partition] = m.HighWatermark
+	}
+
+	return hwm
+}
+
+func (b *Broker) localHighWatermarks() map[string]map[int]api.Offset {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	hwm := make(map[string]map[int]api.Offset, len(b.topics))
+	for topicName, topicState := range b.topics {
+		partitions := make(map[int]api.Offset, len(topicState.Partitions))
+		for partitionID, partition := range topicState.Partitions {
+			partitions[partitionID] = partition.Log.HighWatermark()
+		}
+
+		hwm[topicName] = partitions
+	}
+
+	return hwm
 }
 
 // JoinGroup registers a member in a consumer group and returns its assignments.

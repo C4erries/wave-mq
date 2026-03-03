@@ -3,14 +3,33 @@ package broker
 import (
 	"bytes"
 	"context"
+	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
+
+func assertClose(t *testing.T, target string, err error) {
+	t.Helper()
+
+	if err != nil && !errors.Is(err, os.ErrClosed) {
+		t.Errorf("close %s: %v", target, err)
+	}
+}
+
+func requireClose(t *testing.T, target string, err error) {
+	t.Helper()
+
+	if err != nil && !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("close %s: %v", target, err)
+	}
+}
 
 func newTestBroker(t *testing.T) (*Broker, func()) {
 	t.Helper()
@@ -45,10 +64,10 @@ func newTestBroker(t *testing.T) (*Broker, func()) {
 	}
 
 	cleanup := func() {
-		_ = b.Close()
-		_ = store.Close()
-		_ = offsetStore.Close()
-		_ = metaStore.Close()
+		assertClose(t, "broker", b.Close())
+		assertClose(t, "storage", store.Close())
+		assertClose(t, "offset store", offsetStore.Close())
+		assertClose(t, "metadata store", metaStore.Close())
 	}
 
 	return b, cleanup
@@ -58,6 +77,62 @@ type fakeClusterStore struct {
 	mu     sync.RWMutex
 	meta   api.ClusterMetadata
 	getErr error
+}
+
+type blockingClusterStore struct {
+	wait <-chan struct{}
+}
+
+func (bcs *blockingClusterStore) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
+	select {
+	case <-ctx.Done():
+		return api.ClusterMetadata{}, ctx.Err()
+	case <-bcs.wait:
+		return api.ClusterMetadata{}, nil
+	}
+}
+
+func (bcs *blockingClusterStore) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
+	_ = ctx
+	_ = sinceVersion
+
+	ch := make(chan api.ClusterMetadata)
+	close(ch)
+
+	return ch, nil
+}
+
+func (bcs *blockingClusterStore) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
+	_ = ctx
+	_ = info
+
+	return nil
+}
+
+func (bcs *blockingClusterStore) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = name
+	_ = cfg
+
+	return api.ClusterMetadata{}, nil
+}
+
+func (bcs *blockingClusterStore) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition int,
+	brokerID int,
+	lastOffset api.Offset,
+	leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = topic
+	_ = partition
+	_ = brokerID
+	_ = lastOffset
+	_ = leaderHighWatermark
+
+	return api.ClusterMetadata{}, nil
 }
 
 func (f *fakeClusterStore) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
@@ -260,7 +335,11 @@ func TestCommitOffsetMonotonic(t *testing.T) {
 		t.Fatalf("expected regression error, got nil")
 	}
 
-	off, _ = b.FetchCommitted(ctx, "g1", "t", 0)
+	off, err = b.FetchCommitted(ctx, "g1", "t", 0)
+	if err != nil {
+		t.Fatalf("fetch committed after regression: %v", err)
+	}
+
 	if off != 5 {
 		t.Fatalf("offset regressed to %d", off)
 	}
@@ -372,19 +451,30 @@ func TestOffsetPersistenceAcrossRestart(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	b.Close()
-	store.Close()
-	offsetStore.Close()
-	metaStore.Close()
+	requireClose(t, "broker", b.Close())
+	requireClose(t, "storage", store.Close())
+	requireClose(t, "offset store", offsetStore.Close())
+	requireClose(t, "metadata store", metaStore.Close())
 
 	// Reopen and ensure offsets persist.
-	store, _ = storage.NewManager(storage.Config{
+	store, err = storage.NewManager(storage.Config{
 		DataDir:         dir,
 		MaxSegmentBytes: 1024,
 		SyncOnAppend:    true,
 	})
-	offsetStore, _ = NewOffsetStore(dir)
-	metaStore, _ = metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("storage reopen: %v", err)
+	}
+
+	offsetStore, err = NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store reopen: %v", err)
+	}
+
+	metaStore, err = metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store reopen: %v", err)
+	}
 
 	b, err = NewBroker(api.BrokerConfig{
 		BrokerID:          1,
@@ -396,10 +486,10 @@ func TestOffsetPersistenceAcrossRestart(t *testing.T) {
 	}
 
 	defer func() {
-		b.Close()
-		store.Close()
-		offsetStore.Close()
-		metaStore.Close()
+		assertClose(t, "broker", b.Close())
+		assertClose(t, "storage", store.Close())
+		assertClose(t, "offset store", offsetStore.Close())
+		assertClose(t, "metadata store", metaStore.Close())
 	}()
 
 	off, err := b.FetchCommitted(ctx, "g", "t", 0)
@@ -478,10 +568,10 @@ func TestCreateTopicAppliesRetentionOverrides(t *testing.T) {
 	}
 
 	defer func() {
-		_ = b.Close()
-		_ = store.Close()
-		_ = offsetStore.Close()
-		_ = metaStore.Close()
+		assertClose(t, "broker", b.Close())
+		assertClose(t, "storage", store.Close())
+		assertClose(t, "offset store", offsetStore.Close())
+		assertClose(t, "metadata store", metaStore.Close())
 	}()
 
 	ctx := context.Background()
@@ -601,6 +691,7 @@ func TestProduceFetchConcurrentWithMetadataUpdates(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
 
 	wg.Add(1)
 
@@ -622,7 +713,11 @@ func TestProduceFetchConcurrentWithMetadataUpdates(t *testing.T) {
 		defer wg.Done()
 
 		for i := 0; i < 2000; i++ {
-			_, _ = b.Produce(ctx, "race", 0, []api.Record{{Value: []byte("v")}})
+			if _, err := b.Produce(ctx, "race", 0, []api.Record{{Value: []byte("v")}}); err != nil && !errors.Is(err, ErrNotLeader) {
+				errCh <- err
+
+				return
+			}
 		}
 	}()
 
@@ -632,9 +727,125 @@ func TestProduceFetchConcurrentWithMetadataUpdates(t *testing.T) {
 		defer wg.Done()
 
 		for i := 0; i < 2000; i++ {
-			_, _ = b.Fetch(ctx, "race", 0, 0, 1024)
+			if _, err := b.Fetch(ctx, "race", 0, 0, 1024); err != nil && !errors.Is(err, ErrNotLeader) {
+				errCh <- err
+
+				return
+			}
 		}
 	}()
 
 	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("unexpected produce/fetch error: %v", err)
+	default:
+	}
+}
+
+func TestProduceFetchNotLeaderDoesNotBlockOnClusterMetadata(t *testing.T) {
+	b, cleanup := newTestBroker(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "blocked", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	assignFollower := map[string]map[int]api.PartitionAssignment{
+		"blocked": {
+			0: {
+				Topic:     "blocked",
+				Partition: 0,
+				Leader:    2,
+				Replicas:  []int{1, 2},
+				ISR:       []int{1, 2},
+			},
+		},
+	}
+	b.updatePartitionMetadata(assignFollower)
+	b.cluster = &blockingClusterStore{wait: make(chan struct{})}
+
+	produceDone := make(chan error, 1)
+	go func() {
+		_, err := b.Produce(ctx, "blocked", 0, []api.Record{{Value: []byte("v")}})
+		produceDone <- err
+	}()
+
+	select {
+	case err := <-produceDone:
+		var notLeader NotLeaderError
+		if err == nil || !errors.As(err, &notLeader) {
+			t.Fatalf("expected NotLeaderError from produce, got %v", err)
+		}
+
+		if notLeader.Leader != 2 {
+			t.Fatalf("expected leader hint 2, got %d", notLeader.Leader)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatalf("produce blocked waiting for cluster metadata")
+	}
+
+	fetchDone := make(chan error, 1)
+	go func() {
+		_, err := b.Fetch(ctx, "blocked", 0, 0, 1024)
+		fetchDone <- err
+	}()
+
+	select {
+	case err := <-fetchDone:
+		var notLeader NotLeaderError
+		if err == nil || !errors.As(err, &notLeader) {
+			t.Fatalf("expected NotLeaderError from fetch, got %v", err)
+		}
+
+		if notLeader.Leader != 2 {
+			t.Fatalf("expected leader hint 2, got %d", notLeader.Leader)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatalf("fetch blocked waiting for cluster metadata")
+	}
+}
+
+func TestConsumerGroupsSnapshotFallsBackToLocalHighWatermarks(t *testing.T) {
+	b, cleanup := newTestBroker(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "snap", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	if _, err := b.Produce(ctx, "snap", 0, []api.Record{
+		{Value: []byte("one")},
+		{Value: []byte("two")},
+		{Value: []byte("three")},
+	}); err != nil {
+		t.Fatalf("produce records: %v", err)
+	}
+
+	if err := b.CommitOffset(ctx, "group-1", "snap", 0, 0); err != nil {
+		t.Fatalf("commit offset: %v", err)
+	}
+
+	b.cluster = &fakeClusterStore{getErr: context.DeadlineExceeded}
+
+	snapshot := b.ConsumerGroupsSnapshot(ctx)
+	if len(snapshot) != 1 {
+		t.Fatalf("expected 1 group in snapshot, got %d", len(snapshot))
+	}
+
+	assignments := snapshot[0].Assignments
+	if len(assignments) != 1 {
+		t.Fatalf("expected 1 assignment, got %d", len(assignments))
+	}
+
+	if assignments[0].HighWatermark != 2 {
+		t.Fatalf("expected high watermark 2 from local fallback, got %d", assignments[0].HighWatermark)
+	}
+
+	if assignments[0].Lag != 1 {
+		t.Fatalf("expected lag 1, got %d", assignments[0].Lag)
+	}
 }

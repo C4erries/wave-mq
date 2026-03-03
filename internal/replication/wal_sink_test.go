@@ -19,6 +19,11 @@ func TestWALSinkApplyBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close storage: %v", err)
+		}
+	}()
 
 	sink := NewWALSink(store, "alpha", 0)
 	records := []api.Record{
@@ -49,7 +54,9 @@ func TestWALSinkApplyBatch(t *testing.T) {
 		t.Fatalf("unexpected records: %+v", got)
 	}
 
-	log.Close()
+	if err := log.Close(); err != nil {
+		t.Fatalf("close log: %v", err)
+	}
 }
 
 func TestWALSinkMaintainsOffsetsWhenLeaderBehind(t *testing.T) {
@@ -59,6 +66,11 @@ func TestWALSinkMaintainsOffsetsWhenLeaderBehind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close storage: %v", err)
+		}
+	}()
 
 	sink := NewWALSink(store, "alpha", 0)
 
@@ -90,5 +102,7 @@ func TestWALSinkMaintainsOffsetsWhenLeaderBehind(t *testing.T) {
 		t.Fatalf("unexpected records after alignment: %+v", read)
 	}
 
-	log.Close()
+	if err := log.Close(); err != nil {
+		t.Fatalf("close log: %v", err)
+	}
 }

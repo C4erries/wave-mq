@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	brokerpkg "github.com/c4erries/wave-mq/internal/broker"
@@ -16,6 +18,22 @@ import (
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
+
+func assertClose(t *testing.T, target string, err error) {
+	t.Helper()
+
+	if err != nil && !errors.Is(err, os.ErrClosed) {
+		t.Errorf("close %s: %v", target, err)
+	}
+}
+
+func requireClose(t *testing.T, target string, err error) {
+	t.Helper()
+
+	if err != nil && !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("close %s: %v", target, err)
+	}
+}
 
 func TestBrokerRecoversTopicsFromMetadataLog(t *testing.T) {
 	ctx := context.Background()
@@ -75,10 +93,10 @@ func TestBrokerRecoversTopicsFromMetadataLog(t *testing.T) {
 	produceHTTP(t, client, server.URL, "beta", 0, "beta-0")
 
 	server.Close()
-	_ = b.Close()
-	_ = store.Close()
-	_ = offsetStore.Close()
-	_ = metaStore.Close()
+	requireClose(t, "broker before restart", b.Close())
+	requireClose(t, "storage before restart", store.Close())
+	requireClose(t, "offset store before restart", offsetStore.Close())
+	requireClose(t, "metadata store before restart", metaStore.Close())
 
 	// Restart using same data dir.
 	store, err = storage.NewManager(storage.Config{
@@ -124,10 +142,10 @@ func TestBrokerRecoversTopicsFromMetadataLog(t *testing.T) {
 
 	defer func() {
 		server.Close()
-		b.Close()
-		store.Close()
-		offsetStore.Close()
-		metaStore.Close()
+		assertClose(t, "broker", b.Close())
+		assertClose(t, "storage", store.Close())
+		assertClose(t, "offset store", offsetStore.Close())
+		assertClose(t, "metadata store", metaStore.Close())
 	}()
 
 	topics := fetchTopics(t, server.URL)
@@ -207,7 +225,9 @@ func createTopicHTTP(t *testing.T, client *http.Client, baseURL, name string, pa
 		t.Fatalf("post topic: %v", err)
 	}
 
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close create topic response body: %v", err)
+	}
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusConflict {
 		t.Fatalf("unexpected status %d creating topic %s", resp.StatusCode, name)
@@ -230,7 +250,11 @@ func produceHTTP(t *testing.T, client *http.Client, baseURL, topic string, parti
 	if err != nil {
 		t.Fatalf("post produce: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close produce response body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected status %d producing to %s/%d", resp.StatusCode, topic, partition)
@@ -244,7 +268,11 @@ func fetchTopics(t *testing.T, baseURL string) map[string]brokerpkg.TopicSummary
 	if err != nil {
 		t.Fatalf("get topics: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close topics response body: %v", err)
+		}
+	}()
 
 	var summaries []brokerpkg.TopicSummary
 	if err := json.NewDecoder(resp.Body).Decode(&summaries); err != nil {
@@ -266,7 +294,11 @@ func fetchTopicDetail(t *testing.T, baseURL, name string) brokerpkg.TopicDetail 
 	if err != nil {
 		t.Fatalf("get topic detail: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close topic detail response body: %v", err)
+		}
+	}()
 
 	var detail brokerpkg.TopicDetail
 	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
@@ -285,7 +317,11 @@ func fetchMessages(t *testing.T, baseURL, topic string, partition int) []map[str
 	if err != nil {
 		t.Fatalf("get messages: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close messages response body: %v", err)
+		}
+	}()
 
 	var msgs []map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
@@ -302,7 +338,11 @@ func fetchCluster(t *testing.T, baseURL string) api.ClusterMetadata {
 	if err != nil {
 		t.Fatalf("get cluster: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close cluster response body: %v", err)
+		}
+	}()
 
 	var meta api.ClusterMetadata
 	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {

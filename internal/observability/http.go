@@ -2,7 +2,9 @@ package observability
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -27,14 +29,18 @@ func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool, ex
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		if readyFunc() {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
+			if err := writeHealthResponse(w, http.StatusOK, "ok"); err != nil {
+				RequestErrors.WithLabelValues("observability", "healthz_write").Inc()
+				slog.Error("observability health response write failed", "status", http.StatusOK, "err", err)
+			}
 
 			return
 		}
 
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("not ready"))
+		if err := writeHealthResponse(w, http.StatusServiceUnavailable, "not ready"); err != nil {
+			RequestErrors.WithLabelValues("observability", "healthz_write").Inc()
+			slog.Error("observability health response write failed", "status", http.StatusServiceUnavailable, "err", err)
+		}
 	})
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
@@ -72,7 +78,10 @@ func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool, ex
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_ = srv.Shutdown(shutdownCtx)
+		if shutdownErr := srv.Shutdown(shutdownCtx); shutdownErr != nil && !errors.Is(shutdownErr, http.ErrServerClosed) {
+			RequestErrors.WithLabelValues("observability", "shutdown").Inc()
+			return shutdownErr
+		}
 
 		return nil
 	case err := <-errCh:
@@ -82,4 +91,12 @@ func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool, ex
 
 		return err
 	}
+}
+
+func writeHealthResponse(w http.ResponseWriter, status int, body string) error {
+	w.WriteHeader(status)
+
+	_, err := w.Write([]byte(body))
+
+	return err
 }

@@ -152,10 +152,12 @@ func TestBinaryReplicatorFetchSuccess(t *testing.T) {
 		t.Fatalf("create topic: %v", err)
 	}
 
-	_, _ = b.Produce(context.Background(), "alpha", 0, []api.Record{
+	if _, err := b.Produce(context.Background(), "alpha", 0, []api.Record{
 		{Value: []byte("one")},
 		{Value: []byte("two")},
-	})
+	}); err != nil {
+		t.Fatalf("produce: %v", err)
+	}
 
 	srv, err := netproto.NewServer("127.0.0.1:0", b)
 	if err != nil {
@@ -163,10 +165,13 @@ func TestBinaryReplicatorFetchSuccess(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	serverErr := make(chan error, 1)
 	go func() {
-		_ = srv.ListenAndServe(ctx)
+		serverErr <- srv.ListenAndServe(ctx)
+	}()
+	defer func() {
+		cancel()
+		assertAsyncError(t, serverErr, context.Canceled)
 	}()
 
 	addr := waitForAddr(t, srv)
@@ -210,6 +215,72 @@ func TestBinaryReplicatorConnectionFailure(t *testing.T) {
 	}
 }
 
+func TestBinaryReplicatorBuildsAddressFromHostAndPort(t *testing.T) {
+	b := newFakeBroker()
+	if err := b.CreateTopic(context.Background(), "alpha", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	if _, err := b.Produce(context.Background(), "alpha", 0, []api.Record{{Value: []byte("one")}}); err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+
+	srv, err := netproto.NewServer("127.0.0.1:0", b)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- srv.ListenAndServe(ctx)
+	}()
+	defer func() {
+		cancel()
+		assertAsyncError(t, serverErr, context.Canceled)
+	}()
+
+	addr := waitForAddr(t, srv)
+	host, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		t.Fatalf("split addr: %v", err)
+	}
+
+	portNum, err := net.LookupPort("tcp", port)
+	if err != nil {
+		t.Fatalf("lookup port: %v", err)
+	}
+
+	rep := NewBinaryReplicator()
+	res, err := rep.FetchFromLeader(context.Background(), api.BrokerInfo{Host: host, Port: portNum}, FetchRequest{
+		Topic:     "alpha",
+		Partition: 0,
+		Offset:    0,
+		MaxBytes:  1024,
+	})
+	if err != nil {
+		t.Fatalf("fetch with host+port: %v", err)
+	}
+
+	if len(res.Records) != 1 || string(res.Records[0].Value) != "one" {
+		t.Fatalf("unexpected response: %+v", res.Records)
+	}
+}
+
+func TestBinaryReplicatorRejectsEmptyLeaderHost(t *testing.T) {
+	rep := NewBinaryReplicator()
+
+	_, err := rep.FetchFromLeader(context.Background(), api.BrokerInfo{}, FetchRequest{
+		Topic:     "alpha",
+		Partition: 0,
+		Offset:    0,
+		MaxBytes:  1,
+	})
+	if err == nil {
+		t.Fatalf("expected error for empty leader host")
+	}
+}
+
 // waitForAddr waits until server listener is available.
 func waitForAddr(t *testing.T, srv *netproto.Server) net.Addr {
 	t.Helper()
@@ -230,5 +301,18 @@ func waitForAddr(t *testing.T, srv *netproto.Server) net.Addr {
 			t.Fatalf("server did not start listening in time")
 		case <-ticker.C:
 		}
+	}
+}
+
+func assertAsyncError(t *testing.T, errCh <-chan error, expected error) {
+	t.Helper()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, expected) {
+			t.Fatalf("unexpected async error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("async operation did not stop in time")
 	}
 }

@@ -2,6 +2,8 @@ package replication
 
 import (
 	"context"
+	"errors"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -68,10 +70,12 @@ func TestPartitionReplicatorFetchesBatches(t *testing.T) {
 		t.Fatalf("create topic: %v", err)
 	}
 
-	_, _ = b.Produce(context.Background(), "alpha", 0, []api.Record{
+	if _, err := b.Produce(context.Background(), "alpha", 0, []api.Record{
 		{Value: []byte("one")},
 		{Value: []byte("two")},
-	})
+	}); err != nil {
+		t.Fatalf("produce: %v", err)
+	}
 
 	server, err := netproto.NewServer("127.0.0.1:0", b)
 	if err != nil {
@@ -81,9 +85,11 @@ func TestPartitionReplicatorFetchesBatches(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	serverErr := make(chan error, 1)
 	go func() {
-		_ = server.ListenAndServe(ctx)
+		serverErr <- server.ListenAndServe(ctx)
 	}()
+	defer assertAsyncError(t, serverErr, context.Canceled)
 
 	addr := waitForAddr(t, server)
 
@@ -91,9 +97,10 @@ func TestPartitionReplicatorFetchesBatches(t *testing.T) {
 	rep := NewPartitionReplicator(NewBinaryReplicator(), api.BrokerInfo{Host: addr.String()}, "alpha", 0, sink)
 	rep.Interval = 10 * time.Millisecond
 	done := make(chan struct{})
+	repErr := make(chan error, 1)
 
 	go func() {
-		_ = rep.Run(ctx)
+		repErr <- rep.Run(ctx)
 
 		close(done)
 	}()
@@ -104,6 +111,7 @@ func TestPartitionReplicatorFetchesBatches(t *testing.T) {
 	}, 2*time.Second)
 	cancel()
 	<-done
+	assertAsyncError(t, repErr, context.Canceled)
 
 	records, hwm := sink.snapshot()
 	if hwm != 1 {
@@ -128,6 +136,24 @@ func TestPartitionReplicatorStopsOnError(t *testing.T) {
 	}
 }
 
+func TestPartitionReplicatorRunRequiresReplicator(t *testing.T) {
+	rep := NewPartitionReplicator(nil, api.BrokerInfo{Host: "127.0.0.1:1"}, "alpha", 0, &fakeSink{})
+
+	err := rep.Run(context.Background())
+	if err == nil {
+		t.Fatalf("expected error for nil replicator")
+	}
+}
+
+func TestPartitionReplicatorRunRequiresSink(t *testing.T) {
+	rep := NewPartitionReplicator(&testReplicator{}, api.BrokerInfo{Host: "127.0.0.1:1"}, "alpha", 0, nil)
+
+	err := rep.Run(context.Background())
+	if err == nil {
+		t.Fatalf("expected error for nil sink")
+	}
+}
+
 func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 	ctx := context.Background()
 	leaderDir := t.TempDir()
@@ -137,17 +163,29 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("leader storage: %v", err)
 	}
-	defer leaderStore.Close()
+	defer func() {
+		closeExpectNoErr(t, "leader storage", leaderStore.Close())
+	}()
 
 	if err := leaderStore.Recover(ctx); err != nil {
 		t.Fatalf("leader recover: %v", err)
 	}
 
-	leaderOffset, _ := broker.NewOffsetStore(leaderDir)
-	defer leaderOffset.Close()
+	leaderOffset, err := broker.NewOffsetStore(leaderDir)
+	if err != nil {
+		t.Fatalf("leader offset store: %v", err)
+	}
+	defer func() {
+		closeExpectNoErr(t, "leader offset store", leaderOffset.Close())
+	}()
 
-	leaderMeta, _ := metadata.NewStore(api.BrokerConfig{DataDir: leaderDir})
-	defer leaderMeta.Close()
+	leaderMeta, err := metadata.NewStore(api.BrokerConfig{DataDir: leaderDir})
+	if err != nil {
+		t.Fatalf("leader metadata store: %v", err)
+	}
+	defer func() {
+		closeExpectNoErr(t, "leader metadata store", leaderMeta.Close())
+	}()
 
 	b, err := broker.NewBroker(api.BrokerConfig{
 		BrokerID:          1,
@@ -157,7 +195,9 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
-	defer b.Close()
+	defer func() {
+		closeExpectNoErr(t, "leader broker", b.Close())
+	}()
 
 	if err := b.CreateTopic(ctx, "alpha", api.TopicConfig{Partitions: 1}); err != nil {
 		t.Fatalf("create topic: %v", err)
@@ -174,9 +214,10 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 
 	ctxSrv, cancelSrv := context.WithCancel(ctx)
 	defer cancelSrv()
+	serverErr := make(chan error, 1)
 
 	go func() {
-		_ = server.ListenAndServe(ctxSrv)
+		serverErr <- server.ListenAndServe(ctxSrv)
 	}()
 
 	addr := waitForAddr(t, server)
@@ -185,7 +226,9 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("follower storage: %v", err)
 	}
-	defer followerStore.Close()
+	defer func() {
+		closeExpectNoErr(t, "follower storage", followerStore.Close())
+	}()
 
 	if err := followerStore.Recover(ctx); err != nil {
 		t.Fatalf("follower recover: %v", err)
@@ -199,29 +242,46 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 	rep.Interval = 10 * time.Millisecond
 	ctxRep, cancelRep := context.WithCancel(ctx)
 	done := make(chan struct{})
+	repErr := make(chan error, 1)
 
 	go func() {
-		_ = rep.Run(ctxRep)
+		repErr <- rep.Run(ctxRep)
 
 		close(done)
 	}()
 
-	followerLog, _ := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
+	followerLog, err := followerStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
+	if err != nil {
+		t.Fatalf("open follower log: %v", err)
+	}
 
 	waitUntil(t, func() bool { return followerLog.HighWatermark() == 1 }, 3*time.Second)
 	cancelRep()
 	<-done
+	assertAsyncError(t, repErr, context.Canceled)
 	cancelSrv()
+	assertAsyncError(t, serverErr, context.Canceled)
 
-	leaderLog, _ := leaderStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
-	defer leaderLog.Close()
-	defer followerLog.Close()
+	leaderLog, err := leaderStore.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
+	if err != nil {
+		t.Fatalf("open leader log: %v", err)
+	}
+	defer func() {
+		closeExpectNoErr(t, "leader log", leaderLog.Close())
+	}()
+	defer func() {
+		closeExpectNoErr(t, "follower log", followerLog.Close())
+	}()
 
 	if followerLog.HighWatermark() != leaderLog.HighWatermark() {
 		t.Fatalf("expected follower hwm %d to match leader %d", followerLog.HighWatermark(), leaderLog.HighWatermark())
 	}
 
-	records, _ := followerLog.Read(ctx, 0, 1<<20)
+	records, err := followerLog.Read(ctx, 0, 1<<20)
+	if err != nil {
+		t.Fatalf("read follower log: %v", err)
+	}
+
 	if len(records) != 2 || string(records[0].Value) != "one" || string(records[1].Value) != "two" {
 		t.Fatalf("unexpected follower records: %+v", records)
 	}
@@ -275,9 +335,10 @@ func TestPartitionReplicatorUsesNextOffsetHint(t *testing.T) {
 	rep.Interval = 0
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	runErr := make(chan error, 1)
 
 	go func() {
-		_ = rep.Run(ctx)
+		runErr <- rep.Run(ctx)
 
 		close(done)
 	}()
@@ -285,6 +346,7 @@ func TestPartitionReplicatorUsesNextOffsetHint(t *testing.T) {
 	waitUntil(t, func() bool { return sink.Applied() > 0 }, time.Second)
 	cancel()
 	<-done
+	assertAsyncError(t, runErr, context.Canceled)
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
 
@@ -311,7 +373,9 @@ func TestPartitionReplicatorResumesFromNextOffset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("follower storage: %v", err)
 	}
-	defer followerStore.Close()
+	defer func() {
+		closeExpectNoErr(t, "follower storage", followerStore.Close())
+	}()
 
 	if err := followerStore.Recover(ctx); err != nil {
 		t.Fatalf("follower recover: %v", err)
@@ -384,7 +448,9 @@ func TestPartitionReplicatorDoesNotDuplicateAfterCatchUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("follower storage: %v", err)
 	}
-	defer followerStore.Close()
+	defer func() {
+		closeExpectNoErr(t, "follower storage", followerStore.Close())
+	}()
 
 	if err := followerStore.Recover(ctx); err != nil {
 		t.Fatalf("follower recover: %v", err)
@@ -416,14 +482,16 @@ func TestPartitionReplicatorDoesNotDuplicateAfterCatchUp(t *testing.T) {
 	defer cancel2()
 
 	done := make(chan struct{})
+	runErr := make(chan error, 1)
 
 	go func() {
-		_ = rep2.Run(ctx2)
+		runErr <- rep2.Run(ctx2)
 
 		close(done)
 	}()
 
 	<-done
+	assertAsyncError(t, runErr, context.DeadlineExceeded)
 
 	records := readLogValues(ctx, t, followerStore)
 	if len(records) != len(values) {
@@ -473,26 +541,21 @@ func startLeader(ctx context.Context, t *testing.T) (string, func(), *broker.Bro
 	}
 
 	ctxSrv, cancelSrv := context.WithCancel(ctx)
-	done := make(chan struct{})
+	serverErr := make(chan error, 1)
 
 	go func() {
-		_ = server.ListenAndServe(ctxSrv)
-
-		close(done)
+		serverErr <- server.ListenAndServe(ctxSrv)
 	}()
 
 	addr := waitForAddr(t, server).String()
 	cleanup := func() {
 		cancelSrv()
+		assertAsyncError(t, serverErr, context.Canceled)
 
-		_ = server.Close()
-
-		<-done
-
-		_ = b.Close()
-		_ = store.Close()
-		_ = offsetStore.Close()
-		_ = metaStore.Close()
+		closeExpectNoErr(t, "leader broker", b.Close())
+		closeExpectNoErr(t, "leader storage", store.Close())
+		closeExpectNoErr(t, "leader offset store", offsetStore.Close())
+		closeExpectNoErr(t, "leader metadata store", metaStore.Close())
 	}
 
 	return addr, cleanup, b
@@ -515,7 +578,9 @@ func readLogValues(ctx context.Context, t *testing.T, store *storage.Manager) []
 	if err != nil {
 		t.Fatalf("open log: %v", err)
 	}
-	defer log.Close()
+	defer func() {
+		closeExpectNoErr(t, "alpha log", log.Close())
+	}()
 
 	recs, err := log.Read(ctx, 0, 1<<20)
 	if err != nil {
@@ -535,9 +600,10 @@ func runReplicatorUntil(ctx context.Context, t *testing.T, rep *PartitionReplica
 
 	ctxRep, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+	runErr := make(chan error, 1)
 
 	go func() {
-		_ = rep.Run(ctxRep)
+		runErr <- rep.Run(ctxRep)
 
 		close(done)
 	}()
@@ -552,6 +618,7 @@ func runReplicatorUntil(ctx context.Context, t *testing.T, rep *PartitionReplica
 	}, 3*time.Second)
 	cancel()
 	<-done
+	assertAsyncError(t, runErr, context.Canceled)
 }
 
 func waitUntil(t *testing.T, pred func() bool, timeout time.Duration) {
@@ -573,5 +640,13 @@ func waitUntil(t *testing.T, pred func() bool, timeout time.Duration) {
 			t.Fatalf("condition not met within %s", timeout)
 		case <-ticker.C:
 		}
+	}
+}
+
+func closeExpectNoErr(t *testing.T, target string, err error) {
+	t.Helper()
+
+	if err != nil && !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("close %s: %v", target, err)
 	}
 }

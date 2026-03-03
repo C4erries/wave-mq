@@ -2,6 +2,7 @@ package mqtt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -29,10 +30,12 @@ type BrokerAPI interface {
 
 // Server hosts the MQTT TCP listener and packet loop.
 type Server struct {
+	mu      sync.RWMutex
 	addr    string
 	broker  BrokerAPI
 	options ServerOptions
 	ln      net.Listener
+	started bool
 }
 
 type ServerOptions struct {
@@ -87,17 +90,41 @@ func NewServerWithOptions(addr string, broker BrokerAPI, options ServerOptions) 
 
 // ListenAndServe accepts MQTT clients until ctx is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
+	s.mu.Lock()
+	if s.started {
+		s.mu.Unlock()
+		return fmt.Errorf("server already started")
+	}
+
+	s.started = true
+	s.mu.Unlock()
+
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
+		s.mu.Lock()
+		s.started = false
+		s.mu.Unlock()
+
 		return err
 	}
 
+	s.mu.Lock()
 	s.ln = ln
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.ln = nil
+		s.started = false
+		s.mu.Unlock()
+	}()
 
 	go func() {
 		<-ctx.Done()
 
-		_ = ln.Close()
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			slog.Error("mqtt listener close failed", "err", err)
+		}
 	}()
 
 	for {
@@ -109,6 +136,10 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			default:
 			}
 
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+
 			return err
 		}
 
@@ -118,8 +149,16 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 // Close stops the listener.
 func (s *Server) Close() error {
-	if s.ln != nil {
-		return s.ln.Close()
+	s.mu.RLock()
+	ln := s.ln
+	s.mu.RUnlock()
+
+	if ln == nil {
+		return nil
+	}
+
+	if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
 	}
 
 	return nil
@@ -172,8 +211,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 			continue
 		case *PingreqPacket:
 			state.writeMu.Lock()
-			_ = writePingresp(conn, &PingrespPacket{})
+			err := writePingresp(conn, &PingrespPacket{})
 			state.writeMu.Unlock()
+
+			if err != nil {
+				observability.RequestErrors.WithLabelValues("mqtt", "pingresp").Inc()
+				return
+			}
 		case *DisconnectPacket:
 			s.handleDisconnect(state)
 			return
@@ -335,13 +379,18 @@ func (state *clientState) consumeLoop(ctx context.Context, mqttTopic string, sub
 		recs, err := state.broker.Fetch(ctx, sub.topic, sub.partition, offset, 64<<10)
 		if err != nil {
 			observability.RequestErrors.WithLabelValues("mqtt", "fetch").Inc()
-			time.Sleep(state.opts.FetchErrorBackoff)
+			if !waitForDuration(ctx, state.opts.FetchErrorBackoff) {
+				return
+			}
 
 			continue
 		}
 
 		if len(recs) == 0 {
-			time.Sleep(state.opts.EmptyPollInterval)
+			if !waitForDuration(ctx, state.opts.EmptyPollInterval) {
+				return
+			}
+
 			continue
 		}
 
@@ -403,7 +452,10 @@ func (s *Server) handlePublish(state *clientState, pkt *PublishPacket) error {
 
 func (s *Server) handleDisconnect(state *clientState) {
 	if state.group != "" && state.clientID != "" {
-		_ = s.broker.LeaveGroup(state.ctx, state.group, state.clientID)
+		if err := s.broker.LeaveGroup(state.ctx, state.group, state.clientID); err != nil {
+			observability.RequestErrors.WithLabelValues("mqtt", "leave_group").Inc()
+			slog.Error("mqtt leave group failed", "group", state.group, "member_id", state.clientID, "err", err)
+		}
 	}
 
 	state.cancel()
@@ -471,10 +523,8 @@ func (state *clientState) commitWithRetry(ctx context.Context, topic string, par
 			observability.RequestErrors.WithLabelValues("mqtt", "commit").Inc()
 			slog.Error("mqtt commit failed", "topic", topic, "partition", partition, "offset", offset, "err", err)
 
-			select {
-			case <-ctx.Done():
+			if !waitForDuration(ctx, state.opts.CommitRetryBackoff) {
 				return ctx.Err()
-			case <-time.After(state.opts.CommitRetryBackoff):
 			}
 
 			continue
@@ -543,6 +593,27 @@ func (state *clientState) markIncomingQoS1(pkt *PublishPacket) {
 	defer state.mu.Unlock()
 
 	state.inboundQoS1Seen[pkt.PacketID] = publishFingerprint(pkt.Topic, pkt.Payload)
+}
+
+func waitForDuration(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			return true
+		}
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func publishFingerprint(topic string, payload []byte) uint64 {

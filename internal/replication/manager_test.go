@@ -2,7 +2,9 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,6 +101,12 @@ func (w *fakeWorker) Run(ctx context.Context) error {
 	<-ctx.Done()
 
 	return ctx.Err()
+}
+
+type workerFunc func(context.Context) error
+
+func (fn workerFunc) Run(ctx context.Context) error {
+	return fn(ctx)
 }
 
 type noopSink struct{}
@@ -248,7 +256,11 @@ func TestManagerStartsReplicatorsForFollowers(t *testing.T) {
 		t.Fatalf("storage: %v", err)
 	}
 
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close storage: %v", err)
+		}
+	})
 
 	meta := api.ClusterMetadata{
 		Brokers: []api.BrokerInfo{
@@ -268,9 +280,7 @@ func TestManagerStartsReplicatorsForFollowers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	go func() {
-		_ = mgr.Run(ctx)
-	}()
+	errCh := runManagerAsync(mgr, ctx)
 
 	waitForCondition(t, time.Second, func() bool {
 		repl.mu.Lock()
@@ -288,6 +298,9 @@ func TestManagerStartsReplicatorsForFollowers(t *testing.T) {
 			t.Fatalf("should not replicate leader-owned partition b")
 		}
 	}
+
+	cancel()
+	assertManagerRunEnded(t, errCh)
 }
 
 func TestManagerStartsReplicatorsForMultipleFollowers(t *testing.T) {
@@ -298,7 +311,11 @@ func TestManagerStartsReplicatorsForMultipleFollowers(t *testing.T) {
 		t.Fatalf("storage: %v", err)
 	}
 
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close storage: %v", err)
+		}
+	})
 
 	meta := api.ClusterMetadata{
 		Brokers: []api.BrokerInfo{
@@ -319,9 +336,7 @@ func TestManagerStartsReplicatorsForMultipleFollowers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	go func() {
-		_ = mgr.Run(ctx)
-	}()
+	errCh := runManagerAsync(mgr, ctx)
 
 	waitForCondition(t, time.Second, func() bool {
 		repl.mu.Lock()
@@ -350,6 +365,9 @@ func TestManagerStartsReplicatorsForMultipleFollowers(t *testing.T) {
 	if seen[2] {
 		t.Fatalf("should not replicate locally-led partition 2")
 	}
+
+	cancel()
+	assertManagerRunEnded(t, errCh)
 }
 
 func TestManagerRestartsOnLeaderChange(t *testing.T) {
@@ -360,7 +378,11 @@ func TestManagerRestartsOnLeaderChange(t *testing.T) {
 		t.Fatalf("storage: %v", err)
 	}
 
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close storage: %v", err)
+		}
+	})
 
 	metaFeed := newStreamMetadataStore()
 	repl := &trackingReplicator{}
@@ -369,9 +391,7 @@ func TestManagerRestartsOnLeaderChange(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	go func() {
-		_ = mgr.Run(ctx)
-	}()
+	errCh := runManagerAsync(mgr, ctx)
 
 	metaFeed.push(api.ClusterMetadata{
 		Version:    1,
@@ -390,6 +410,9 @@ func TestManagerRestartsOnLeaderChange(t *testing.T) {
 	waitForContextCanceled(firstCtx, t)
 	waitForLeader(t, repl, 3)
 	waitForNewContext(firstCtx, t, repl)
+
+	cancel()
+	assertManagerRunEnded(t, errCh)
 }
 
 func TestManagerStopsReplicationWhenReplicaRemoved(t *testing.T) {
@@ -400,7 +423,11 @@ func TestManagerStopsReplicationWhenReplicaRemoved(t *testing.T) {
 		t.Fatalf("storage: %v", err)
 	}
 
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close storage: %v", err)
+		}
+	})
 
 	metaFeed := newStreamMetadataStore()
 	repl := &trackingReplicator{}
@@ -408,9 +435,7 @@ func TestManagerStopsReplicationWhenReplicaRemoved(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	go func() {
-		_ = mgr.Run(ctx)
-	}()
+	errCh := runManagerAsync(mgr, ctx)
 
 	metaFeed.push(api.ClusterMetadata{
 		Version:    1,
@@ -428,6 +453,9 @@ func TestManagerStopsReplicationWhenReplicaRemoved(t *testing.T) {
 
 	waitForContextCanceled(firstCtx, t)
 	ensureNoNewContexts(t, repl, len(repl.contextsSnapshot()))
+
+	cancel()
+	assertManagerRunEnded(t, errCh)
 }
 
 func TestManagerUsesInjectedFactories(t *testing.T) {
@@ -438,7 +466,11 @@ func TestManagerUsesInjectedFactories(t *testing.T) {
 		t.Fatalf("storage: %v", err)
 	}
 
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close storage: %v", err)
+		}
+	})
 
 	metaFeed := newStreamMetadataStore()
 	repl := &trackingReplicator{}
@@ -471,9 +503,7 @@ func TestManagerUsesInjectedFactories(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	go func() {
-		_ = mgr.Run(ctx)
-	}()
+	errCh := runManagerAsync(mgr, ctx)
 
 	metaFeed.push(api.ClusterMetadata{
 		Version:    1,
@@ -486,6 +516,95 @@ func TestManagerUsesInjectedFactories(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatalf("expected worker factory to be invoked")
 	}
+
+	cancel()
+	assertManagerRunEnded(t, errCh)
+}
+
+func TestManagerRestartsWorkerAfterFailure(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := storage.NewManager(storage.Config{DataDir: dir})
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close storage: %v", err)
+		}
+	}()
+
+	metaFeed := newStreamMetadataStore()
+	var attempts atomic.Int32
+	workerStarted := make(chan struct{}, 1)
+
+	mgr := NewManagerWithFactories(
+		api.BrokerConfig{BrokerID: 2},
+		store,
+		metaFeed,
+		&trackingReplicator{},
+		func(topic string, partition int) Sink {
+			_ = topic
+			_ = partition
+
+			return &noopSink{}
+		},
+		func(repl Replicator, leader api.BrokerInfo, topic string, partition int, sink Sink) ReplicationWorker {
+			_ = repl
+			_ = leader
+			_ = topic
+			_ = partition
+			_ = sink
+
+			attempt := attempts.Add(1)
+			if attempt == 1 {
+				return workerFunc(func(ctx context.Context) error {
+					_ = ctx
+
+					return errors.New("transient failure")
+				})
+			}
+
+			return workerFunc(func(ctx context.Context) error {
+				select {
+				case workerStarted <- struct{}{}:
+				default:
+				}
+
+				<-ctx.Done()
+
+				return ctx.Err()
+			})
+		},
+	)
+	mgr.restartBackoff = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := runManagerAsync(mgr, ctx)
+
+	metaFeed.push(api.ClusterMetadata{
+		Version: 1,
+		Brokers: []api.BrokerInfo{
+			{BrokerID: 1, Host: "b1"},
+			{BrokerID: 2, Host: "b2"},
+		},
+		Partitions: []api.PartitionAssignment{
+			{Topic: "r", Partition: 0, Leader: 1, Replicas: []int{1, 2}, ISR: []int{1}},
+		},
+	})
+
+	select {
+	case <-workerStarted:
+	case <-time.After(time.Second):
+		t.Fatalf("expected restarted worker to start")
+	}
+
+	if attempts.Load() < 2 {
+		t.Fatalf("expected at least two worker attempts, got %d", attempts.Load())
+	}
+
+	cancel()
+	assertManagerRunEnded(t, errCh)
 }
 
 func waitForLeaderAndContext(t *testing.T, repl *trackingReplicator, leader int) context.Context {
@@ -603,5 +722,28 @@ func waitForCondition(t *testing.T, timeout time.Duration, pred func() bool, fai
 			t.Fatalf("%s", failMsg)
 		case <-ticker.C:
 		}
+	}
+}
+
+func runManagerAsync(mgr *Manager, ctx context.Context) <-chan error {
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- mgr.Run(ctx)
+	}()
+
+	return errCh
+}
+
+func assertManagerRunEnded(t *testing.T, errCh <-chan error) {
+	t.Helper()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("manager run failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("manager did not stop in time")
 	}
 }

@@ -18,6 +18,7 @@ type fakeBroker struct {
 	defaultRF int
 	lastCfg   api.TopicConfig
 	notLeader map[string]struct{}
+	listErr   error
 }
 
 func newFakeBroker() *fakeBroker {
@@ -114,10 +115,26 @@ func (b *fakeBroker) Fetch(ctx context.Context, topic string, partition int, off
 
 func (b *fakeBroker) ListOffsets(ctx context.Context, topic string, partition int) (api.Offset, api.Offset, error) {
 	_ = ctx
-	_ = topic
-	_ = partition
 
-	return 0, 0, nil
+	if b.listErr != nil {
+		return -1, -1, b.listErr
+	}
+
+	t, ok := b.topics[topic]
+	if !ok {
+		return -1, -1, errTopicNotFound
+	}
+
+	recs, ok := t[partition]
+	if !ok {
+		return -1, -1, errPartitionNotFound
+	}
+
+	if len(recs) == 0 {
+		return 0, -1, nil
+	}
+
+	return 0, api.Offset(len(recs) - 1), nil
 }
 
 func (b *fakeBroker) CommitOffset(ctx context.Context, group, topic string, partition int, offset api.Offset) error {
@@ -327,5 +344,74 @@ func TestServerHandlers(t *testing.T) {
 
 	if b.lastCfg.ReplicationFactor != b.defaultRF {
 		t.Fatalf("expected rf fallback %d, got %d", b.defaultRF, b.lastCfg.ReplicationFactor)
+	}
+}
+
+func TestServerFetchUsesFallbackHighWatermarkWhenListOffsetsFails(t *testing.T) {
+	b := newFakeBroker()
+
+	if err := b.CreateTopic(context.Background(), "alpha", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	if _, err := b.Produce(context.Background(), "alpha", 0, []api.Record{
+		{Value: []byte("one")},
+		{Value: []byte("two")},
+	}); err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+
+	b.listErr = fmt.Errorf("list offsets failed")
+
+	srv, err := NewServer("localhost:0", b)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	go srv.handleConnection(serverConn)
+
+	fetchPayload, err := encodeFetchRequest(&FetchRequest{
+		Topic:     "alpha",
+		Partition: 0,
+		Offset:    2,
+		MaxBytes:  1024,
+	})
+	if err != nil {
+		t.Fatalf("encode fetch: %v", err)
+	}
+
+	frame, err := encodeRequestFrame(api.APIKeyFetch, 42, fetchPayload)
+	if err != nil {
+		t.Fatalf("encode frame: %v", err)
+	}
+
+	if _, err := clientConn.Write(frame); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+
+	_, _, payload, err := decodeResponseFrame(clientConn)
+	if err != nil {
+		t.Fatalf("decode response frame: %v", err)
+	}
+
+	resp, err := decodeFetchResponse(payload)
+	if err != nil {
+		t.Fatalf("decode fetch response: %v", err)
+	}
+
+	if resp.Error != api.ErrNone {
+		t.Fatalf("expected successful fetch response, got error %d", resp.Error)
+	}
+
+	if resp.HighWatermark != 1 {
+		t.Fatalf("expected fallback high watermark 1, got %d", resp.HighWatermark)
+	}
+
+	if len(resp.Records) != 0 {
+		t.Fatalf("expected empty records at tail fetch, got %d", len(resp.Records))
 	}
 }

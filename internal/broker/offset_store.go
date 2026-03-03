@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -46,6 +47,12 @@ func NewOffsetStore(dataDir string) (*OffsetStore, error) {
 		return nil, err
 	}
 
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		_ = f.Close()
+
+		return nil, err
+	}
+
 	return &OffsetStore{f: f, path: path}, nil
 }
 
@@ -57,6 +64,12 @@ func (s *OffsetStore) Recover(ctx context.Context) (map[string]map[string]map[in
 
 	offsets := make(map[string]map[string]map[int]api.Offset)
 
+	info, err := s.f.Stat()
+	if err != nil {
+		return offsets, err
+	}
+
+	size := info.Size()
 	var pos int64
 
 	header := make([]byte, 4)
@@ -68,8 +81,26 @@ func (s *OffsetStore) Recover(ctx context.Context) (map[string]map[string]map[in
 		default:
 		}
 
+		if pos+4 > size {
+			if pos < size {
+				if err := s.truncateTail(pos); err != nil {
+					return offsets, err
+				}
+			}
+
+			if err := s.seekWritePosition(pos); err != nil {
+				return offsets, err
+			}
+
+			return offsets, nil
+		}
+
 		if _, err := s.f.ReadAt(header, pos); err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				if err := s.truncateTail(pos); err != nil {
+					return offsets, err
+				}
+
 				return offsets, nil
 			}
 
@@ -77,21 +108,37 @@ func (s *OffsetStore) Recover(ctx context.Context) (map[string]map[string]map[in
 		}
 
 		length := binary.LittleEndian.Uint32(header)
+		if length > uint32(maxInt32) || pos+4+int64(length) > size {
+			if err := s.truncateTail(pos); err != nil {
+				return offsets, err
+			}
 
-		record := make([]byte, length)
+			return offsets, nil
+		}
+
+		record := make([]byte, int(length))
 		if _, err := s.f.ReadAt(record, pos+4); err != nil {
-			_ = s.f.Truncate(pos)
+			if err := s.truncateTail(pos); err != nil {
+				return offsets, err
+			}
+
 			return offsets, nil
 		}
 
 		if err := validateOffsetRecord(record); err != nil {
-			_ = s.f.Truncate(pos)
+			if err := s.truncateTail(pos); err != nil {
+				return offsets, err
+			}
+
 			return offsets, nil
 		}
 
 		group, topic, partition, off, err := decodeOffsetRecord(record)
 		if err != nil {
-			_ = s.f.Truncate(pos)
+			if err := s.truncateTail(pos); err != nil {
+				return offsets, err
+			}
+
 			return offsets, nil
 		}
 
@@ -253,11 +300,14 @@ func (s *OffsetStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.f != nil {
-		return s.f.Close()
+	if s.f == nil {
+		return nil
 	}
 
-	return nil
+	f := s.f
+	s.f = nil
+
+	return f.Close()
 }
 
 // Compact rewrites the offset log with a single record per group/topic/partition.
@@ -322,7 +372,12 @@ func (s *OffsetStore) Compact(ctx context.Context, offsets map[string]map[string
 	}
 	// Swap files.
 	if s.f != nil {
-		_ = s.f.Close()
+		if err := s.f.Close(); err != nil {
+			removeTempFile(tmpPath)
+			return err
+		}
+
+		s.f = nil
 	}
 
 	if err := os.Rename(tmpPath, s.path); err != nil { // #nosec G703 -- tmpPath and target path are controlled local filesystem paths.
@@ -334,9 +389,29 @@ func (s *OffsetStore) Compact(ctx context.Context, offsets map[string]map[string
 		return err
 	}
 
+	if _, err := newFile.Seek(0, io.SeekEnd); err != nil {
+		_ = newFile.Close()
+
+		return err
+	}
+
 	s.f = newFile
 
 	return nil
+}
+
+func (s *OffsetStore) truncateTail(pos int64) error {
+	if err := s.f.Truncate(pos); err != nil {
+		return err
+	}
+
+	return s.seekWritePosition(pos)
+}
+
+func (s *OffsetStore) seekWritePosition(pos int64) error {
+	_, err := s.f.Seek(pos, io.SeekStart)
+
+	return err
 }
 
 func toUint32Length(n int) (uint32, error) {
