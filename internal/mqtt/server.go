@@ -29,13 +29,35 @@ type BrokerAPI interface {
 
 // Server hosts the MQTT TCP listener and packet loop.
 type Server struct {
-	addr   string
-	broker BrokerAPI
-	ln     net.Listener
+	addr    string
+	broker  BrokerAPI
+	options ServerOptions
+	ln      net.Listener
+}
+
+type ServerOptions struct {
+	EmptyPollInterval  time.Duration
+	FetchErrorBackoff  time.Duration
+	QoS1RetryInterval  time.Duration
+	CommitRetryBackoff time.Duration
+}
+
+func defaultServerOptions() ServerOptions {
+	return ServerOptions{
+		EmptyPollInterval:  50 * time.Millisecond,
+		FetchErrorBackoff:  100 * time.Millisecond,
+		QoS1RetryInterval:  300 * time.Millisecond,
+		CommitRetryBackoff: 100 * time.Millisecond,
+	}
 }
 
 // NewServer constructs an MQTT server.
 func NewServer(addr string, broker BrokerAPI) (*Server, error) {
+	return NewServerWithOptions(addr, broker, defaultServerOptions())
+}
+
+// NewServerWithOptions constructs an MQTT server with explicit runtime options.
+func NewServerWithOptions(addr string, broker BrokerAPI, options ServerOptions) (*Server, error) {
 	if broker == nil {
 		return nil, fmt.Errorf("broker is required")
 	}
@@ -44,7 +66,23 @@ func NewServer(addr string, broker BrokerAPI) (*Server, error) {
 		return nil, fmt.Errorf("addr is required")
 	}
 
-	return &Server{addr: addr, broker: broker}, nil
+	if options.EmptyPollInterval <= 0 {
+		options.EmptyPollInterval = defaultServerOptions().EmptyPollInterval
+	}
+
+	if options.FetchErrorBackoff <= 0 {
+		options.FetchErrorBackoff = defaultServerOptions().FetchErrorBackoff
+	}
+
+	if options.QoS1RetryInterval <= 0 {
+		options.QoS1RetryInterval = defaultServerOptions().QoS1RetryInterval
+	}
+
+	if options.CommitRetryBackoff <= 0 {
+		options.CommitRetryBackoff = defaultServerOptions().CommitRetryBackoff
+	}
+
+	return &Server{addr: addr, broker: broker, options: options}, nil
 }
 
 // ListenAndServe accepts MQTT clients until ctx is cancelled.
@@ -99,6 +137,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		cancel:           cancel,
 		subs:             make(map[string]subscriptionState),
 		broker:           s.broker,
+		opts:             s.options,
 		outboundQoS1Acks: make(map[uint16]outboundQoS1),
 		inboundQoS1Seen:  make(map[uint16]uint64),
 	}
@@ -155,6 +194,7 @@ type clientState struct {
 	group      string
 
 	broker BrokerAPI
+	opts   ServerOptions
 
 	mu   sync.Mutex
 	subs map[string]subscriptionState // mqtt topic -> state
@@ -295,13 +335,13 @@ func (state *clientState) consumeLoop(ctx context.Context, mqttTopic string, sub
 		recs, err := state.broker.Fetch(ctx, sub.topic, sub.partition, offset, 64<<10)
 		if err != nil {
 			observability.RequestErrors.WithLabelValues("mqtt", "fetch").Inc()
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(state.opts.FetchErrorBackoff)
 
 			continue
 		}
 
 		if len(recs) == 0 {
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(state.opts.EmptyPollInterval)
 			continue
 		}
 
@@ -363,7 +403,7 @@ func (s *Server) handlePublish(state *clientState, pkt *PublishPacket) error {
 
 func (s *Server) handleDisconnect(state *clientState) {
 	if state.group != "" && state.clientID != "" {
-		_ = s.broker.LeaveGroup(context.Background(), state.group, state.clientID)
+		_ = s.broker.LeaveGroup(state.ctx, state.group, state.clientID)
 	}
 
 	state.cancel()
@@ -394,7 +434,7 @@ func (state *clientState) sendQoS1AndWaitAck(
 		return err
 	}
 
-	retryTimer := time.NewTimer(300 * time.Millisecond)
+	retryTimer := time.NewTimer(state.opts.QoS1RetryInterval)
 	defer retryTimer.Stop()
 
 	for {
@@ -413,7 +453,7 @@ func (state *clientState) sendQoS1AndWaitAck(
 				return err
 			}
 
-			retryTimer.Reset(300 * time.Millisecond)
+			retryTimer.Reset(state.opts.QoS1RetryInterval)
 		}
 	}
 }
@@ -427,14 +467,14 @@ func (state *clientState) writePublish(pkt *PublishPacket) error {
 
 func (state *clientState) commitWithRetry(ctx context.Context, topic string, partition int, offset api.Offset) error {
 	for {
-		if err := state.broker.CommitOffset(context.Background(), state.group, topic, partition, offset); err != nil {
+		if err := state.broker.CommitOffset(ctx, state.group, topic, partition, offset); err != nil {
 			observability.RequestErrors.WithLabelValues("mqtt", "commit").Inc()
 			slog.Error("mqtt commit failed", "topic", topic, "partition", partition, "offset", offset, "err", err)
 
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(state.opts.CommitRetryBackoff):
 			}
 
 			continue

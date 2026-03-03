@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/c4erries/wave-mq/internal/metadata"
@@ -51,6 +52,65 @@ func newTestBroker(t *testing.T) (*Broker, func()) {
 	}
 
 	return b, cleanup
+}
+
+type fakeClusterStore struct {
+	mu     sync.RWMutex
+	meta   api.ClusterMetadata
+	getErr error
+}
+
+func (f *fakeClusterStore) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
+	_ = ctx
+
+	if f.getErr != nil {
+		return api.ClusterMetadata{}, f.getErr
+	}
+
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	return f.meta, nil
+}
+
+func (f *fakeClusterStore) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
+	_ = ctx
+	_ = sinceVersion
+
+	ch := make(chan api.ClusterMetadata)
+	close(ch)
+
+	return ch, nil
+}
+
+func (f *fakeClusterStore) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
+	_ = ctx
+	_ = info
+	return nil
+}
+
+func (f *fakeClusterStore) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = name
+	_ = cfg
+	return api.ClusterMetadata{}, nil
+}
+
+func (f *fakeClusterStore) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition int,
+	brokerID int,
+	lastOffset api.Offset,
+	leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = topic
+	_ = partition
+	_ = brokerID
+	_ = lastOffset
+	_ = leaderHighWatermark
+	return api.ClusterMetadata{}, nil
 }
 
 func TestCreateTopicAndProduceFetch(t *testing.T) {
@@ -448,4 +508,127 @@ func TestCreateTopicAppliesRetentionOverrides(t *testing.T) {
 	if detail.Partitions[0].StartOffset <= 0 {
 		t.Fatalf("expected retention to advance start offset, got %d", detail.Partitions[0].StartOffset)
 	}
+}
+
+func TestTopicPartitionIDsFallbackOnClusterMetadataError(t *testing.T) {
+	b, cleanup := newTestBroker(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "fallback", api.TopicConfig{Partitions: 2}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	b.cluster = &fakeClusterStore{getErr: context.DeadlineExceeded}
+
+	parts := b.topicPartitionIDs("fallback")
+	if len(parts) != 2 || parts[0] != 0 || parts[1] != 1 {
+		t.Fatalf("unexpected fallback partition ids: %#v", parts)
+	}
+}
+
+func TestTopicPartitionIDsUseClusterAssignmentsWhenAvailable(t *testing.T) {
+	b, cleanup := newTestBroker(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "clustered", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	b.cluster = &fakeClusterStore{
+		meta: api.ClusterMetadata{
+			Partitions: []api.PartitionAssignment{
+				{Topic: "clustered", Partition: 2, Leader: 1, Replicas: []int{1}},
+				{Topic: "clustered", Partition: 0, Leader: 1, Replicas: []int{1}},
+			},
+		},
+	}
+
+	parts := b.topicPartitionIDs("clustered")
+	if len(parts) != 2 || parts[0] != 0 || parts[1] != 2 {
+		t.Fatalf("unexpected cluster partition ids: %#v", parts)
+	}
+}
+
+func TestProduceFetchConcurrentWithMetadataUpdates(t *testing.T) {
+	b, cleanup := newTestBroker(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "race", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	b.cluster = &fakeClusterStore{
+		meta: api.ClusterMetadata{
+			Partitions: []api.PartitionAssignment{
+				{
+					Topic:     "race",
+					Partition: 0,
+					Leader:    1,
+					Replicas:  []int{1, 2},
+					ISR:       []int{1, 2},
+				},
+			},
+		},
+	}
+
+	assignLeader := map[string]map[int]api.PartitionAssignment{
+		"race": {
+			0: {
+				Topic:     "race",
+				Partition: 0,
+				Leader:    1,
+				Replicas:  []int{1, 2},
+				ISR:       []int{1, 2},
+			},
+		},
+	}
+	assignFollower := map[string]map[int]api.PartitionAssignment{
+		"race": {
+			0: {
+				Topic:     "race",
+				Partition: 0,
+				Leader:    2,
+				Replicas:  []int{1, 2},
+				ISR:       []int{1, 2},
+			},
+		},
+	}
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		for i := 0; i < 2000; i++ {
+			if i%2 == 0 {
+				b.updatePartitionMetadata(assignLeader)
+			} else {
+				b.updatePartitionMetadata(assignFollower)
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		for i := 0; i < 2000; i++ {
+			_, _ = b.Produce(ctx, "race", 0, []api.Record{{Value: []byte("v")}})
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		for i := 0; i < 2000; i++ {
+			_, _ = b.Fetch(ctx, "race", 0, 0, 1024)
+		}
+	}()
+
+	wg.Wait()
 }

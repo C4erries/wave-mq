@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/c4erries/wave-mq/internal/netproto"
@@ -13,59 +16,98 @@ import (
 
 const maxInt32 = int(^uint32(0) >> 1)
 
-func main() {
-	if len(os.Args) < 2 {
-		usage()
-		return
-	}
+type command struct {
+	name        string
+	description string
+	run         func(*commandContext, []string) error
+}
 
-	switch os.Args[1] {
-	case "create-topic":
-		handleCreateTopic(os.Args[2:])
-	case "produce":
-		handleProduce(os.Args[2:])
-	case "fetch":
-		handleFetch(os.Args[2:])
-	case "metadata":
-		handleMetadata(os.Args[2:])
-	case "list-offsets":
-		handleListOffsets(os.Args[2:])
-	case "commit-offset":
-		handleCommitOffset(os.Args[2:])
-	case "fetch-committed":
-		handleFetchCommitted(os.Args[2:])
-	case "ping":
-		handlePing(os.Args[2:])
-	case "help", "-h", "--help":
-		usage()
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %q\n", os.Args[1]) // #nosec G705 -- CLI stderr output only.
-		usage()
+type commandContext struct {
+	stdout io.Writer
+	stderr io.Writer
+	now    func() time.Time
+}
+
+var commandList = []command{
+	{name: "create-topic", description: "Create a topic with partitions/replication", run: runCreateTopic},
+	{name: "produce", description: "Produce one or more messages", run: runProduce},
+	{name: "fetch", description: "Fetch messages from a partition", run: runFetch},
+	{name: "metadata", description: "Get metadata for topics", run: runMetadata},
+	{name: "list-offsets", description: "Get earliest/latest offsets for a partition", run: runListOffsets},
+	{name: "commit-offset", description: "Commit offset for a consumer group", run: runCommitOffset},
+	{name: "fetch-committed", description: "Fetch committed offset for a consumer group", run: runFetchCommitted},
+	{name: "ping", description: "Ping broker", run: runPing},
+}
+
+func main() {
+	if err := runCLI(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func usage() {
-	fmt.Fprintf(os.Stderr, `Usage: mbctl <command> [options]
-Commands:
-  create-topic   Create a topic with partitions/replication
-  produce        Produce one or more messages
-  fetch          Fetch messages from a partition
-  metadata       Get metadata for topics
-  list-offsets   Get earliest/latest offsets for a partition
-  commit-offset  Commit offset for a consumer group
-  fetch-committed Fetch committed offset for a consumer group
-  ping           Ping broker
-`)
+func runCLI(args []string, stdout, stderr io.Writer) error {
+	ctx := &commandContext{stdout: stdout, stderr: stderr, now: time.Now}
+	if len(args) == 0 {
+		usage(stderr)
+		return nil
+	}
+
+	switch args[0] {
+	case "help", "-h", "--help":
+		usage(stderr)
+		return nil
+	}
+
+	cmd, ok := findCommand(args[0])
+	if !ok {
+		usage(stderr)
+		return fmt.Errorf("unknown command: %q", args[0])
+	}
+
+	if err := cmd.run(ctx, args[1:]); err != nil {
+		return fmt.Errorf("%s: %w", cmd.name, err)
+	}
+
+	return nil
 }
 
-func handleCreateTopic(args []string) {
-	fs := flag.NewFlagSet("create-topic", flag.ExitOnError)
+func findCommand(name string) (command, bool) {
+	for _, cmd := range commandList {
+		if cmd.name == name {
+			return cmd, true
+		}
+	}
+
+	return command{}, false
+}
+
+func usage(w io.Writer) {
+	var b strings.Builder
+	b.WriteString("Usage: mbctl <command> [options]\n")
+	b.WriteString("Commands:\n")
+	for _, cmd := range commandList {
+		fmt.Fprintf(&b, "  %-14s %s\n", cmd.name, cmd.description)
+	}
+
+	fmt.Fprint(w, b.String())
+}
+
+func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	return fs
+}
+
+func runCreateTopic(ctx *commandContext, args []string) error {
+	fs := newFlagSet("create-topic", ctx.stderr)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name")
 	partitions := fs.Int("partitions", 1, "number of partitions")
 	replication := fs.Int("replication-factor", 1, "replication factor")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	req := &netproto.CreateTopicRequest{
 		Topic:             *topic,
@@ -73,32 +115,32 @@ func handleCreateTopic(args []string) {
 		ReplicationFactor: *replication,
 	}
 	if req.Topic == "" {
-		fmt.Fprintln(os.Stderr, "topic is required")
-		os.Exit(1)
+		return errors.New("topic is required")
 	}
 
 	resp, err := sendCreateTopic(*brokerAddr, req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "create-topic error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	if resp.Error != api.ErrNone {
-		fmt.Fprintf(os.Stderr, "create-topic failed: %v\n", resp.Error)
-		os.Exit(1)
+		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	fmt.Printf("topic %s created (partitions=%d rf=%d)\n", req.Topic, req.Partitions, req.ReplicationFactor)
+	fmt.Fprintf(ctx.stdout, "topic %s created (partitions=%d rf=%d)\n", req.Topic, req.Partitions, req.ReplicationFactor)
+	return nil
 }
 
-func handleProduce(args []string) {
-	fs := flag.NewFlagSet("produce", flag.ExitOnError)
+func runProduce(ctx *commandContext, args []string) error {
+	fs := newFlagSet("produce", ctx.stderr)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
 	key := fs.String("key", "", "record key (optional)")
 	value := fs.String("value", "", "record value")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	req := &netproto.ProduceRequest{
 		Topic:     *topic,
@@ -106,46 +148,44 @@ func handleProduce(args []string) {
 		Records: []api.Record{{
 			Key:       []byte(*key),
 			Value:     []byte(*value),
-			Timestamp: time.Now(),
+			Timestamp: ctx.now(),
 		}},
 	}
 	if req.Topic == "" {
-		fmt.Fprintln(os.Stderr, "topic is required")
-		os.Exit(1)
+		return errors.New("topic is required")
 	}
 
 	resp, err := sendProduce(*brokerAddr, req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "produce error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	if resp.Error != api.ErrNone {
-		fmt.Fprintf(os.Stderr, "produce failed: %v\n", resp.Error)
-		os.Exit(1)
+		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	fmt.Printf("produced baseOffset=%d\n", resp.BaseOffset)
+	fmt.Fprintf(ctx.stdout, "produced baseOffset=%d\n", resp.BaseOffset)
+	return nil
 }
 
-func handleFetch(args []string) {
-	fs := flag.NewFlagSet("fetch", flag.ExitOnError)
+func runFetch(ctx *commandContext, args []string) error {
+	fs := newFlagSet("fetch", ctx.stderr)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
 	offset := fs.Int64("offset", 0, "starting offset")
 	maxBytes := fs.Int("max-bytes", 1<<20, "max bytes to fetch")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if *topic == "" {
-		fmt.Fprintln(os.Stderr, "topic is required")
-		os.Exit(1)
+		return errors.New("topic is required")
 	}
 
 	maxFetchBytes, err := toInt32(*maxBytes, "max-bytes")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "invalid max-bytes: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	req := &netproto.FetchRequest{
@@ -157,25 +197,27 @@ func handleFetch(args []string) {
 
 	resp, err := sendFetch(*brokerAddr, req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "fetch error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	if resp.Error != api.ErrNone {
-		fmt.Fprintf(os.Stderr, "fetch failed: %v\n", resp.Error)
-		os.Exit(1)
+		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
 	for _, r := range resp.Records {
-		fmt.Printf("offset=%d key=%s value=%s\n", r.Offset, string(r.Key), string(r.Value))
+		fmt.Fprintf(ctx.stdout, "offset=%d key=%s value=%s\n", r.Offset, string(r.Key), string(r.Value))
 	}
+
+	return nil
 }
 
-func handleMetadata(args []string) {
-	fs := flag.NewFlagSet("metadata", flag.ExitOnError)
+func runMetadata(ctx *commandContext, args []string) error {
+	fs := newFlagSet("metadata", ctx.stderr)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name (optional)")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	req := &netproto.MetadataRequest{}
 	if *topic != "" {
@@ -184,61 +226,62 @@ func handleMetadata(args []string) {
 
 	resp, err := sendMetadata(*brokerAddr, req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "metadata error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	if resp.Error != api.ErrNone {
-		fmt.Fprintf(os.Stderr, "metadata failed: %v\n", resp.Error)
-		os.Exit(1)
+		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
 	for _, p := range resp.Partitions {
-		fmt.Printf("topic=%s partition=%d broker=%d role=%d epoch=%d start=%d hwm=%d\n",
+		fmt.Fprintf(ctx.stdout, "topic=%s partition=%d broker=%d role=%d epoch=%d start=%d hwm=%d\n",
 			p.Replica.Topic, p.Replica.Partition, p.Replica.BrokerID, p.Replica.Role, p.Replica.LeaderEpoch, p.StartOffset, p.HighWatermark)
 	}
+
+	return nil
 }
 
-func handleListOffsets(args []string) {
-	fs := flag.NewFlagSet("list-offsets", flag.ExitOnError)
+func runListOffsets(ctx *commandContext, args []string) error {
+	fs := newFlagSet("list-offsets", ctx.stderr)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if *topic == "" {
-		fmt.Fprintln(os.Stderr, "topic is required")
-		os.Exit(1)
+		return errors.New("topic is required")
 	}
 
 	req := &netproto.ListOffsetsRequest{Topic: *topic, Partition: *partition}
 
 	resp, err := sendListOffsets(*brokerAddr, req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "list-offsets error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	if resp.Error != api.ErrNone {
-		fmt.Fprintf(os.Stderr, "list-offsets failed: %v\n", resp.Error)
-		os.Exit(1)
+		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	fmt.Printf("earliest=%d latest=%d\n", resp.Earliest, resp.Latest)
+	fmt.Fprintf(ctx.stdout, "earliest=%d latest=%d\n", resp.Earliest, resp.Latest)
+	return nil
 }
 
-func handleCommitOffset(args []string) {
-	fs := flag.NewFlagSet("commit-offset", flag.ExitOnError)
+func runCommitOffset(ctx *commandContext, args []string) error {
+	fs := newFlagSet("commit-offset", ctx.stderr)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	group := fs.String("group", "", "consumer group")
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
 	offset := fs.Int64("offset", 0, "offset to commit")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if *group == "" || *topic == "" {
-		fmt.Fprintln(os.Stderr, "group and topic are required")
-		os.Exit(1)
+		return errors.New("group and topic are required")
 	}
 
 	req := &netproto.CommitOffsetRequest{
@@ -250,29 +293,29 @@ func handleCommitOffset(args []string) {
 
 	resp, err := sendCommitOffset(*brokerAddr, req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "commit-offset error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	if resp.Error != api.ErrNone {
-		fmt.Fprintf(os.Stderr, "commit-offset failed: %v\n", resp.Error)
-		os.Exit(1)
+		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	fmt.Println("commit-offset ok")
+	fmt.Fprintln(ctx.stdout, "commit-offset ok")
+	return nil
 }
 
-func handleFetchCommitted(args []string) {
-	fs := flag.NewFlagSet("fetch-committed", flag.ExitOnError)
+func runFetchCommitted(ctx *commandContext, args []string) error {
+	fs := newFlagSet("fetch-committed", ctx.stderr)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	group := fs.String("group", "", "consumer group")
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if *group == "" || *topic == "" {
-		fmt.Fprintln(os.Stderr, "group and topic are required")
-		os.Exit(1)
+		return errors.New("group and topic are required")
 	}
 
 	req := &netproto.FetchCommittedRequest{
@@ -283,36 +326,36 @@ func handleFetchCommitted(args []string) {
 
 	resp, err := sendFetchCommitted(*brokerAddr, req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "fetch-committed error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	if resp.Error != api.ErrNone {
-		fmt.Fprintf(os.Stderr, "fetch-committed failed: %v\n", resp.Error)
-		os.Exit(1)
+		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	fmt.Printf("committed offset=%d\n", resp.Offset)
+	fmt.Fprintf(ctx.stdout, "committed offset=%d\n", resp.Offset)
+	return nil
 }
 
-func handlePing(args []string) {
-	fs := flag.NewFlagSet("ping", flag.ExitOnError)
+func runPing(ctx *commandContext, args []string) error {
+	fs := newFlagSet("ping", ctx.stderr)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
-	_ = fs.Parse(args)
-	start := time.Now()
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
+	start := ctx.now()
 	resp, err := sendPing(*brokerAddr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ping error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	if resp.Error != api.ErrNone {
-		fmt.Fprintf(os.Stderr, "ping failed: %v\n", resp.Error)
-		os.Exit(1)
+		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	fmt.Printf("pong rtt=%s\n", time.Since(start))
+	fmt.Fprintf(ctx.stdout, "pong rtt=%s\n", ctx.now().Sub(start))
+	return nil
 }
 
 func sendCreateTopic(addr string, req *netproto.CreateTopicRequest) (*netproto.CreateTopicResponse, error) {

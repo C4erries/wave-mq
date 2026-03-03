@@ -11,8 +11,8 @@
   - после restart WAL-сегмент может перезаписываться с начала файла в `internal/storage/log.go` (`openSegment`/`AppendBatch`), что приводит к потере pre-restart части лога в чтении.
 - [x] Запущена часть `[1]`: исправлены `openSegment`/`AppendBatch` после reopen, nil-guard в `/api/controller`, и усилены проверки `metrics/summary` в multi blackbox.
 - [x] Запущена часть `[2]`: добавлены key-hash роутинг (`/api/topics/{topic}/messages`), агрегированный fetch для `all`-режима, leader-forward для partition/topic messages и topic-level retention в `TopicConfig`/metadata/storage.
-- [~] Запущена часть `[3]`: добавлен race-safe fallback для Raft-store, убраны прямые `time.Sleep(...)` из тестов, усилена timeout-диагностика multi blackbox и добавлен лог-маркер для `rollback failed: tx closed`.
-- [ ] Остальные пункты ниже требуют доведения (финализация решений/прогонов) и отдельного этапа фиксов.
+- [x] Запущена часть `[3]`: добавлены race/locking/DI/observability/CLI/netproto/mbd-архитектурные фиксы по пунктам 7-18, покрыты unit-тестами и full `go test ./...`.
+- [~] Открытые хвосты в плане сведены к точечным пунктам (retention multi-broker propagation, `rollback failed: tx closed`).
 
 ## 1. Результаты анализа (кандидаты на фиксы, без описания способов исправления)
 
@@ -109,3 +109,87 @@
 - Текущее состояние: MRE в blackbox не зафиксирован, но добавлена автоматическая выборка marker-lines из логов `broker1/broker2` при падении и определен upstream-источник сообщения.
 - Предложение решения: собрать минимальный воспроизводимый сценарий в multi-broker тесте с обязательным лог-снимком обоих брокеров и контроллера в момент ошибки.
 - Реализация: [~] частично выполнено — добавлен этап лог-локализации; полный MRE и регрессионный тест пока не собраны.
+
+## 7. Data race/неконсистентные проверки лидерства в `internal/broker/broker.go`
+Статус: [x] выполнено.
+- Часть: `[3]`.
+- Текущее состояние: в clustered-пути есть чтение `Partition.Metadata` вне `p.mu` одновременно с обновлениями под `p.mu` в `updatePartitionMetadata` (пример: `Produce`/`Fetch` читают `p.Metadata.Replica.Role` до `p.mu`; snapshot-методы (`TopicAndPartitionCounts`, `TopicsSnapshot`) тоже читают `p.Metadata.Replica.Role` без `p.mu`). Это создает риск data race и неверных решений `leader/follower` в момент смены метаданных.
+- Предложение решения: ввести единый accessor для снимка `Partition.Metadata` под `p.mu` и использовать его во всех read-path; в `Produce`/`Fetch` сначала брать `p.mu`/snapshot, затем принимать решение по лидерству; добавить таргетный race/regression тест на параллельные `StartClusterMetadataWatcher` updates + produce/fetch.
+- Реализация: [x] выполнено — добавлен `metadataSnapshot()` под `p.mu`, проверка роли перенесена под lock в `Produce`/`Fetch`, snapshot-методы (`Metadata`, `TopicAndPartitionCounts`, `TopicsSnapshot`, `TopicDetail`) переведены на lock-safe чтение; добавлен regression-тест `TestProduceFetchConcurrentWithMetadataUpdates`.
+
+## 8. Костыль в bootstrap-регистрации брокера через Raft leader (HTTP port coupling)
+Статус: [x] выполнено.
+- Часть: `[3]`.
+- Текущее состояние: `postRegisterBrokerToLeader` строит URL лидера из `leaderAddr` (host) и порта, извлеченного из `info.HTTPAddr` регистрируемого брокера, а не из HTTP-адреса самого лидера. Это неявно требует одинаковый HTTP-port на всех брокерах и может ломать регистрацию/старт кластера в heterogenous/NAT-сценариях.
+- Предложение решения: резолвить HTTP endpoint лидера по cluster metadata (`BrokerInfo{ControllerAddr->HTTPAddr}`) либо через явный mapping peer->http в конфиге; убрать эвристику "host лидера + локальный порт" и покрыть тестом с разными HTTP-портами у узлов.
+- Реализация: [x] выполнено — добавлен `leaderRegisterBrokerURL(...)` с приоритетом metadata-resolve (`ControllerAddr -> HTTPAddr`) и fallback на старую эвристику; регистрация через лидера использует новый резолвер; добавлен тест `TestLeaderRegisterBrokerURLUsesLeaderHTTPAddrFromMetadata`.
+
+## 9. Рефактор HTTP forwarding-клиента в `internal/httpapi` для DI и тестируемости
+Статус: [x] выполнено.
+- Часть: `[3]`.
+- Текущее состояние: forwarding-запросы в API-обработчиках привязаны к `http.DefaultClient.Do(...)` и статическим timeout/retry-решениям; transport невозможно подменить локально без глобальных side-effect, что ограничивает unit-тесты негативных сценариев (timeout/network split/retry policy).
+- Предложение решения: ввести интерфейс `HTTPDoer` (`Do(*http.Request) (*http.Response, error)`) и внедрять его в `Handler` через конструктор (с default fallback на `http.DefaultClient`); вынести retry/redirect policy в отдельный helper с явными параметрами.
+- Реализация: [x] выполнено — в `Handler` внедрен `HTTPDoer`, добавлен `NewWithHTTPClient(...)`, forwarding-пути переведены на инжектируемый клиент; добавлен тест `TestForwardToURLUsesInjectedHTTPClient`.
+
+## 10. Фабрика `PartitionReplicator`/`Sink` в `internal/replication/manager.go`
+Статус: [x] выполнено.
+- Часть: `[3]`.
+- Текущее состояние: `Manager.applyMetadata` напрямую создает `NewWALSink` + `NewReportingSink` + `NewPartitionReplicator`; из-за этого в тестах сложно изолированно проверять lifecycle (create/restart/cancel), а также обработку ошибок старта/остановки без интеграционного запуска.
+- Предложение решения: внедрить фабрики `SinkFactory` и `ReplicatorFactory` (или единый `ReplicationWorkerFactory`) в `NewManager`; оставить текущую реализацию как production-default, а в тестах использовать fake factories для точной проверки orchestration.
+- Реализация: [x] выполнено — добавлены `SinkFactory`/`WorkerFactory`, конструктор `NewManagerWithFactories(...)`, вынесен `startReplicator(...)`, добавлен тест `TestManagerUsesInjectedFactories`.
+
+## 11. Детерминизм MQTT runtime: тайминги/контекст как зависимости
+Статус: [x] выполнено.
+- Часть: `[3]`.
+- Текущее состояние: в `internal/mqtt/server.go` зашиты magic-intervals (`50ms`, `100ms`, `300ms`) и используется `context.Background()` в `LeaveGroup`/`CommitOffset`-пути; это усложняет детерминированные тесты и делает cancellation менее прозрачной.
+- Предложение решения: вынести retry/poll интервалы в конфиг `ServerOptions` и внедрить через `NewServer`; заменить `context.Background()` на производный от client/session context; для тестов добавить fake clock/timer seam либо инкапсулированный sleeper интерфейс.
+- Реализация: [x] выполнено — добавлены `ServerOptions` и `NewServerWithOptions(...)`; runtime интервалы вынесены в опции; в `LeaveGroup`/`CommitOffset` использован производный context вместо `context.Background()`.
+
+## 12. Декомпозиция `cmd/mbd/main.go` через app/factory слой
+Статус: [x] выполнено.
+- Часть: `[3]`.
+- Текущее состояние: `main()` содержит в одном месте parsing, wiring, bootstrap, registration, server lifecycle и shutdown; heavy use `os.Exit(...)` и concrete constructors затрудняет unit-тесты порядка инициализации и error-path без запуска реального окружения.
+- Предложение решения: выделить `run(ctx, deps, cfg) error`/`App` слой с dependency factories (`StorageFactory`, `ControllerFactory`, `ServerFactory`) и оставить `main` тонким адаптером (`parse flags` + `if err != nil { os.Exit(1) }`); добавить table-driven tests на bootstrap/error sequencing.
+- Реализация: [x] выполнено — выделены `parseStartupOptions(...)`, `validateBrokerConfig(...)`, `run(...)`, введен `appFactory` с injectable конструкторами и тонкий `main`-адаптер; добавлены тесты `TestParseStartupOptions`, `TestValidateBrokerConfig`, `TestRunReturnsStorageInitError`.
+
+## 13. Упрощение snapshot-логики в `internal/broker/broker.go` (дубли и скрытые fallback-и)
+Статус: [x] выполнено.
+- Часть: `[3]`.
+- Текущее состояние: `TopicAndPartitionCounts`, `TopicsSnapshot`, `TopicDetail`, `partitionAssignments` повторяют схожую логику получения assignments/leader-only фильтрации и локального fallback; при этом используется `context.Background()` + частичное игнорирование ошибок `clusterAssignments`, что делает поведение неявным и усложняет сопровождение.
+- Предложение решения: вынести общий helper уровня `topicView(assignments, brokerID)`/`resolveAssignments(ctx)` и централизовать policy обработки ошибок (явный degraded-mode вместо silent fallback); добавить table-driven тесты на clustered/non-clustered и error-path metadata.
+- Реализация: [x] выполнено — добавлены `clusterAssignmentsBestEffort(ctx)`/`partitionAssignments(ctx, ...)`, введен общий helper `leaderPartitionCount(...)` для snapshot-путей, fallback переведен в явный degraded-mode с логированием; добавлены тесты `TestTopicPartitionIDsFallbackOnClusterMetadataError` и `TestTopicPartitionIDsUseClusterAssignmentsWhenAvailable`.
+
+## 14. Декомпозиция `netproto` dispatch в таблицу handlers
+Статус: [x] выполнено.
+- Часть: `[3]`.
+- Текущее состояние: `internal/netproto/server.go` содержит большой `switch apiKey` с дублированием decode/errorResponse/metrics-паттернов; добавление нового API-key требует правок в нескольких местах и увеличивает риск расхождений.
+- Предложение решения: перейти к map-based registry `map[APIKey]Handler` c общими обертками (`decode -> call broker -> map error -> encode`), а `errorResponseForKey` и общие счетчики собрать в единый pipeline.
+- Реализация: [x] выполнено — внедрен registry `map[APIKey]requestHandler`, `dispatch` переведен на lookup, кейсы вынесены в отдельные handler-методы и общий decode-helper; поведение протокола сохранено, тесты `internal/netproto` проходят.
+
+## 15. Типизированные ключи вместо `fmt.Sprintf("%s:%d")` в `replication.Manager`
+Статус: [x] выполнено.
+- Часть: `[3]`.
+- Текущее состояние: lifecycle-реестр репликаторов хранится в `map[string]runningReplicator` с ключом `"topic:partition"`, формируемым через `fmt.Sprintf`; это лишняя сериализация/парсинг-модель и потенциальный источник ошибок при рефакторинге ключевого формата.
+- Предложение решения: заменить ключ на структурный тип (`type partitionKey struct { topic string; partition int }`) и вынести stop/start transitions в отдельные методы для более читаемого orchestration-кода; добавить unit-тесты переходов `desired -> running`.
+- Реализация: [x] выполнено — `running` переведен на `map[partitionKey]runningReplicator`; orchestration вынесен в `startReplicator(...)`; покрыто unit-тестом на инжектируемые фабрики.
+
+## 16. Унификация forwarding helper-ов в `internal/httpapi/api.go`
+Статус: [x] выполнено.
+- Часть: `[3]`.
+- Текущее состояние: `forwardCreateTopicToLeader`, `forwardPartitionMessagesToLeader`, `forwardPartitionProduceToLeader`, `forwardTopicProduceToLeader` реализуют похожий HTTP forwarding-flow (build URL/request, header guard, do/read response) с частичным дублированием.
+- Предложение решения: вынести общий `forwardJSONToLeader`/`forwardToBroker` helper с параметрами `method/path/query/body/retryPolicy` и оставить в handlers только бизнес-ветвление; покрыть тестами на not-leader chain, retry и защиту от forwarding-loop.
+- Реализация: [x] выполнено — добавлены общие helper-ы `forwardToURL(...)`/`forwardRequest(...)`, все четыре forwarding-пути переведены на них, добавлены тесты на инжектируемый transport и headers/payload passthrough.
+
+## 17. Упрощение observability helpers (`sumCounter` и `StartHTTPServer` callback semantics)
+Статус: [x] выполнено.
+- Часть: `[3]`.
+- Текущее состояние: `sumCounter` использует отдельную goroutine + channel для синхронной операции, что избыточно; в `StartHTTPServer` комментарий про `onStarted` не совпадает с фактическим порядком вызова (callback вызывается до `ListenAndServe`).
+- Предложение решения: сделать `sumCounter` синхронным collector-проходом без лишней goroutine; выровнять контракт `onStarted` (либо переименовать в `beforeServe`, либо вызывать после фактического bind/listen через явный `net.Listen` + `srv.Serve`).
+- Реализация: [x] выполнено — `sumCounter` сделан синхронным без лишней goroutine; `StartHTTPServer` переведен на `net.Listen + srv.Serve`, callback `onStarted` вызывается после успешного bind/listen.
+
+## 18. Упрощение CLI-архитектуры `cmd/mbctl` (команды/валидация/вывод)
+Статус: [x] выполнено.
+- Часть: `[3]`.
+- Текущее состояние: `main.go` содержит большой switch по командам и много почти одинаковых `handleX`/`sendX` блоков с повторяющимся парсингом, валидацией и error-print + `os.Exit`.
+- Предложение решения: перейти на table-driven command registry (`name -> run(args) error`) с общими helper-ами для флагов/валидации/печати ошибок; для транспортного слоя оставить единый typed wrapper вокруг `sendRequest`; добавить unit-тесты command-dispatch/validation.
+- Реализация: [x] выполнено — CLI переведен на `commandList` + `runCLI(...)` и command handlers без `os.Exit` внутри; добавлены unit-тесты `cmd/mbctl/main_test.go` на usage/dispatch/validation.

@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"time"
@@ -12,7 +13,7 @@ import (
 
 // StartHTTPServer launches an HTTP server exposing metrics, healthz, pprof and optional extra handlers.
 // readyFunc indicates readiness; if nil, readiness is always true.
-// onStarted is called after ListenAndServe begins successfully (can be nil).
+// onStarted is called after listener bind succeeds (can be nil).
 func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool, extra func(mux *http.ServeMux), onStarted func()) error {
 	if addr == "" {
 		return fmt.Errorf("http addr is required")
@@ -51,14 +52,19 @@ func StartHTTPServer(ctx context.Context, addr string, readyFunc func() bool, ex
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
 	errCh := make(chan error, 1)
 
-	go func() {
-		if onStarted != nil {
-			onStarted()
-		}
+	if onStarted != nil {
+		onStarted()
+	}
 
-		errCh <- srv.ListenAndServe()
+	go func() {
+		errCh <- srv.Serve(ln)
 	}()
 
 	select {

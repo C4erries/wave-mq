@@ -90,6 +90,27 @@ type trackingReplicator struct {
 	contexts []context.Context
 }
 
+type fakeWorker struct {
+	runCh chan struct{}
+}
+
+func (w *fakeWorker) Run(ctx context.Context) error {
+	close(w.runCh)
+	<-ctx.Done()
+
+	return ctx.Err()
+}
+
+type noopSink struct{}
+
+func (s *noopSink) ApplyBatch(ctx context.Context, records []api.Record, highWatermark api.Offset) (api.Offset, error) {
+	_ = ctx
+	_ = records
+	_ = highWatermark
+
+	return -1, nil
+}
+
 func (t *trackingReplicator) FetchFromLeader(ctx context.Context, leader api.BrokerInfo, req FetchRequest) (FetchResponse, error) {
 	_ = req
 
@@ -406,6 +427,63 @@ func TestManagerStopsReplicationWhenReplicaRemoved(t *testing.T) {
 
 	waitForContextCanceled(firstCtx, t)
 	ensureNoNewContexts(t, repl, len(repl.contextsSnapshot()))
+}
+
+func TestManagerUsesInjectedFactories(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := storage.NewManager(storage.Config{DataDir: dir})
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+
+	t.Cleanup(func() { _ = store.Close() })
+
+	metaFeed := newStreamMetadataStore()
+	repl := &trackingReplicator{}
+	created := make(chan struct{}, 1)
+
+	mgr := NewManagerWithFactories(
+		api.BrokerConfig{BrokerID: 2},
+		store,
+		metaFeed,
+		repl,
+		func(topic string, partition int) Sink {
+			_ = topic
+			_ = partition
+
+			return &noopSink{}
+		},
+		func(repl Replicator, leader api.BrokerInfo, topic string, partition int, sink Sink) ReplicationWorker {
+			_ = repl
+			_ = leader
+			_ = topic
+			_ = partition
+			_ = sink
+			created <- struct{}{}
+
+			return &fakeWorker{runCh: make(chan struct{})}
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go func() {
+		_ = mgr.Run(ctx)
+	}()
+
+	metaFeed.push(api.ClusterMetadata{
+		Version:    1,
+		Brokers:    []api.BrokerInfo{{BrokerID: 1, Host: "b1"}, {BrokerID: 2, Host: "b2"}},
+		Partitions: []api.PartitionAssignment{{Topic: "x", Partition: 0, Leader: 1, Replicas: []int{1, 2}, ISR: []int{1}}},
+	})
+
+	select {
+	case <-created:
+	case <-time.After(time.Second):
+		t.Fatalf("expected worker factory to be invoked")
+	}
 }
 
 func waitForLeaderAndContext(t *testing.T, repl *trackingReplicator, leader int) context.Context {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1540,5 +1541,56 @@ func TestCreateTopicRespectsControllerAssignmentsAcrossBrokers(t *testing.T) {
 
 	if detail, ok := b2.TopicDetail("alpha"); !ok || detail.PartitionCount != 1 {
 		t.Fatalf("broker2 expected one local partition, got %+v", detail)
+	}
+}
+
+type recordingDoer struct {
+	requests []*http.Request
+	status   int
+	body     string
+}
+
+func (d *recordingDoer) Do(req *http.Request) (*http.Response, error) {
+	d.requests = append(d.requests, req.Clone(req.Context()))
+
+	return &http.Response{
+		StatusCode: d.status,
+		Body:       io.NopCloser(bytes.NewBufferString(d.body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestForwardToURLUsesInjectedHTTPClient(t *testing.T) {
+	doer := &recordingDoer{
+		status: http.StatusCreated,
+		body:   `{"ok":true}`,
+	}
+	h := NewWithHTTPClient(nil, api.BrokerConfig{}, nil, doer)
+	req := httptest.NewRequest(http.MethodPost, "http://follower/api/topics", nil)
+
+	status, payload, ok := h.forwardToURL(req, http.MethodPost, "http://leader/api/topics", []byte(`{"name":"t"}`))
+	if !ok {
+		t.Fatalf("expected forwarding success")
+	}
+
+	if status != http.StatusCreated {
+		t.Fatalf("status=%d want=%d", status, http.StatusCreated)
+	}
+
+	if string(payload) != `{"ok":true}` {
+		t.Fatalf("unexpected payload: %s", string(payload))
+	}
+
+	if len(doer.requests) != 1 {
+		t.Fatalf("expected one forwarded request, got %d", len(doer.requests))
+	}
+
+	got := doer.requests[0]
+	if got.Header.Get(forwardedCreateTopicHeader) != "1" {
+		t.Fatalf("missing forwarding header")
+	}
+
+	if got.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("content type not set, got %q", got.Header.Get("Content-Type"))
 	}
 }

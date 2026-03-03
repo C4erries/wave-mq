@@ -27,16 +27,30 @@ import (
 )
 
 type Handler struct {
-	b    *broker.Broker
-	cfg  api.BrokerConfig
-	ctrl controller.MetadataStore
+	b          *broker.Broker
+	cfg        api.BrokerConfig
+	ctrl       controller.MetadataStore
+	httpClient HTTPDoer
 }
 
 const forwardedCreateTopicHeader = "X-WaveMQ-Forwarded"
 
+type HTTPDoer interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
 // New returns an HTTP handler for admin JSON API under /api.
 func New(b *broker.Broker, cfg api.BrokerConfig, ctrl controller.MetadataStore) *Handler {
-	return &Handler{b: b, cfg: cfg, ctrl: ctrl}
+	return NewWithHTTPClient(b, cfg, ctrl, http.DefaultClient)
+}
+
+// NewWithHTTPClient is like New, but allows custom HTTP transport for forwarding requests.
+func NewWithHTTPClient(b *broker.Broker, cfg api.BrokerConfig, ctrl controller.MetadataStore, httpClient HTTPDoer) *Handler {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	return &Handler{b: b, cfg: cfg, ctrl: ctrl, httpClient: httpClient}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -640,28 +654,20 @@ func (h *Handler) forwardCreateTopicToLeader(
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set(forwardedCreateTopicHeader, "1")
 
-		resp, err := http.DefaultClient.Do(httpReq) // #nosec G704 -- leader host comes from local Raft state.
-		if err != nil {
+		status, payload, ok := h.forwardToURL(r, http.MethodPost, leaderURL, data)
+		if !ok {
 			currentLeader = ""
 			continue
 		}
 
-		payload, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-
-		if readErr != nil {
-			currentLeader = ""
-			continue
-		}
-
-		if resp.StatusCode == http.StatusConflict {
+		if status == http.StatusConflict {
 			if nextLeader, ok := parseNotLeaderHint(payload); ok && nextLeader != "" && nextLeader != currentLeader {
 				currentLeader = nextLeader
 				continue
 			}
 		}
 
-		return resp.StatusCode, payload, true
+		return status, payload, true
 	}
 
 	return 0, nil, false
@@ -927,20 +933,8 @@ func (h *Handler) forwardPartitionMessagesToLeader(
 	if err != nil {
 		return 0, nil, false
 	}
-	req.Header.Set(forwardedCreateTopicHeader, "1")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, nil, false
-	}
-	defer resp.Body.Close()
-
-	payload, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, nil, false
-	}
-
-	return resp.StatusCode, payload, true
+	return h.forwardRequest(req)
 }
 
 func (h *Handler) forwardPartitionProduceToLeader(
@@ -974,25 +968,7 @@ func (h *Handler) forwardPartitionProduceToLeader(
 	}
 
 	u := baseURL + "/" + url.PathEscape(topic) + "/partitions/" + strconv.Itoa(partition) + "/messages"
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, u, bytes.NewReader(data))
-	if err != nil {
-		return 0, nil, false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(forwardedCreateTopicHeader, "1")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, nil, false
-	}
-	defer resp.Body.Close()
-
-	respPayload, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, nil, false
-	}
-
-	return resp.StatusCode, respPayload, true
+	return h.forwardToURL(r, http.MethodPost, u, data)
 }
 
 func (h *Handler) forwardTopicProduceToLeader(
@@ -1025,25 +1001,7 @@ func (h *Handler) forwardTopicProduceToLeader(
 	}
 
 	u := baseURL + "/" + url.PathEscape(topic) + "/messages"
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, u, bytes.NewReader(data))
-	if err != nil {
-		return 0, nil, false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(forwardedCreateTopicHeader, "1")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, nil, false
-	}
-	defer resp.Body.Close()
-
-	respPayload, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, nil, false
-	}
-
-	return resp.StatusCode, respPayload, true
+	return h.forwardToURL(r, http.MethodPost, u, data)
 }
 
 func (h *Handler) resolveTopicsAPIByBrokerID(ctx context.Context, brokerID int) (string, bool) {
@@ -1089,6 +1047,40 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+func (h *Handler) forwardToURL(r *http.Request, method, target string, body []byte) (int, []byte, bool) {
+	var reader io.Reader
+	if len(body) > 0 {
+		reader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), method, target, reader)
+	if err != nil {
+		return 0, nil, false
+	}
+
+	if len(body) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set(forwardedCreateTopicHeader, "1")
+
+	return h.forwardRequest(req)
+}
+
+func (h *Handler) forwardRequest(req *http.Request) (int, []byte, bool) {
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return 0, nil, false
+	}
+	defer resp.Body.Close()
+
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, false
+	}
+
+	return resp.StatusCode, payload, true
+}
+
 func withCORS(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1107,20 +1099,21 @@ func withCORS(h http.Handler) http.Handler {
 func sumCounter(metricName string) float64 {
 	var total float64
 
-	metricCh := make(chan prometheus.Metric, 10)
+	var collector prometheus.Collector
+	switch metricName {
+	case "wavemq_messages_produced_total":
+		collector = observability.MessagesProduced
+	case "wavemq_messages_consumed_total":
+		collector = observability.MessagesConsumed
+	case "wavemq_request_errors_total":
+		collector = observability.RequestErrors
+	default:
+		return 0
+	}
 
-	go func() {
-		switch metricName {
-		case "wavemq_messages_produced_total":
-			observability.MessagesProduced.Collect(metricCh)
-		case "wavemq_messages_consumed_total":
-			observability.MessagesConsumed.Collect(metricCh)
-		case "wavemq_request_errors_total":
-			observability.RequestErrors.Collect(metricCh)
-		}
-
-		close(metricCh)
-	}()
+	metricCh := make(chan prometheus.Metric, 32)
+	collector.Collect(metricCh)
+	close(metricCh)
 
 	for m := range metricCh {
 		var dtoMetric dto.Metric

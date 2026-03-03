@@ -17,8 +17,16 @@ type Manager struct {
 	ctrl  controller.MetadataStore
 	repl  Replicator
 
+	sinkFactory   SinkFactory
+	workerFactory WorkerFactory
+
 	mu      sync.Mutex
-	running map[string]runningReplicator
+	running map[partitionKey]runningReplicator
+}
+
+type partitionKey struct {
+	topic     string
+	partition int
 }
 
 type runningReplicator struct {
@@ -26,14 +34,47 @@ type runningReplicator struct {
 	assignment api.PartitionAssignment
 }
 
+type ReplicationWorker interface {
+	Run(ctx context.Context) error
+}
+
+type SinkFactory func(topic string, partition int) Sink
+type WorkerFactory func(repl Replicator, leader api.BrokerInfo, topic string, partition int, sink Sink) ReplicationWorker
+
 // NewManager prepares a replication manager.
 func NewManager(cfg api.BrokerConfig, store *storage.Manager, ctrl controller.MetadataStore, repl Replicator) *Manager {
+	return NewManagerWithFactories(cfg, store, ctrl, repl, nil, nil)
+}
+
+// NewManagerWithFactories prepares a replication manager with injectable worker/sink factories.
+func NewManagerWithFactories(
+	cfg api.BrokerConfig,
+	store *storage.Manager,
+	ctrl controller.MetadataStore,
+	repl Replicator,
+	sinkFactory SinkFactory,
+	workerFactory WorkerFactory,
+) *Manager {
+	if sinkFactory == nil {
+		sinkFactory = func(topic string, partition int) Sink {
+			return NewWALSink(store, topic, partition)
+		}
+	}
+
+	if workerFactory == nil {
+		workerFactory = func(repl Replicator, leader api.BrokerInfo, topic string, partition int, sink Sink) ReplicationWorker {
+			return NewPartitionReplicator(repl, leader, topic, partition, sink)
+		}
+	}
+
 	return &Manager{
-		cfg:     cfg,
-		store:   store,
-		ctrl:    ctrl,
-		repl:    repl,
-		running: make(map[string]runningReplicator),
+		cfg:           cfg,
+		store:         store,
+		ctrl:          ctrl,
+		repl:          repl,
+		sinkFactory:   sinkFactory,
+		workerFactory: workerFactory,
+		running:       make(map[partitionKey]runningReplicator),
 	}
 }
 
@@ -65,11 +106,11 @@ func (m *Manager) Run(ctx context.Context) error {
 }
 
 func (m *Manager) applyMetadata(ctx context.Context, meta api.ClusterMetadata) {
-	desired := make(map[string]api.PartitionAssignment)
+	desired := make(map[partitionKey]api.PartitionAssignment)
 
 	for _, p := range meta.Partitions {
 		if containsInt(p.Replicas, m.cfg.BrokerID) && p.Leader != m.cfg.BrokerID {
-			key := fmt.Sprintf("%s:%d", p.Topic, p.Partition)
+			key := partitionKey{topic: p.Topic, partition: p.Partition}
 			desired[key] = p
 		}
 	}
@@ -91,28 +132,37 @@ func (m *Manager) applyMetadata(ctx context.Context, meta api.ClusterMetadata) {
 			continue
 		}
 
-		leaderInfo := findBroker(meta.Brokers, p.Leader)
-		if leaderInfo == nil {
-			continue
-		}
-
-		ctxRep, cancel := context.WithCancel(ctx)
-		sink := NewWALSink(m.store, p.Topic, p.Partition)
-		sink = NewReportingSink(sink, m.ctrl, p.Topic, p.Partition, m.cfg.BrokerID)
-
-		pr := NewPartitionReplicator(m.repl, *leaderInfo, p.Topic, p.Partition, sink)
-		go func(repKey string, assign api.PartitionAssignment) {
-			_ = pr.Run(ctxRep)
-			// Once the replicator exits, clean up the reference if still present.
-			m.mu.Lock()
-			if current, ok := m.running[repKey]; ok && sameAssignment(current.assignment, assign) {
-				delete(m.running, repKey)
-			}
-			m.mu.Unlock()
-		}(key, p)
-
-		m.running[key] = runningReplicator{cancel: cancel, assignment: p}
+		m.startReplicator(ctx, meta.Brokers, key, p)
 	}
+}
+
+func (m *Manager) startReplicator(
+	ctx context.Context,
+	brokers []api.BrokerInfo,
+	key partitionKey,
+	assign api.PartitionAssignment,
+) {
+	leaderInfo := findBroker(brokers, assign.Leader)
+	if leaderInfo == nil {
+		return
+	}
+
+	ctxRep, cancel := context.WithCancel(ctx)
+	sink := m.sinkFactory(assign.Topic, assign.Partition)
+	sink = NewReportingSink(sink, m.ctrl, assign.Topic, assign.Partition, m.cfg.BrokerID)
+
+	worker := m.workerFactory(m.repl, *leaderInfo, assign.Topic, assign.Partition, sink)
+	go func(repKey partitionKey, assignment api.PartitionAssignment) {
+		_ = worker.Run(ctxRep)
+		// Once the replicator exits, clean up the reference if still present.
+		m.mu.Lock()
+		if current, ok := m.running[repKey]; ok && sameAssignment(current.assignment, assignment) {
+			delete(m.running, repKey)
+		}
+		m.mu.Unlock()
+	}(key, assign)
+
+	m.running[key] = runningReplicator{cancel: cancel, assignment: assign}
 }
 
 func (m *Manager) stopAll() {
