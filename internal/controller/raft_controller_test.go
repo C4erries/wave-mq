@@ -17,6 +17,10 @@ import (
 )
 
 func TestRaftControllerPersistsInitialMetadata(t *testing.T) {
+	if raceDetectorEnabled() {
+		t.Skip("persistent boltdb store is disabled under -race")
+	}
+
 	dir := t.TempDir()
 	cfg := api.BrokerConfig{
 		BrokerID:       1,
@@ -56,6 +60,10 @@ func TestRaftControllerPersistsInitialMetadata(t *testing.T) {
 }
 
 func TestRaftControllerRestoresInitialMetadataOnRestart(t *testing.T) {
+	if raceDetectorEnabled() {
+		t.Skip("persistent boltdb store is disabled under -race")
+	}
+
 	dir := t.TempDir()
 	cfg := api.BrokerConfig{
 		BrokerID:       1,
@@ -311,6 +319,10 @@ func TestRaftControllerRegisterBrokerSingleNode(t *testing.T) {
 }
 
 func TestRaftControllerRestartsWithPersistentState(t *testing.T) {
+	if raceDetectorEnabled() {
+		t.Skip("persistent boltdb store is disabled under -race")
+	}
+
 	dir := t.TempDir()
 	cfg := api.BrokerConfig{BrokerID: 1, ControllerMode: "raft"}
 	initial := api.ClusterMetadata{ClusterID: "c1", Version: 1}
@@ -495,33 +507,45 @@ func freeAddr(t *testing.T) string {
 func waitForLeader(t *testing.T, ctrls []*RaftController) *RaftController {
 	t.Helper()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
 		for _, c := range ctrls {
 			if c.raft.State() == raft.Leader {
 				return c
 			}
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-timer.C:
+			t.Fatalf("leader not elected")
+		case <-ticker.C:
+		}
 	}
-
-	t.Fatalf("leader not elected")
-
-	return nil
 }
 
 func waitForMetadata(pred func() bool) error {
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
 		if pred() {
 			return nil
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-timer.C:
+			return fmt.Errorf("condition not met before deadline")
+		case <-ticker.C:
+		}
 	}
-
-	return fmt.Errorf("condition not met before deadline")
 }
 
 func TestRaftControllerMultiPeerRegisterBrokerReplicates(t *testing.T) {

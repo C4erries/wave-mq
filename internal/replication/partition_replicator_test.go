@@ -557,14 +557,21 @@ func runReplicatorUntil(ctx context.Context, t *testing.T, rep *PartitionReplica
 func waitUntil(t *testing.T, pred func() bool, timeout time.Duration) {
 	t.Helper()
 
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
 		if pred() {
 			return
 		}
 
-		time.Sleep(10 * time.Millisecond)
+		select {
+		case <-timer.C:
+			t.Fatalf("condition not met within %s", timeout)
+		case <-ticker.C:
+		}
 	}
-
-	t.Fatalf("condition not met within %s", timeout)
 }

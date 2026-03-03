@@ -214,15 +214,21 @@ func TestBinaryReplicatorConnectionFailure(t *testing.T) {
 func waitForAddr(t *testing.T, srv *netproto.Server) net.Addr {
 	t.Helper()
 
-	for i := 0; i < 50; i++ {
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
 		if addr := srv.Addr(); addr != nil {
 			return addr
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-timer.C:
+			t.Fatalf("server did not start listening in time")
+		case <-ticker.C:
+		}
 	}
-
-	t.Fatalf("server did not start listening in time")
-
-	return nil
 }

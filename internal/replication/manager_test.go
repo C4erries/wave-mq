@@ -251,13 +251,15 @@ func TestManagerStartsReplicatorsForFollowers(t *testing.T) {
 		_ = mgr.Run(ctx)
 	}()
 
-	time.Sleep(300 * time.Millisecond)
+	waitForCondition(t, time.Second, func() bool {
+		repl.mu.Lock()
+		defer repl.mu.Unlock()
+		return len(repl.fetch) > 0
+	}, "expected at least one fetch from replicator for follower partition")
+
 	repl.mu.Lock()
 	defer repl.mu.Unlock()
 
-	if len(repl.fetch) == 0 {
-		t.Fatalf("expected at least one fetch from replicator for follower partition")
-	}
 	// Ensure we didn't start replication for leader-owned partition.
 	for _, req := range repl.fetch {
 		if req.Topic == "b" {
@@ -299,7 +301,18 @@ func TestManagerStartsReplicatorsForMultipleFollowers(t *testing.T) {
 		_ = mgr.Run(ctx)
 	}()
 
-	time.Sleep(300 * time.Millisecond)
+	waitForCondition(t, time.Second, func() bool {
+		repl.mu.Lock()
+		defer repl.mu.Unlock()
+
+		seen := make(map[int]bool)
+		for _, req := range repl.fetch {
+			seen[req.Partition] = true
+		}
+
+		return seen[0] && seen[1]
+	}, "expected replication for follower partitions 0 and 1")
+
 	repl.mu.Lock()
 	defer repl.mu.Unlock()
 
@@ -471,9 +484,44 @@ func waitForNewContext(old context.Context, t *testing.T, repl *trackingReplicat
 
 func ensureNoNewContexts(t *testing.T, repl *trackingReplicator, expected int) {
 	t.Helper()
-	time.Sleep(200 * time.Millisecond)
 
-	if got := len(repl.contextsSnapshot()); got != expected {
-		t.Fatalf("expected %d contexts after removal, got %d", expected, got)
+	timer := time.NewTimer(200 * time.Millisecond)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if got := len(repl.contextsSnapshot()); got != expected {
+			t.Fatalf("expected %d contexts after removal, got %d", expected, got)
+		}
+
+		select {
+		case <-timer.C:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForCondition(t *testing.T, timeout time.Duration, pred func() bool, failMsg string) {
+	t.Helper()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if pred() {
+			return
+		}
+
+		select {
+		case <-timer.C:
+			t.Fatalf("%s", failMsg)
+		case <-ticker.C:
+		}
 	}
 }

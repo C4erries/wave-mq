@@ -20,31 +20,13 @@ func TestHTTPServerHealthAndMetrics(t *testing.T) {
 		errCh <- StartHTTPServer(ctx, addr, ready, nil, nil)
 	}()
 
-	// Give server a moment to start
-	time.Sleep(100 * time.Millisecond)
-
-	resp, err := http.Get("http://" + addr + "/healthz")
-	if err != nil {
-		t.Fatalf("healthz request: %v", err)
-	}
+	resp := waitHTTPStatus(t, "http://"+addr+"/healthz", http.StatusOK, 2*time.Second)
 	defer resp.Body.Close()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
 
 	resp.Body.Close()
 
-	resp, err = http.Get("http://" + addr + "/metrics")
-	if err != nil {
-		t.Fatalf("metrics request: %v", err)
-	}
+	resp = waitHTTPStatus(t, "http://"+addr+"/metrics", http.StatusOK, 2*time.Second)
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -74,21 +56,39 @@ func TestHealthzNotReady(t *testing.T) {
 		errCh <- StartHTTPServer(ctx, addr, ready, nil, nil)
 	}()
 
-	time.Sleep(100 * time.Millisecond)
-
-	resp, err := http.Get("http://" + addr + "/healthz")
-	if err != nil {
-		t.Fatalf("healthz request: %v", err)
-	}
+	resp := waitHTTPStatus(t, "http://"+addr+"/healthz", http.StatusServiceUnavailable, 2*time.Second)
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d", resp.StatusCode)
-	}
 
 	cancel()
 
 	if err := <-errCh; err != nil {
 		t.Fatalf("server error: %v", err)
+	}
+}
+
+func waitHTTPStatus(t *testing.T, url string, want int, timeout time.Duration) *http.Response {
+	t.Helper()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		resp, err := http.Get(url)
+		if err == nil {
+			if resp.StatusCode == want {
+				return resp
+			}
+
+			_ = resp.Body.Close()
+		}
+
+		select {
+		case <-timer.C:
+			t.Fatalf("timeout waiting for %s status %d", url, want)
+		case <-ticker.C:
+		}
 	}
 }

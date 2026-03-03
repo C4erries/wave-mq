@@ -400,6 +400,10 @@ func TestReplicationRF2EndToEnd(t *testing.T) {
 }
 
 func TestReplicationResumesAfterRestarts(t *testing.T) {
+	if raceDetectorEnabled() {
+		t.Skip("persistent boltdb raft state is disabled under -race")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -770,27 +774,37 @@ func freeTCPAddr(t *testing.T) string {
 func waitForLeaderCtrl(t *testing.T, ctrls []*controller.RaftController) *controller.RaftController {
 	t.Helper()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
 		for _, c := range ctrls {
 			if c.RaftState() == raft.Leader.String() {
 				return c
 			}
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-timer.C:
+			t.Fatalf("leader not elected")
+		case <-ticker.C:
+		}
 	}
-
-	t.Fatalf("leader not elected")
-
-	return nil
 }
 
 func waitForClusterMeta(t *testing.T, ctrls []*controller.RaftController, parts int) {
 	t.Helper()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
 		ok := true
 
 		for _, c := range ctrls {
@@ -805,10 +819,12 @@ func waitForClusterMeta(t *testing.T, ctrls []*controller.RaftController, parts 
 			return
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-timer.C:
+			t.Fatalf("metadata did not converge")
+		case <-ticker.C:
+		}
 	}
-
-	t.Fatalf("metadata did not converge")
 }
 
 func contains(list []int, id int) bool {
@@ -824,23 +840,35 @@ func contains(list []int, id int) bool {
 func waitUntil(t *testing.T, pred func() bool, timeout time.Duration) bool {
 	t.Helper()
 
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
 		if pred() {
 			return true
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-timer.C:
+			return false
+		case <-ticker.C:
+		}
 	}
-
-	return false
 }
 
 func waitForServerReady(t *testing.T, addr string, errCh <-chan error) {
 	t.Helper()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -857,8 +885,10 @@ func waitForServerReady(t *testing.T, addr string, errCh <-chan error) {
 			return
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-timer.C:
+			t.Fatalf("server %s did not become ready in time", addr)
+		case <-ticker.C:
+		}
 	}
-
-	t.Fatalf("server %s did not become ready in time", addr)
 }

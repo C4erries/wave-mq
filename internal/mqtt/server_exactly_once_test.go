@@ -47,11 +47,12 @@ func TestMQTTQoS1CommitOnlyAfterPuback(t *testing.T) {
 		t.Fatalf("unexpected publish packet: %#v", pub)
 	}
 
-	time.Sleep(150 * time.Millisecond)
-
-	if got := b.commitCount(); got != 0 {
-		t.Fatalf("commit happened before PUBACK: %d", got)
-	}
+	assertConditionStable(
+		t,
+		150*time.Millisecond,
+		func() bool { return b.commitCount() == 0 },
+		"commit happened before PUBACK",
+	)
 
 	if err := writePuback(client, &PubackPacket{PacketID: pub.PacketID}); err != nil {
 		t.Fatalf("write PUBACK: %v", err)
@@ -99,11 +100,12 @@ func TestMQTTQoS1RedeliveryAfterReconnectWithoutPuback(t *testing.T) {
 	_ = client1.Close()
 	_ = server1.Close()
 
-	time.Sleep(120 * time.Millisecond)
-
-	if got := b.commitCount(); got != 0 {
-		t.Fatalf("unexpected commits before reconnect: %d", got)
-	}
+	assertConditionStable(
+		t,
+		120*time.Millisecond,
+		func() bool { return b.commitCount() == 0 },
+		"unexpected commits before reconnect",
+	)
 
 	client2, server2 := net.Pipe()
 	defer client2.Close()
@@ -189,11 +191,12 @@ func TestMQTTQoS1IncomingDuplicateIsIdempotent(t *testing.T) {
 		t.Fatalf("unexpected duplicate PUBACK packet id: %d", puback2.PacketID)
 	}
 
-	time.Sleep(120 * time.Millisecond)
-
-	if got := b.producedCount(); got != 1 {
-		t.Fatalf("expected a single produce for duplicate QoS1 publish, got %d", got)
-	}
+	assertConditionStable(
+		t,
+		120*time.Millisecond,
+		func() bool { return b.producedCount() == 1 },
+		"expected a single produce for duplicate QoS1 publish",
+	)
 
 	if got := b.recordCount("ingest", 0); got != 1 {
 		t.Fatalf("expected one stored record for duplicate QoS1 publish, got %d", got)
@@ -364,16 +367,45 @@ func isTimeout(err error) bool {
 func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool, failMsg string) {
 	t.Helper()
 
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
 		if cond() {
 			return
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-timer.C:
+			t.Fatalf("%s", failMsg)
+		case <-ticker.C:
+		}
 	}
+}
 
-	t.Fatalf("%s", failMsg)
+func assertConditionStable(t *testing.T, window time.Duration, cond func() bool, failMsg string) {
+	t.Helper()
+
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if !cond() {
+			t.Fatalf("%s", failMsg)
+		}
+
+		select {
+		case <-timer.C:
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func buildConnectPacket(clientID string, cleanStart bool) []byte {

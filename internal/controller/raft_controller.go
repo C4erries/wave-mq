@@ -363,7 +363,7 @@ func bootstrapClusterIfNeeded(
 }
 
 func buildStores(raftDir string) (raft.LogStore, raft.StableStore, raft.SnapshotStore, []io.Closer, error) {
-	if raftDir == "" {
+	if raftDir == "" || raceDetectorEnabled() {
 		store := raft.NewInmemStore()
 		return store, store, raft.NewInmemSnapshotStore(), nil, nil
 	}

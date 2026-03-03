@@ -189,6 +189,17 @@ def sum_metric(metrics_text: str, metric_name: str) -> float:
     return total
 
 
+def find_log_marker_lines(logs: str, marker: str, limit: int = 20) -> list[str]:
+    marker_lower = marker.lower()
+    matches: list[str] = []
+    for line in logs.splitlines():
+        if marker_lower in line.lower():
+            matches.append(line.strip())
+            if len(matches) >= limit:
+                break
+    return matches
+
+
 @dataclass(frozen=True)
 class ProfileConfig:
     partitions: int
@@ -303,7 +314,7 @@ class MultiBlackboxSuite:
     def wait_topic_assignments(self) -> list[dict[str, Any]]:
         cfg = self.settings.profile
 
-        def ready() -> list[dict[str, Any]] | None:
+        def snapshot() -> list[dict[str, Any]] | None:
             cluster = self.get_cluster()
             partitions = cluster.get("partitions", [])
             if not isinstance(partitions, list):
@@ -315,27 +326,57 @@ class MultiBlackboxSuite:
 
         return wait_for(
             f"topic assignments for {self.topic}",
-            ready,
+            snapshot,
             timeout_sec=90.0,
             interval_sec=0.5,
         )
 
     def wait_full_isr(self) -> None:
         cfg = self.settings.profile
+        deadline = time.monotonic() + 120.0
+        interval_sec = 0.8
+        last_assignments: list[dict[str, Any]] = []
+        last_version: int | None = None
+        last_error: Exception | None = None
 
-        def ready() -> bool:
-            assignments = self.wait_topic_assignments()
-            if len(assignments) != cfg.partitions:
-                return False
-            for p in assignments:
-                isr = p.get("isr", [])
-                if not isinstance(isr, list):
-                    return False
-                if {int(x) for x in isr} != {1, 2}:
-                    return False
-            return True
+        while time.monotonic() < deadline:
+            try:
+                cluster = self.get_cluster()
+                last_version = int(cluster.get("version", 0))
+                partitions = cluster.get("partitions", [])
+                if isinstance(partitions, list):
+                    assignments = [p for p in partitions if isinstance(p, dict) and p.get("topic") == self.topic]
+                    if len(assignments) == cfg.partitions:
+                        last_assignments = assignments
+                        all_full = True
+                        for p in assignments:
+                            isr = p.get("isr", [])
+                            if not isinstance(isr, list) or {int(x) for x in isr} != {1, 2}:
+                                all_full = False
+                                break
+                        if all_full:
+                            return
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
 
-        wait_for("full ISR (1,2) for all partitions", ready, timeout_sec=120.0, interval_sec=0.8)
+            time.sleep(interval_sec)
+
+        summary = [
+            {
+                "partition": int(p.get("partition", -1)),
+                "leader": int(p.get("leader", -1)),
+                "isr": p.get("isr", []),
+                "replicas": p.get("replicas", []),
+            }
+            for p in last_assignments
+        ]
+        suffix = ""
+        if last_error is not None:
+            suffix = f"; last_error={last_error}"
+        raise BlackboxError(
+            f"timeout while waiting for full ISR (1,2) for all partitions; "
+            f"cluster_version={last_version}; assignments={summary}{suffix}"
+        )
 
     def partition_leaders(self) -> dict[int, int]:
         leaders: dict[int, int] = {}
@@ -645,6 +686,7 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         log(f"blackbox failed: {exc}")
         if stack is not None:
+            rollback_marker = "rollback failed: tx closed"
             for service in ("broker1", "broker2"):
                 try:
                     logs = stack.logs(service, tail=200)
@@ -654,6 +696,12 @@ def main() -> int:
                     print(f"\n===== {service} logs (tail) =====")
                     print(logs)
                     print("===== end logs =====\n")
+                    marker_lines = find_log_marker_lines(logs, rollback_marker)
+                    if marker_lines:
+                        print(f"===== {service} diagnostics: {rollback_marker!r} =====")
+                        for line in marker_lines:
+                            print(line)
+                        print("===== end diagnostics =====\n")
         return 1
     finally:
         if stack is not None and not args.keep_stack:

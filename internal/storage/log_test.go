@@ -478,8 +478,6 @@ func TestRetentionByAge(t *testing.T) {
 		t.Fatalf("reopen log: %v", err)
 	}
 
-	time.Sleep(2 * time.Millisecond)
-
 	if _, err := log.Append(ctx, api.Record{Value: []byte("new")}); err != nil {
 		t.Fatalf("append new: %v", err)
 	}

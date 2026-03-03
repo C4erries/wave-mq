@@ -408,16 +408,12 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 		// Ignore other packets (e.g., echoed publish) until PINGRESP arrives.
 	}
 
-	// Give some time for broker produce/commit to be called
-	time.Sleep(50 * time.Millisecond)
-
-	if b.recordCount("t/1", 0) < 2 {
-		t.Fatalf("expected broker to store produced record")
-	}
-
-	if b.fetchCount() == 0 {
-		t.Fatalf("fetch loop did not run")
-	}
+	waitForCondition(
+		t,
+		2*time.Second,
+		func() bool { return b.recordCount("t/1", 0) >= 2 && b.fetchCount() > 0 },
+		"expected broker to store produced record and run fetch loop",
+	)
 
 	committed, ok := b.committedOffset("client-1", "t/1", 0)
 	if !ok {

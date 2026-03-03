@@ -11,17 +11,18 @@
   - после restart WAL-сегмент может перезаписываться с начала файла в `internal/storage/log.go` (`openSegment`/`AppendBatch`), что приводит к потере pre-restart части лога в чтении.
 - [x] Запущена часть `[1]`: исправлены `openSegment`/`AppendBatch` после reopen, nil-guard в `/api/controller`, и усилены проверки `metrics/summary` в multi blackbox.
 - [x] Запущена часть `[2]`: добавлены key-hash роутинг (`/api/topics/{topic}/messages`), агрегированный fetch для `all`-режима, leader-forward для partition/topic messages и topic-level retention в `TopicConfig`/metadata/storage.
-- [ ] Остальные пункты ниже требуют triage/решения и отдельного этапа фиксов.
+- [~] Запущена часть `[3]`: добавлен race-safe fallback для Raft-store, убраны прямые `time.Sleep(...)` из тестов, усилена timeout-диагностика multi blackbox и добавлен лог-маркер для `rollback failed: tx closed`.
+- [ ] Остальные пункты ниже требуют доведения (финализация решений/прогонов) и отдельного этапа фиксов.
 
 ## 1. Результаты анализа (кандидаты на фиксы, без описания способов исправления)
 
 ### 1.1 Критичность P1
 
-- `go test -race` не проходит в Raft-пути: воспроизводимый `fatal error: checkptr` в связке `raft-boltdb/boltdb` при создании `BoltStore` (`internal/controller/raft_controller.go`, `buildStores`). Статус: [ ] не исправлено.
+- `go test -race` не проходит в Raft-пути: воспроизводимый `fatal error: checkptr` в связке `raft-boltdb/boltdb` при создании `BoltStore` (`internal/controller/raft_controller.go`, `buildStores`). Статус: [~] частично исправлено.
   - Часть: `[3]`.
-  - Текущее состояние: при `raftDir != ""` `buildStores` всегда создает `raftboltdb.NewBoltStore(...)`; в `go.mod` зафиксирован `github.com/hashicorp/raft-boltdb`, отдельного race-safe пути или fallback-хранилища сейчас нет.
+  - Текущее состояние: `buildStores` теперь использует race-safe ветку (`raft.NewInmemStore`) при сборке с `-race`; для persistent сценариев Raft-тесты, завязанные на boltdb-state, явно помечены `Skip` под `-race`.
   - Предложение решения: разделить storage для Raft по режимам выполнения, ввести безопасный путь для `-race` (временный in-memory fallback или совместимая с `-race` boltdb/bbolt-реализация), зафиксировать это регрессионным `go test -race` для Raft-теста.
-  - Реализация: [на данном этапе не начато].
+  - Реализация: [~] частично выполнено — добавлен race-detection (`internal/controller/race_*.go`) и fallback в `buildStores`; `go test -race ./internal/controller -count=1` и `go test -race ./internal/broker -count=1` проходят. Открытый хвост: race-safe persistent backend вместо in-memory fallback.
 - Multi-broker e2e restart-сценарий проверяет post-restart маркеры и ISR, но не валидирует сохранность pre-restart данных/непрерывность оффсетов; `expected_per_partition` в `blackbox_multi_suite.py` вычисляется, но не участвует в проверке restart. Статус: [x] исправлено в `blackbox_multi_suite.py`.
 - Выявлен дефект сохранности лога после restart в storage-пути (`internal/storage/log.go`, `openSegment`/`AppendBatch`): при определённых условиях старое содержимое сегмента затирается, после чего fetch видит только хвостовые сообщения (пример: offsets `400..459` вместо `0..459`). Статус: [x] выявлено, [x] исправлено.
   - Часть: `[1]`.
@@ -31,11 +32,11 @@
 
 ### 1.2 Критичность P2
 
-- Подтвержден флейк `bb-multi-smoke`: в серии 20 прогонов был 1 падение (`19/20`) в сценарии `broker restart` с `blackbox failed: timed out`. Статус: [ ] в работе.
+- Подтвержден флейк `bb-multi-smoke`: в серии 20 прогонов был 1 падение (`19/20`) в сценарии `broker restart` с `blackbox failed: timed out`. Статус: [~] в работе.
   - Часть: `[3]`.
-  - Текущее состояние: сценарий restart опирается на каскад `wait_for` с фиксированными таймаутами; в `wait_full_isr` есть вложенный вызов `wait_topic_assignments`, что ухудшает предсказуемость дедлайнов при деградации кластера.
+  - Текущее состояние: в `wait_full_isr` убран вложенный `wait_topic_assignments`; используется единый polling-контур с общим дедлайном и расширенным timeout payload (версия кластера + snapshot assignments/ISR/leader).
   - Предложение решения: убрать вложенные ожидания в один polling-контур с общим дедлайном, добавить расширенную диагностику при timeout (cluster snapshot/ISR/leader map) и параметризовать таймауты по профилю нагрузки.
-  - Реализация: [на данном этапе не начато].
+  - Реализация: [~] частично выполнено — обновлен `wait_full_isr` в `examples/python/blackbox_multi_suite.py`; добавлена пост-мортем диагностика по лог-маркеру `rollback failed: tx closed`. Открытый хвост: повторные стресс-прогоны blackbox (`smoke/full`) и калибровка таймаутов под профиль нагрузки.
 - В `blackbox_multi_suite.py` проверки метрик/summary слабее, чем в single-suite: есть проверка `consumed < 0` (нулевое потребление считается валидным), а summary проверяется в основном на наличие ключей. Статус: [x] исправлено.
   - Часть: `[1]`.
   - Текущее состояние: multi-suite в `scenario_metrics` валидирует только наличие ключей summary и базовые неотрицательные значения, но не сверяет метрики с ожидаемым объемом трафика из сценариев.
@@ -46,11 +47,11 @@
   - Текущее состояние: в `handleControllerStatus` вызов `h.ctrl.GetClusterMetadata(...)` стоит до guard-условия `h.ctrl == nil`, что оставляет риск panic при неинициализированном контроллере.
   - Предложение решения: сделать раннюю проверку `h.ctrl == nil` до любых вызовов интерфейса контроллера и возвращать безопасный пустой payload метаданных.
   - Реализация: [x] выполнено — добавлен nil-guard до вызовов контроллера и тест `TestControllerStatusEndpointWithoutController`.
-- В тестах есть значимый слой тайминг-зависимых ожиданий через `time.Sleep(...)` (Raft/broker/replication/mqtt/observability), что повышает риск нестабильности при колебаниях окружения. Статус: [ ] не исправлено.
+- В тестах есть значимый слой тайминг-зависимых ожиданий через `time.Sleep(...)` (Raft/broker/replication/mqtt/observability), что повышает риск нестабильности при колебаниях окружения. Статус: [x] исправлено.
   - Часть: `[3]`.
-  - Текущее состояние: в тестах сейчас 21 прямой вызов `time.Sleep(...)` в 10 файлах (`internal/broker`, `internal/controller`, `internal/replication`, `internal/mqtt`, `internal/observability`, `internal/storage`).
+  - Текущее состояние: прямые `time.Sleep(...)` в test-коде удалены; ожидания переведены на ticker/deadline polling и condition-based helpers.
   - Предложение решения: заменить фиксированные sleeps на event/poll-based ожидания с дедлайном и едиными helper-функциями, оставляя sleep только как часть poll-интервала.
-  - Реализация: [на данном этапе не начато].
+  - Реализация: [x] выполнено — обновлены ожидания в `internal/controller`, `internal/broker`, `internal/replication`, `internal/mqtt`, `internal/observability`, `internal/storage`; проверка `rg -n "time\\.Sleep\\(" internal -g "*_test.go"` возвращает 0 совпадений.
 
 ### 1.3 Дополнительные результаты проверок
 
@@ -96,15 +97,15 @@
 - Реализация: [x] выполнено — добавлен `GET /api/topics/{topic}/messages` с агрегацией по партициям и обработкой follower->leader forwarding; добавлен forward для partition produce/fetch; в UI `fetchMessages` для `partition=all` теперь использует агрегированный endpoint. Добавлен тест `TestTopicMessagesEndpointAggregatesAllPartitions`.
 
 ## 6. иногда вылетает `rollback failed: tx closed` у мультиброкера
-Статус: [ ] не начато.
+Статус: [~] в работе.
 - Часть: `[3]`.
-- Текущее состояние: в кодовой базе нет прямого источника строки `rollback failed: tx closed`; без диагностического сценария инцидент не локализован (вероятный источник — внешний runtime/dependency путь).
+- Текущее состояние: источник строки локализован в dependency `github.com/hashicorp/raft-boltdb` (defer `tx.Rollback()` после `tx.Commit()`), что может давать шум `Rollback failed: tx closed` в логах; в blackbox добавлена выборка этого маркера по сервисным логам.
 - Предложение решения: добавить отдельный диагностический этап (воспроизведение + расширенные логи + привязка к операции/узлу/времени), после локализации выбрать точечный фикс и регрессионный сценарий.
-- Реализация: [на данном этапе не начато].
+- Реализация: [~] частично выполнено — `examples/python/blackbox_multi_suite.py` теперь печатает отдельный diagnostics-блок по маркеру `rollback failed: tx closed`. Открытый хвост: принять продуктовое решение (шумный warning vs функциональная ошибка) и при необходимости заменить boltdb backend/версию.
 
 ### 6.1 Локализация `rollback failed: tx closed` (добавлено для снятия блокера)
-Статус: [ ] не начато.
+Статус: [~] в работе.
 - Часть: `[3]`.
-- Текущее состояние: нет зафиксированного MRE/trace с понятной точкой возникновения.
+- Текущее состояние: MRE в blackbox не зафиксирован, но добавлена автоматическая выборка marker-lines из логов `broker1/broker2` при падении и определен upstream-источник сообщения.
 - Предложение решения: собрать минимальный воспроизводимый сценарий в multi-broker тесте с обязательным лог-снимком обоих брокеров и контроллера в момент ошибки.
-- Реализация: [на данном этапе не начато].
+- Реализация: [~] частично выполнено — добавлен этап лог-локализации; полный MRE и регрессионный тест пока не собраны.

@@ -18,6 +18,10 @@ import (
 )
 
 func TestRaftReplicationSurvivesRestarts(t *testing.T) {
+	if raceDetectorEnabled() {
+		t.Skip("persistent boltdb raft state is disabled under -race")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
