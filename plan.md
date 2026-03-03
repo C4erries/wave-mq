@@ -10,6 +10,7 @@
 - [x] По падению `after restart partition 1: expected 460 messages, got 60` выявлена причина:
   - после restart WAL-сегмент может перезаписываться с начала файла в `internal/storage/log.go` (`openSegment`/`AppendBatch`), что приводит к потере pre-restart части лога в чтении.
 - [x] Запущена часть `[1]`: исправлены `openSegment`/`AppendBatch` после reopen, nil-guard в `/api/controller`, и усилены проверки `metrics/summary` в multi blackbox.
+- [x] Запущена часть `[2]`: добавлены key-hash роутинг (`/api/topics/{topic}/messages`), агрегированный fetch для `all`-режима, leader-forward для partition/topic messages и topic-level retention в `TopicConfig`/metadata/storage.
 - [ ] Остальные пункты ниже требуют triage/решения и отдельного этапа фиксов.
 
 ## 1. Результаты анализа (кандидаты на фиксы, без описания способов исправления)
@@ -74,25 +75,25 @@
   - Реализация: [на данном этапе не начато].
 
 ## 3. retention policy
-Статус: [ ] не начато.
+Статус: [~] частично реализовано.
 - Часть: `[2]`.
 - Текущее состояние: базовая retention уже работает на уровне broker-wide конфигурации (`-retention-bytes`, `-retention-hours`) и применяется в storage (`SegmentMaxAge`, `MaxLogBytes`), покрыта тестами по size/age/start offset.
 - Предложение решения: уточнить scope как topic-level retention (политики на топик/партицию, хранение в metadata, управление через API, проверки в multi-broker сценариях).
-- Реализация: [на данном этапе не начато].
+- Реализация: [~] частично выполнено — добавлены поля retention в `api.TopicConfig`, HTTP `POST /api/topics` (`retentionBytes`/`retentionHours`), metadata event v2 и per-topic overrides в `storage.OpenLog`; покрыто тестом `TestCreateTopicAppliesRetentionOverrides`. Открытый хвост: перенос topic-level retention через controller metadata в multi-broker watcher-путь.
 
 ## 4. Маршрутизация сообщений по key-hash (Kafka-подобно), включая тесты детерминизма
-Статус: [ ] не начато.
+Статус: [x] реализовано.
 - Часть: `[2]`.
 - Текущее состояние: в HTTP/binary data-plane партиция задается строго явно (`/partitions/{id}` или `partition` в протоколе), ключ записи не участвует в выборе партиции; в MQTT есть хеш-выбор, но по `topic+clientID`, а не по message key.
 - Предложение решения: перейти на режим по умолчанию "как в Kafka" — выбор партиции по `key` через стабильный hash по актуальному списку партиций, с тестом `same key -> same partition` и smoke-проверкой распределения разных ключей.
-- Реализация: [на данном этапе не начато].
+- Реализация: [x] выполнено — добавлены `Broker.ProduceByKey`, key-hash выбор партиции и endpoint `POST /api/topics/{topic}/messages`; добавлены тесты `TestProduceByKeyRoutesSameKeyToSamePartition` и `TestTopicProduceByKeyEndpoint`. Совместимость сохранена: явный produce в `/partitions/{id}/messages` не удален.
 
 ## 5. Data analysis не работает для мультиброкера
-Статус: [ ] не начато.
+Статус: [x] реализовано.
 - Часть: `[2]`.
 - Текущее состояние: UI `DataAnalysis` при режиме `all` фактически читает только `partition=0`; запросы чтения/записи не leader-aware и при multi-broker могут получать `409 not_leader`, что ломает сценарий анализа.
 - Предложение решения: добавить leader-aware маршрут для чтения сообщений (backend proxy/forward по cluster metadata) и доработать UI для агрегации по всем партициям топика с корректной обработкой not-leader.
-- Реализация: [на данном этапе не начато].
+- Реализация: [x] выполнено — добавлен `GET /api/topics/{topic}/messages` с агрегацией по партициям и обработкой follower->leader forwarding; добавлен forward для partition produce/fetch; в UI `fetchMessages` для `partition=all` теперь использует агрегированный endpoint. Добавлен тест `TestTopicMessagesEndpointAggregatesAllPartitions`.
 
 ## 6. иногда вылетает `rollback failed: tx closed` у мультиброкера
 Статус: [ ] не начато.

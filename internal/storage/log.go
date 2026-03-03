@@ -74,6 +74,9 @@ type LogOptions struct {
 	BaseOffset api.Offset
 	Topic      string
 	Partition  int
+	// Optional per-topic retention overrides; zero means "use manager defaults".
+	RetentionBytes int64
+	RetentionTime  time.Duration
 }
 
 // Log represents an append-only segmented commit log for a single partition.
@@ -139,9 +142,17 @@ func (m *Manager) OpenLog(opts LogOptions) (Log, error) {
 		return nil, err
 	}
 
+	logCfg := m.cfg
+	if opts.RetentionBytes != 0 {
+		logCfg.MaxLogBytes = opts.RetentionBytes
+	}
+	if opts.RetentionTime != 0 {
+		logCfg.SegmentMaxAge = opts.RetentionTime
+	}
+
 	l := &segmentedLog{
 		opts: opts,
-		cfg:  m.cfg,
+		cfg:  logCfg,
 		dir:  dir,
 	}
 	if err := l.bootstrap(); err != nil {

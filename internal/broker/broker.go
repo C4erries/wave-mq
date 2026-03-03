@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"sort"
 	"strconv"
@@ -211,6 +212,8 @@ func (b *Broker) CreateTopic(ctx context.Context, name string, cfg api.TopicConf
 		Name:              name,
 		NumPartitions:     partitions,
 		ReplicationFactor: rf,
+		RetentionBytes:    cfg.RetentionBytes,
+		RetentionTime:     cfg.RetentionTime,
 		Partitions:        make([]metadata.PartitionSpec, 0, partitions),
 	}
 	for p := 0; p < partitions; p++ {
@@ -290,7 +293,11 @@ func (b *Broker) CreateTopicWithAssignments(
 		return b.CreateTopic(ctx, name, cfg)
 	}
 
-	state := metadata.TopicState{Name: name}
+	state := metadata.TopicState{
+		Name:           name,
+		RetentionBytes: cfg.RetentionBytes,
+		RetentionTime:  cfg.RetentionTime,
+	}
 	filtered := make(map[int]api.PartitionAssignment)
 
 	for pid, assign := range assignments {
@@ -620,8 +627,10 @@ func (b *Broker) loadTopicLocked(ctx context.Context, state metadata.TopicState,
 		}
 
 		log, err := b.storage.OpenLog(storage.LogOptions{
-			Topic:     state.Name,
-			Partition: pid,
+			Topic:          state.Name,
+			Partition:      pid,
+			RetentionBytes: state.RetentionBytes,
+			RetentionTime:  state.RetentionTime,
 		})
 		if err != nil {
 			return err
@@ -721,6 +730,69 @@ func containsInt(list []int, id int) bool {
 	}
 
 	return false
+}
+
+// ProduceByKey appends records using Kafka-like key-hash routing.
+// It returns the chosen partition and base offset for the batch.
+func (b *Broker) ProduceByKey(ctx context.Context, topic string, key []byte, records []api.Record) (int, api.Offset, error) {
+	partition, err := b.partitionForKey(topic, key)
+	if err != nil {
+		return -1, -1, err
+	}
+
+	for i := range records {
+		if len(records[i].Key) == 0 {
+			records[i].Key = append([]byte(nil), key...)
+		}
+	}
+
+	base, err := b.Produce(ctx, topic, partition, records)
+	if err != nil {
+		return partition, -1, err
+	}
+
+	return partition, base, nil
+}
+
+func (b *Broker) partitionForKey(topic string, key []byte) (int, error) {
+	if len(key) == 0 {
+		return -1, fmt.Errorf("key is required for hash routing")
+	}
+
+	partitions := b.topicPartitionIDs(topic)
+	if len(partitions) == 0 {
+		return -1, fmt.Errorf("%w", ErrTopicNotFound)
+	}
+
+	hash := fnv.New32a()
+	_, _ = hash.Write(key)
+	index := int(hash.Sum32() % uint32(len(partitions))) // #nosec G115 -- modulo is bounded by len(partitions).
+
+	return partitions[index], nil
+}
+
+func (b *Broker) topicPartitionIDs(topic string) []int {
+	if assignments := b.partitionAssignments(topic); len(assignments) > 0 {
+		partitions := make([]int, 0, len(assignments))
+		for pid := range assignments {
+			partitions = append(partitions, pid)
+		}
+		sort.Ints(partitions)
+
+		return partitions
+	}
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	topicState, ok := b.topics[topic]
+	if !ok {
+		return nil
+	}
+
+	partitions := sortedPartitions(topicState)
+
+	return partitions
 }
 
 // Produce appends records to the specified partition.

@@ -43,6 +43,8 @@ type BrokerConfig struct {
 type TopicConfig struct {
 	Partitions        int
 	ReplicationFactor int
+	RetentionBytes    int64
+	RetentionTime     time.Duration
 }
 
 // PartitionReplica identifies a concrete partition replica on a broker.

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -19,6 +20,7 @@ const (
 	minPayloadSize = 2
 
 	eventVersionV1 uint8 = 1
+	eventVersionV2 uint8 = 2
 
 	eventTypeCreateTopic uint8 = 1
 )
@@ -53,6 +55,8 @@ type CreateTopicEvent struct {
 	Name              string
 	NumPartitions     int
 	ReplicationFactor int
+	RetentionBytes    int64
+	RetentionTime     time.Duration
 	Partitions        []PartitionSpec
 }
 
@@ -61,6 +65,8 @@ type TopicState struct {
 	Name              string
 	NumPartitions     int
 	ReplicationFactor int
+	RetentionBytes    int64
+	RetentionTime     time.Duration
 	Partitions        []PartitionSpec
 }
 
@@ -295,12 +301,20 @@ func encodeCreateTopicEvent(ev CreateTopicEvent) ([]byte, error) {
 		return nil, fmt.Errorf("replication factor must be >0")
 	}
 
+	if ev.RetentionBytes < -1 {
+		return nil, fmt.Errorf("retention bytes must be >= -1")
+	}
+
+	if ev.RetentionTime < 0 {
+		return nil, fmt.Errorf("retention time must be >= 0")
+	}
+
 	if len(ev.Partitions) != ev.NumPartitions {
 		return nil, fmt.Errorf("partition specs must match num partitions")
 	}
 
 	buf := &bytes.Buffer{}
-	buf.WriteByte(eventVersionV1)
+	buf.WriteByte(eventVersionV2)
 	buf.WriteByte(eventTypeCreateTopic)
 
 	if len(ev.Name) > 65535 {
@@ -335,6 +349,14 @@ func encodeCreateTopicEvent(ev CreateTopicEvent) ([]byte, error) {
 	}
 
 	if err := binary.Write(buf, binary.LittleEndian, replicationFactor); err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, ev.RetentionBytes); err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, int64(ev.RetentionTime)); err != nil {
 		return nil, err
 	}
 
@@ -398,9 +420,88 @@ func encodeCreateTopicEvent(ev CreateTopicEvent) ([]byte, error) {
 
 func decodeCreateTopicEvent(version uint8, data []byte) (CreateTopicEvent, error) {
 	var ev CreateTopicEvent
-	if version != eventVersionV1 {
+	switch version {
+	case eventVersionV1:
+		return decodeCreateTopicEventV1(data)
+	case eventVersionV2:
+		return decodeCreateTopicEventV2(data)
+	default:
 		return ev, fmt.Errorf("unsupported create-topic version %d", version)
 	}
+}
+
+func decodeCreateTopicEventV2(data []byte) (CreateTopicEvent, error) {
+	var ev CreateTopicEvent
+
+	reader := bytes.NewReader(data)
+
+	var nameLen uint16
+	if err := binary.Read(reader, binary.LittleEndian, &nameLen); err != nil {
+		return ev, err
+	}
+
+	name := make([]byte, nameLen)
+	if _, err := io.ReadFull(reader, name); err != nil {
+		return ev, err
+	}
+
+	var parts uint16
+	if err := binary.Read(reader, binary.LittleEndian, &parts); err != nil {
+		return ev, err
+	}
+
+	var rf uint16
+	if err := binary.Read(reader, binary.LittleEndian, &rf); err != nil {
+		return ev, err
+	}
+
+	var retentionBytes int64
+	if err := binary.Read(reader, binary.LittleEndian, &retentionBytes); err != nil {
+		return ev, err
+	}
+
+	var retentionNanos int64
+	if err := binary.Read(reader, binary.LittleEndian, &retentionNanos); err != nil {
+		return ev, err
+	}
+
+	if retentionBytes < -1 {
+		return ev, fmt.Errorf("invalid retention bytes %d", retentionBytes)
+	}
+
+	if retentionNanos < 0 {
+		return ev, fmt.Errorf("invalid retention duration %d", retentionNanos)
+	}
+
+	var specCount uint16
+	if err := binary.Read(reader, binary.LittleEndian, &specCount); err != nil {
+		return ev, err
+	}
+
+	ev = CreateTopicEvent{
+		Name:              string(name),
+		NumPartitions:     int(parts),
+		ReplicationFactor: int(rf),
+		RetentionBytes:    retentionBytes,
+		RetentionTime:     time.Duration(retentionNanos),
+	}
+
+	partitions, err := decodePartitionSpecs(reader, specCount)
+	if err != nil {
+		return ev, err
+	}
+
+	ev.Partitions = partitions
+
+	if len(ev.Partitions) != ev.NumPartitions {
+		return ev, fmt.Errorf("create-topic partition count mismatch: expected %d, got %d", ev.NumPartitions, len(ev.Partitions))
+	}
+
+	return ev, nil
+}
+
+func decodeCreateTopicEventV1(data []byte) (CreateTopicEvent, error) {
+	var ev CreateTopicEvent
 
 	reader := bytes.NewReader(data)
 

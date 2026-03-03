@@ -1186,6 +1186,102 @@ func TestProduceEndpoint(t *testing.T) {
 	}
 }
 
+func TestTopicProduceByKeyEndpoint(t *testing.T) {
+	server, b, store, offsetStore, metaStore := setupTestServer(t)
+	defer server.Close()
+	defer b.Close()
+	defer store.Close()
+	defer offsetStore.Close()
+	defer metaStore.Close()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "keyed", api.TopicConfig{Partitions: 3}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	send := func(value string) map[string]interface{} {
+		body := []byte(`{"key":"sensor-7","value":"` + value + `"}`)
+		resp, err := http.Post(server.URL+"/api/topics/keyed/messages", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+
+		var out map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		return out
+	}
+
+	first := send("v1")
+	second := send("v2")
+
+	if first["partition"] != second["partition"] {
+		t.Fatalf("same key routed to different partitions: %v vs %v", first, second)
+	}
+}
+
+func TestTopicMessagesEndpointAggregatesAllPartitions(t *testing.T) {
+	server, b, store, offsetStore, metaStore := setupTestServer(t)
+	defer server.Close()
+	defer b.Close()
+	defer store.Close()
+	defer offsetStore.Close()
+	defer metaStore.Close()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "agg", api.TopicConfig{Partitions: 2}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	if _, err := b.Produce(ctx, "agg", 0, []api.Record{{Value: []byte("p0")}}); err != nil {
+		t.Fatalf("produce p0: %v", err)
+	}
+	if _, err := b.Produce(ctx, "agg", 1, []api.Record{{Value: []byte("p1")}}); err != nil {
+		t.Fatalf("produce p1: %v", err)
+	}
+
+	resp, err := http.Get(server.URL + "/api/topics/agg/messages?limit=10")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var out []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if len(out) < 2 {
+		t.Fatalf("expected at least two messages, got %d", len(out))
+	}
+
+	hasP0 := false
+	hasP1 := false
+	for _, m := range out {
+		switch int(m["partition"].(float64)) {
+		case 0:
+			hasP0 = true
+		case 1:
+			hasP1 = true
+		}
+	}
+
+	if !hasP0 || !hasP1 {
+		t.Fatalf("expected messages from partitions 0 and 1, got %+v", out)
+	}
+}
+
 func TestClusterMetadataEndpoint(t *testing.T) {
 	dir := t.TempDir()
 

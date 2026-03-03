@@ -3,6 +3,7 @@ package broker
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/c4erries/wave-mq/internal/metadata"
@@ -345,5 +346,106 @@ func TestOffsetPersistenceAcrossRestart(t *testing.T) {
 
 	if off != 5 {
 		t.Fatalf("expected offset 5 after restart, got %d", off)
+	}
+}
+
+func TestProduceByKeyRoutesSameKeyToSamePartition(t *testing.T) {
+	b, cleanup := newTestBroker(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "keyed", api.TopicConfig{Partitions: 3}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	partition1, _, err := b.ProduceByKey(ctx, "keyed", []byte("sensor-42"), []api.Record{{Value: []byte("one")}})
+	if err != nil {
+		t.Fatalf("produce by key #1: %v", err)
+	}
+
+	partition2, _, err := b.ProduceByKey(ctx, "keyed", []byte("sensor-42"), []api.Record{{Value: []byte("two")}})
+	if err != nil {
+		t.Fatalf("produce by key #2: %v", err)
+	}
+
+	if partition1 != partition2 {
+		t.Fatalf("expected same key to map to same partition, got %d and %d", partition1, partition2)
+	}
+
+	recs, err := b.Fetch(ctx, "keyed", partition1, 0, 0)
+	if err != nil {
+		t.Fatalf("fetch keyed partition: %v", err)
+	}
+
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 records in routed partition, got %d", len(recs))
+	}
+}
+
+func TestCreateTopicAppliesRetentionOverrides(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 128,
+		SyncOnAppend:    true,
+		MaxLogBytes:     -1,
+	})
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+
+	offsetStore, err := NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
+
+	b, err := NewBroker(api.BrokerConfig{
+		BrokerID:          1,
+		ReplicationFactor: 1,
+		DataDir:           dir,
+	}, store, offsetStore, metaStore, nil, nil)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+
+	defer func() {
+		_ = b.Close()
+		_ = store.Close()
+		_ = offsetStore.Close()
+		_ = metaStore.Close()
+	}()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "retained", api.TopicConfig{
+		Partitions:     1,
+		RetentionBytes: 256,
+	}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	payload := []byte(strings.Repeat("x", 64))
+	for i := 0; i < 60; i++ {
+		if _, err := b.Produce(ctx, "retained", 0, []api.Record{{Value: payload}}); err != nil {
+			t.Fatalf("produce %d: %v", i, err)
+		}
+	}
+
+	detail, ok := b.TopicDetail("retained")
+	if !ok {
+		t.Fatalf("topic detail not found")
+	}
+
+	if len(detail.Partitions) != 1 {
+		t.Fatalf("expected one partition, got %d", len(detail.Partitions))
+	}
+
+	if detail.Partitions[0].StartOffset <= 0 {
+		t.Fatalf("expected retention to advance start offset, got %d", detail.Partitions[0].StartOffset)
 	}
 }

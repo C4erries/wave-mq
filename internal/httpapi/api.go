@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -239,6 +240,11 @@ func (h *Handler) handleTopicPaths(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "messages" {
+		h.topicMessages(w, r, name)
+		return
+	}
+
 	if len(parts) == 4 && parts[1] == "partitions" && parts[3] == "messages" {
 		pid, err := strconv.Atoi(parts[2])
 		if err != nil {
@@ -271,6 +277,184 @@ func (h *Handler) topicDetail(w http.ResponseWriter, r *http.Request, name strin
 	writeJSON(w, detail)
 }
 
+func (h *Handler) topicMessages(w http.ResponseWriter, r *http.Request, topic string) {
+	switch r.Method {
+	case http.MethodGet:
+		h.topicMessagesAll(w, r, topic)
+	case http.MethodPost:
+		h.topicProduceByKey(w, r, topic)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Handler) topicProduceByKey(w http.ResponseWriter, r *http.Request, topic string) {
+	var req struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	if req.Value == "" {
+		http.Error(w, "value is required", http.StatusBadRequest)
+		return
+	}
+
+	key := strings.TrimSpace(req.Key)
+	if key == "" {
+		http.Error(w, "key is required for hash routing", http.StatusBadRequest)
+		return
+	}
+
+	rec := api.Record{
+		Timestamp: time.Now().UTC(),
+		Key:       []byte(key),
+		Value:     []byte(req.Value),
+	}
+
+	partition, base, err := h.b.ProduceByKey(r.Context(), topic, []byte(key), []api.Record{rec})
+	if err != nil {
+		var nle broker.NotLeaderError
+		switch {
+		case errors.As(err, &nle):
+			if status, payload, ok := h.forwardTopicProduceToLeader(r, topic, key, req.Value, nle.Leader); ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write(payload) // #nosec G705 -- payload is trusted JSON response from peer broker.
+				return
+			}
+			w.WriteHeader(http.StatusConflict)
+			writeJSON(w, map[string]interface{}{
+				"error":          "not_leader",
+				"leaderBrokerID": nle.Leader,
+				"topic":          topic,
+				"partition":      nle.Partition,
+			})
+			return
+		case errors.Is(err, broker.ErrTopicNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		default:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"partition":  partition,
+		"baseOffset": base,
+	})
+}
+
+func (h *Handler) topicMessagesAll(w http.ResponseWriter, r *http.Request, topic string) {
+	q := r.URL.Query()
+	limit := 50
+	if l := q.Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 {
+			limit = v
+		} else {
+			http.Error(w, "invalid limit", http.StatusBadRequest)
+			return
+		}
+	}
+
+	offsetParam := q.Get("offset")
+	partitions, err := h.topicPartitionIDs(r.Context(), topic)
+	if err != nil {
+		if errors.Is(err, broker.ErrTopicNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	all := make([]map[string]interface{}, 0, limit*len(partitions))
+	for _, pid := range partitions {
+		_, msgs, err := h.b.FetchMessages(r.Context(), topic, pid, offsetParam, limit)
+		if err != nil {
+			var nle broker.NotLeaderError
+			if errors.As(err, &nle) {
+				if status, payload, ok := h.forwardPartitionMessagesToLeader(r, topic, pid, nle.Leader); ok {
+					if status != http.StatusOK {
+						http.Error(w, "leader fetch failed", http.StatusBadGateway)
+						return
+					}
+
+					var forwarded []map[string]interface{}
+					if err := json.Unmarshal(payload, &forwarded); err != nil {
+						http.Error(w, "invalid leader payload", http.StatusBadGateway)
+						return
+					}
+					all = append(all, forwarded...)
+					continue
+				}
+			}
+
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		all = append(all, recordsResponse(pid, msgs)...)
+	}
+
+	sort.Slice(all, func(i, j int) bool {
+		ti := fmt.Sprint(all[i]["timestamp"])
+		tj := fmt.Sprint(all[j]["timestamp"])
+		if ti != tj {
+			return ti > tj
+		}
+
+		return offsetInt64(all[i]["offset"]) > offsetInt64(all[j]["offset"])
+	})
+
+	if len(all) > limit {
+		all = all[:limit]
+	}
+
+	writeJSON(w, all)
+}
+
+func (h *Handler) topicPartitionIDs(ctx context.Context, topic string) ([]int, error) {
+	ids := make(map[int]struct{})
+	if h.ctrl != nil {
+		meta, err := h.ctrl.GetClusterMetadata(ctx)
+		if err == nil {
+			for _, p := range meta.Partitions {
+				if p.Topic == topic {
+					ids[p.Partition] = struct{}{}
+				}
+			}
+		}
+	}
+
+	if len(ids) == 0 {
+		detail, ok := h.b.TopicDetail(topic)
+		if !ok {
+			return nil, fmt.Errorf("%w", broker.ErrTopicNotFound)
+		}
+		for _, p := range detail.Partitions {
+			ids[p.ID] = struct{}{}
+		}
+	}
+
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("%w", broker.ErrTopicNotFound)
+	}
+
+	partitions := make([]int, 0, len(ids))
+	for pid := range ids {
+		partitions = append(partitions, pid)
+	}
+	sort.Ints(partitions)
+
+	return partitions, nil
+}
+
 func (h *Handler) partitionMessages(w http.ResponseWriter, r *http.Request, topic string, partition int) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -296,6 +480,13 @@ func (h *Handler) partitionMessages(w http.ResponseWriter, r *http.Request, topi
 		var nle broker.NotLeaderError
 		switch {
 		case errors.As(err, &nle):
+			if status, payload, ok := h.forwardPartitionMessagesToLeader(r, topic, partition, nle.Leader); ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write(payload) // #nosec G705 -- payload is trusted JSON response from peer broker.
+				return
+			}
+
 			w.WriteHeader(http.StatusConflict)
 			writeJSON(w, map[string]interface{}{
 				"error":          "not_leader",
@@ -311,22 +502,10 @@ func (h *Handler) partitionMessages(w http.ResponseWriter, r *http.Request, topi
 		}
 	}
 
-	var resp []map[string]interface{}
-	for _, m := range msgs {
-		resp = append(resp, map[string]interface{}{
-			"partition": partition,
-			"offset":    int64(m.Offset),
-			"key":       encodeMaybeBase64(m.Key),
-			"value":     encodeMaybeBase64(m.Value),
-			"timestamp": m.Timestamp.UTC().Format(time.RFC3339),
-		})
-	}
+	resp := recordsResponse(partition, msgs)
 	// Sort descending by offset.
 	sort.Slice(resp, func(i, j int) bool {
-		oi := resp[i]["offset"].(int64)
-		oj := resp[j]["offset"].(int64)
-
-		return oi > oj
+		return offsetInt64(resp[i]["offset"]) > offsetInt64(resp[j]["offset"])
 	})
 	writeJSON(w, resp)
 }
@@ -346,6 +525,8 @@ func (h *Handler) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 		Name              string `json:"name"`
 		Partitions        int    `json:"partitions"`
 		ReplicationFactor int    `json:"replicationFactor"`
+		RetentionBytes    int64  `json:"retentionBytes,omitempty"`
+		RetentionHours    int    `json:"retentionHours,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -360,6 +541,10 @@ func (h *Handler) handleCreateTopic(w http.ResponseWriter, r *http.Request) {
 	cfg := api.TopicConfig{
 		Partitions:        req.Partitions,
 		ReplicationFactor: req.ReplicationFactor,
+		RetentionBytes:    req.RetentionBytes,
+	}
+	if req.RetentionHours > 0 {
+		cfg.RetentionTime = time.Duration(req.RetentionHours) * time.Hour
 	}
 
 	ctx := r.Context()
@@ -423,6 +608,8 @@ func (h *Handler) forwardCreateTopicToLeader(
 		Name              string `json:"name"`
 		Partitions        int    `json:"partitions"`
 		ReplicationFactor int    `json:"replicationFactor"`
+		RetentionBytes    int64  `json:"retentionBytes,omitempty"`
+		RetentionHours    int    `json:"retentionHours,omitempty"`
 	},
 	leaderHint string,
 ) (int, []byte, bool) {
@@ -657,6 +844,13 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 
 			_ = errors.As(err, &nle)
 
+			if status, payload, ok := h.forwardPartitionProduceToLeader(r, topic, partition, req.Key, req.Value, nle.Leader); ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write(payload) // #nosec G705 -- payload is trusted JSON response from peer broker.
+				return
+			}
+
 			w.WriteHeader(http.StatusConflict)
 			writeJSON(w, map[string]interface{}{
 				"error":          "not_leader",
@@ -679,6 +873,203 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 		"partition":  partition,
 		"baseOffset": base,
 	})
+}
+
+func recordsResponse(partition int, msgs []api.Record) []map[string]interface{} {
+	resp := make([]map[string]interface{}, 0, len(msgs))
+	for _, m := range msgs {
+		resp = append(resp, map[string]interface{}{
+			"partition": partition,
+			"offset":    int64(m.Offset),
+			"key":       encodeMaybeBase64(m.Key),
+			"value":     encodeMaybeBase64(m.Value),
+			"timestamp": m.Timestamp.UTC().Format(time.RFC3339),
+		})
+	}
+
+	return resp
+}
+
+func offsetInt64(v interface{}) int64 {
+	switch off := v.(type) {
+	case int:
+		return int64(off)
+	case int64:
+		return off
+	case float64:
+		return int64(off)
+	default:
+		return 0
+	}
+}
+
+func (h *Handler) forwardPartitionMessagesToLeader(
+	r *http.Request,
+	topic string,
+	partition int,
+	leaderBrokerID int,
+) (int, []byte, bool) {
+	if r.Header.Get(forwardedCreateTopicHeader) != "" {
+		return 0, nil, false
+	}
+
+	baseURL, ok := h.resolveTopicsAPIByBrokerID(r.Context(), leaderBrokerID)
+	if !ok {
+		return 0, nil, false
+	}
+
+	u := baseURL + "/" + url.PathEscape(topic) + "/partitions/" + strconv.Itoa(partition) + "/messages"
+	if raw := r.URL.RawQuery; raw != "" {
+		u += "?" + raw
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, nil)
+	if err != nil {
+		return 0, nil, false
+	}
+	req.Header.Set(forwardedCreateTopicHeader, "1")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, false
+	}
+	defer resp.Body.Close()
+
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, false
+	}
+
+	return resp.StatusCode, payload, true
+}
+
+func (h *Handler) forwardPartitionProduceToLeader(
+	r *http.Request,
+	topic string,
+	partition int,
+	key *string,
+	value string,
+	leaderBrokerID int,
+) (int, []byte, bool) {
+	if r.Header.Get(forwardedCreateTopicHeader) != "" {
+		return 0, nil, false
+	}
+
+	baseURL, ok := h.resolveTopicsAPIByBrokerID(r.Context(), leaderBrokerID)
+	if !ok {
+		return 0, nil, false
+	}
+
+	payload := struct {
+		Key   *string `json:"key"`
+		Value string  `json:"value"`
+	}{
+		Key:   key,
+		Value: value,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return 0, nil, false
+	}
+
+	u := baseURL + "/" + url.PathEscape(topic) + "/partitions/" + strconv.Itoa(partition) + "/messages"
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, u, bytes.NewReader(data))
+	if err != nil {
+		return 0, nil, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(forwardedCreateTopicHeader, "1")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, false
+	}
+	defer resp.Body.Close()
+
+	respPayload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, false
+	}
+
+	return resp.StatusCode, respPayload, true
+}
+
+func (h *Handler) forwardTopicProduceToLeader(
+	r *http.Request,
+	topic string,
+	key string,
+	value string,
+	leaderBrokerID int,
+) (int, []byte, bool) {
+	if r.Header.Get(forwardedCreateTopicHeader) != "" {
+		return 0, nil, false
+	}
+
+	baseURL, ok := h.resolveTopicsAPIByBrokerID(r.Context(), leaderBrokerID)
+	if !ok {
+		return 0, nil, false
+	}
+
+	payload := struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}{
+		Key:   key,
+		Value: value,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return 0, nil, false
+	}
+
+	u := baseURL + "/" + url.PathEscape(topic) + "/messages"
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, u, bytes.NewReader(data))
+	if err != nil {
+		return 0, nil, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(forwardedCreateTopicHeader, "1")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, false
+	}
+	defer resp.Body.Close()
+
+	respPayload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, false
+	}
+
+	return resp.StatusCode, respPayload, true
+}
+
+func (h *Handler) resolveTopicsAPIByBrokerID(ctx context.Context, brokerID int) (string, bool) {
+	if brokerID == 0 || h.ctrl == nil {
+		return "", false
+	}
+
+	meta, err := h.ctrl.GetClusterMetadata(ctx)
+	if err != nil {
+		return "", false
+	}
+
+	for _, info := range meta.Brokers {
+		if info.BrokerID != brokerID {
+			continue
+		}
+
+		httpAddr, ok := normalizeHostPort(info.HTTPAddr)
+		if !ok {
+			return "", false
+		}
+
+		return "http://" + httpAddr + "/api/topics", true
+	}
+
+	return "", false
 }
 
 func encodeMaybeBase64(b []byte) interface{} {
