@@ -68,12 +68,24 @@ func (p *metadataPublisher) removeWatcher(target *metadataWatcher) {
 }
 
 func (w *metadataWatcher) send(meta api.ClusterMetadata) bool {
-	select {
-	case <-w.ctx.Done():
-		return false
-	case w.ch <- meta:
-		w.lastSent.Store(meta.Version)
-		return true
+	for {
+		select {
+		case <-w.ctx.Done():
+			return false
+		case w.ch <- meta:
+			w.lastSent.Store(meta.Version)
+			return true
+		default:
+		}
+
+		// The channel buffer is full; drop the stale snapshot and retry so
+		// publisher never blocks behind slow consumers.
+		select {
+		case <-w.ctx.Done():
+			return false
+		case <-w.ch:
+		default:
+		}
 	}
 }
 

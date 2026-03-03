@@ -78,12 +78,24 @@ func (f *raftMetadataFSM) Apply(l *raft.Log) interface{} {
 
 	switch cmd.Type {
 	case cmdAssignTopic:
-		partitions := cmd.TopicConfig.Partitions
-		if partitions <= 0 {
-			partitions = 1
+		if cmd.Topic == "" {
+			err = fmt.Errorf("topic name is required")
+			break
 		}
 
-		newParts := assignTopicPartitions(f.cfg, f.meta.Brokers, cmd.Topic, partitions, cmd.TopicConfig.ReplicationFactor, f.meta.Partitions)
+		if topicAssigned(f.meta.Partitions, cmd.Topic) {
+			err = ErrTopicExists
+			break
+		}
+
+		if cmd.TopicConfig.Partitions < 0 {
+			err = fmt.Errorf("partitions must be >= 0")
+			break
+		}
+
+		normalizedCfg := normalizeTopicConfig(f.cfg.ReplicationFactor, cmd.TopicConfig)
+
+		newParts := assignTopicPartitions(f.cfg, f.meta.Brokers, cmd.Topic, normalizedCfg.Partitions, normalizedCfg.ReplicationFactor, f.meta.Partitions)
 		f.meta.Partitions = append(f.meta.Partitions, newParts...)
 		f.meta.Version++
 	case cmdReportReplicaProgress:
@@ -150,6 +162,10 @@ func (f *raftMetadataFSM) applyReplicaProgressLocked(
 }
 
 func (f *raftMetadataFSM) applyRegisterBrokerLocked(info api.BrokerInfo) error {
+	if info.BrokerID <= 0 {
+		return fmt.Errorf("invalid broker id %d", info.BrokerID)
+	}
+
 	updated := false
 
 	for i, b := range f.meta.Brokers {
@@ -263,6 +279,16 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 	if err != nil {
 		return nil, err
 	}
+	initOK := false
+	defer func() {
+		if initOK {
+			return
+		}
+
+		for _, cl := range closers {
+			_ = cl.Close()
+		}
+	}()
 
 	transport, resolvedAddr, err := newRaftTransport(cfg, rCfg, useInmem)
 	if err != nil {
@@ -287,6 +313,8 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 	if err != nil {
 		return nil, err
 	}
+
+	initOK = true
 
 	return &RaftController{cfg: cfg, fsm: fsm, raft: r, pub: &pub, closers: closers}, nil
 }
@@ -587,7 +615,7 @@ func (c *RaftController) SnapshotDump() ([]byte, error) {
 }
 
 // ControllerMode returns the configured controller mode.
-func (c *RaftController) ControllerMode() string { return "raft" }
+func (c *RaftController) ControllerMode() string { return api.ControllerModeRaft }
 
 // RaftState returns the current raft state as string.
 func (c *RaftController) RaftState() string { return c.raft.State().String() }

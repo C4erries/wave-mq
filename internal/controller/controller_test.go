@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 )
 
 func TestSingleNodeControllerBuildsMetadata(t *testing.T) {
+	t.Parallel()
+
 	topics := map[string]metadata.TopicState{
 		"alpha": {
 			Name:              "alpha",
@@ -73,6 +76,8 @@ func TestSingleNodeControllerBuildsMetadata(t *testing.T) {
 }
 
 func TestStaticClusterAssignmentsRoundRobin(t *testing.T) {
+	t.Parallel()
+
 	topics := map[string]metadata.TopicState{
 		"alpha": {
 			Name:              "alpha",
@@ -144,6 +149,8 @@ func TestStaticClusterAssignmentsRoundRobin(t *testing.T) {
 }
 
 func TestReportReplicaProgressAddsToISR(t *testing.T) {
+	t.Parallel()
+
 	topics := map[string]metadata.TopicState{
 		"alpha": {
 			Name:              "alpha",
@@ -192,6 +199,8 @@ func TestReportReplicaProgressAddsToISR(t *testing.T) {
 }
 
 func TestReportReplicaProgressRemovesFromISR(t *testing.T) {
+	t.Parallel()
+
 	topics := map[string]metadata.TopicState{
 		"alpha": {
 			Name:              "alpha",
@@ -240,6 +249,8 @@ func TestReportReplicaProgressRemovesFromISR(t *testing.T) {
 }
 
 func TestReportReplicaProgressRejectsUnknownReplica(t *testing.T) {
+	t.Parallel()
+
 	topics := map[string]metadata.TopicState{
 		"alpha": {
 			Name:              "alpha",
@@ -266,6 +277,8 @@ func TestReportReplicaProgressRejectsUnknownReplica(t *testing.T) {
 }
 
 func TestAssignTopicUpdatesMetadata(t *testing.T) {
+	t.Parallel()
+
 	cfg := api.BrokerConfig{BrokerID: 1, ClusterID: "assign-1"}
 
 	ctrl, err := NewSingleNodeController(cfg, map[string]metadata.TopicState{})
@@ -320,6 +333,8 @@ func TestAssignTopicUpdatesMetadata(t *testing.T) {
 }
 
 func TestAssignTopicSingleNodeReplicationFactorTruncates(t *testing.T) {
+	t.Parallel()
+
 	cfg := api.BrokerConfig{BrokerID: 1, ReplicationFactor: 1}
 
 	ctrl, err := NewSingleNodeController(cfg, map[string]metadata.TopicState{})
@@ -348,6 +363,8 @@ func TestAssignTopicSingleNodeReplicationFactorTruncates(t *testing.T) {
 }
 
 func TestAssignTopicStaticClusterReplicationFactor(t *testing.T) {
+	t.Parallel()
+
 	cfg := api.BrokerConfig{
 		BrokerID: 1,
 		StaticCluster: &api.StaticClusterConfig{
@@ -401,6 +418,8 @@ func TestAssignTopicStaticClusterReplicationFactor(t *testing.T) {
 }
 
 func TestRecoveredAssignmentsUseReplicationFactor(t *testing.T) {
+	t.Parallel()
+
 	topics := map[string]metadata.TopicState{
 		"alpha": {
 			Name:              "alpha",
@@ -462,6 +481,8 @@ func TestRecoveredAssignmentsUseReplicationFactor(t *testing.T) {
 }
 
 func TestSingleNodeControllerWatchStreamsUpdates(t *testing.T) {
+	t.Parallel()
+
 	cfg := api.BrokerConfig{BrokerID: 1, ClusterID: "watch-1"}
 
 	ctrl, err := NewSingleNodeController(cfg, map[string]metadata.TopicState{})
@@ -511,4 +532,87 @@ func TestSingleNodeControllerWatchStreamsUpdates(t *testing.T) {
 	}
 
 	awaitVersion(3)
+}
+
+func TestSingleNodeControllerAssignTopicRejectsDuplicate(t *testing.T) {
+	t.Parallel()
+
+	cfg := api.BrokerConfig{BrokerID: 1, ClusterID: "dup-1"}
+	ctrl, err := NewSingleNodeController(cfg, map[string]metadata.TopicState{})
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
+
+	ctx := context.Background()
+
+	if _, err := ctrl.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("assign alpha first: %v", err)
+	}
+
+	_, err = ctrl.AssignTopic(ctx, "alpha", api.TopicConfig{Partitions: 1})
+	if !errors.Is(err, ErrTopicExists) {
+		t.Fatalf("expected ErrTopicExists, got %v", err)
+	}
+}
+
+func TestSingleNodeControllerRegisterBrokerUpdatesMetadata(t *testing.T) {
+	t.Parallel()
+
+	cfg := api.BrokerConfig{
+		BrokerID: 1,
+		StaticCluster: &api.StaticClusterConfig{
+			ClusterID: "cluster-reg",
+			Brokers: []api.BrokerInfo{
+				{BrokerID: 1, Host: "b1"},
+				{BrokerID: 2, Host: "b2"},
+			},
+		},
+	}
+
+	ctrl, err := NewSingleNodeController(cfg, map[string]metadata.TopicState{})
+	if err != nil {
+		t.Fatalf("controller: %v", err)
+	}
+
+	ctx := context.Background()
+
+	initial, err := ctrl.GetClusterMetadata(ctx)
+	if err != nil {
+		t.Fatalf("get metadata: %v", err)
+	}
+
+	err = ctrl.RegisterBroker(ctx, api.BrokerInfo{
+		BrokerID:       2,
+		Host:           "b2-new",
+		HTTPAddr:       "b2:18090",
+		ControllerAddr: "b2:9001",
+	})
+	if err != nil {
+		t.Fatalf("register broker: %v", err)
+	}
+
+	updated, err := ctrl.GetClusterMetadata(ctx)
+	if err != nil {
+		t.Fatalf("get updated metadata: %v", err)
+	}
+
+	if updated.Version != initial.Version+1 {
+		t.Fatalf("expected version increment from %d to %d, got %d", initial.Version, initial.Version+1, updated.Version)
+	}
+
+	var broker2 *api.BrokerInfo
+	for i := range updated.Brokers {
+		if updated.Brokers[i].BrokerID == 2 {
+			broker2 = &updated.Brokers[i]
+			break
+		}
+	}
+
+	if broker2 == nil {
+		t.Fatalf("broker 2 not found in metadata: %+v", updated.Brokers)
+	}
+
+	if broker2.HTTPAddr != "b2:18090" || broker2.ControllerAddr != "b2:9001" {
+		t.Fatalf("broker metadata not updated: %+v", *broker2)
+	}
 }
