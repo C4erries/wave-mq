@@ -3,8 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -41,21 +43,32 @@ func (s *stats) add(d time.Duration) {
 }
 
 func main() {
-	cfg := parseFlags()
-	runBenchmark(cfg)
+	cfg, err := parseFlags(os.Args[1:])
+	if err != nil {
+		log.Fatalf("parse flags: %v", err)
+	}
+
+	if err := runBenchmark(cfg); err != nil {
+		log.Fatalf("benchmark failed: %v", err)
+	}
 }
 
-func parseFlags() benchConfig {
-	brokerAddr := flag.String("broker", "127.0.0.1:7912", "binary protocol address")
-	topic := flag.String("topic", "bench", "topic name")
-	partition := flag.Int("partition", 0, "partition id")
-	messages := flag.Int("messages", 10000, "number of messages")
-	valueSize := flag.Int("value-size", 100, "payload size in bytes")
-	concurrency := flag.Int("concurrency", 4, "producer goroutines")
+func parseFlags(args []string) (benchConfig, error) {
+	fs := flag.NewFlagSet("mbbench", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
 
-	flag.Parse()
+	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address")
+	topic := fs.String("topic", "bench", "topic name")
+	partition := fs.Int("partition", 0, "partition id")
+	messages := fs.Int("messages", 10000, "number of messages")
+	valueSize := fs.Int("value-size", 100, "payload size in bytes")
+	concurrency := fs.Int("concurrency", 4, "producer goroutines")
 
-	return benchConfig{
+	if err := fs.Parse(args); err != nil {
+		return benchConfig{}, err
+	}
+
+	cfg := benchConfig{
 		brokerAddr:  *brokerAddr,
 		topic:       *topic,
 		partition:   *partition,
@@ -63,9 +76,34 @@ func parseFlags() benchConfig {
 		valueSize:   *valueSize,
 		concurrency: *concurrency,
 	}
+
+	if err := validateBenchConfig(cfg); err != nil {
+		return benchConfig{}, err
+	}
+
+	return cfg, nil
 }
 
-func runBenchmark(cfg benchConfig) {
+func validateBenchConfig(cfg benchConfig) error {
+	switch {
+	case cfg.brokerAddr == "":
+		return fmt.Errorf("broker is required")
+	case cfg.topic == "":
+		return fmt.Errorf("topic is required")
+	case cfg.partition < 0:
+		return fmt.Errorf("partition must be >= 0")
+	case cfg.messages <= 0:
+		return fmt.Errorf("messages must be > 0")
+	case cfg.valueSize <= 0:
+		return fmt.Errorf("value-size must be > 0")
+	case cfg.concurrency <= 0:
+		return fmt.Errorf("concurrency must be > 0")
+	default:
+		return nil
+	}
+}
+
+func runBenchmark(cfg benchConfig) error {
 	// Ensure topic exists
 	if err := createTopic(cfg.brokerAddr, cfg.topic, 1); err != nil {
 		log.Printf("create-topic warning: %v", err)
@@ -88,6 +126,8 @@ func runBenchmark(cfg benchConfig) {
 
 	wg.Wait()
 	printStats(&st, cfg.concurrency, time.Since(start))
+
+	return nil
 }
 
 func buildWorkQueue(messages int) <-chan struct{} {
@@ -109,7 +149,7 @@ func runProducer(wg *sync.WaitGroup, st *stats, cfg benchConfig, payload []byte,
 		log.Printf("dial: %v", err)
 		return
 	}
-	defer conn.Close()
+	defer closeConnWithLog(conn)
 
 	for range work {
 		req := &netproto.ProduceRequest{
@@ -117,8 +157,18 @@ func runProducer(wg *sync.WaitGroup, st *stats, cfg benchConfig, payload []byte,
 			Partition: cfg.partition,
 			Records:   []api.Record{{Value: payload}},
 		}
-		payloadBytes, _ := netproto.EncodeProduceRequest(req)
-		frame, _ := netproto.EncodeRequestFrame(api.APIKeyProduce, 1, payloadBytes)
+		payloadBytes, err := netproto.EncodeProduceRequest(req)
+		if err != nil {
+			log.Printf("encode produce request: %v", err)
+			return
+		}
+
+		frame, err := netproto.EncodeRequestFrame(api.APIKeyProduce, 1, payloadBytes)
+		if err != nil {
+			log.Printf("encode produce frame: %v", err)
+			return
+		}
+
 		startOp := time.Now()
 
 		if _, err := conn.Write(frame); err != nil {
@@ -159,12 +209,19 @@ func createTopic(addr, topic string, partitions int) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer closeConnWithLog(conn)
 
 	req := &netproto.CreateTopicRequest{Topic: topic, Partitions: partitions, ReplicationFactor: 1}
-	payload, _ := netproto.EncodeCreateTopicRequest(req)
+	payload, err := netproto.EncodeCreateTopicRequest(req)
+	if err != nil {
+		return err
+	}
 
-	frame, _ := netproto.EncodeRequestFrame(api.APIKeyCreateTopic, 1, payload)
+	frame, err := netproto.EncodeRequestFrame(api.APIKeyCreateTopic, 1, payload)
+	if err != nil {
+		return err
+	}
+
 	if _, err := conn.Write(frame); err != nil {
 		return err
 	}
@@ -184,4 +241,10 @@ func createTopic(addr, topic string, partitions int) error {
 	}
 
 	return nil
+}
+
+func closeConnWithLog(conn net.Conn) {
+	if err := conn.Close(); err != nil {
+		log.Printf("close connection: %v", err)
+	}
 }

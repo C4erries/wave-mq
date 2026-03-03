@@ -3,6 +3,7 @@ package mqtt
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +18,7 @@ type fakeBroker struct {
 	mu        sync.Mutex
 	records   map[string]map[int][]api.Record
 	fetches   int
+	fetchErr  error
 	produced  int
 	committed map[string]map[string]map[int]api.Offset
 	commits   []api.Offset
@@ -61,6 +63,9 @@ func (b *fakeBroker) Fetch(ctx context.Context, topic string, partition int, off
 	defer b.mu.Unlock()
 
 	b.fetches++
+	if b.fetchErr != nil {
+		return nil, b.fetchErr
+	}
 
 	parts := b.records[topic][partition]
 	if int(offset) >= len(parts) {
@@ -244,8 +249,8 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 	}
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer mustCloseConn(t, client, "client")
+	defer mustCloseConn(t, server, "server")
 
 	go srv.handleConnection(server)
 
@@ -255,7 +260,9 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 		}
 	}
 	readPacketType := func() (byte, []byte, error) {
-		_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			return 0, nil, err
+		}
 
 		var header [1]byte
 		if _, err := client.Read(header[:]); err != nil {
@@ -279,11 +286,15 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 
 	// CONNECT
 	connectBody := &bytes.Buffer{}
-	_ = writeString(connectBody, "MQTT")
+	if err := writeString(connectBody, "MQTT"); err != nil {
+		t.Fatalf("write protocol name: %v", err)
+	}
 	connectBody.WriteByte(4)
 	connectBody.WriteByte(0b00000010) // clean start
 	connectBody.Write([]byte{0, 10})  // keepalive
-	_ = writeString(connectBody, "client-1")
+	if err := writeString(connectBody, "client-1"); err != nil {
+		t.Fatalf("write client id: %v", err)
+	}
 	connectHeader := make([]byte, 0, 1+4)
 	connectHeader = append(connectHeader, packetTypeCONNECT<<4)
 	connectHeader = append(connectHeader, encodeRemainingLength(connectBody.Len())...)
@@ -301,7 +312,9 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 	// SUBSCRIBE to t/1
 	subBody := &bytes.Buffer{}
 	subBody.Write([]byte{0, 1}) // packet ID
-	_ = writeString(subBody, "t/1")
+	if err := writeString(subBody, "t/1"); err != nil {
+		t.Fatalf("write subscribe topic: %v", err)
+	}
 	subBody.WriteByte(0) // QoS0
 
 	subHeader := make([]byte, 0, 1+4)
@@ -337,7 +350,10 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 		}
 
 		buf := bytes.NewBuffer(body)
-		topic, _ := readString(buf)
+		topic, err := readString(buf)
+		if err != nil {
+			t.Fatalf("decode publish topic: %v", err)
+		}
 
 		payload := buf.Bytes()
 		if topic == "t/1" && string(payload) == "hello" {
@@ -351,7 +367,9 @@ func TestMQTTServerBasicFlow(t *testing.T) {
 
 	// Send PUBLISH QoS1 to server
 	pubBody := &bytes.Buffer{}
-	_ = writeString(pubBody, "t/1")
+	if err := writeString(pubBody, "t/1"); err != nil {
+		t.Fatalf("write publish topic: %v", err)
+	}
 	pubBody.Write([]byte{0, 10}) // packet ID
 	pubBody.WriteString("from-client")
 
@@ -437,7 +455,9 @@ func TestMQTTServerTailVsBacklog(t *testing.T) {
 
 	makeConnect := func(cleanStart bool) []byte {
 		body := &bytes.Buffer{}
-		_ = writeString(body, "MQTT")
+		if err := writeString(body, "MQTT"); err != nil {
+			t.Fatalf("write protocol name: %v", err)
+		}
 		body.WriteByte(4)
 
 		flags := byte(0)
@@ -447,7 +467,9 @@ func TestMQTTServerTailVsBacklog(t *testing.T) {
 
 		body.WriteByte(flags)
 		body.Write([]byte{0, 10})
-		_ = writeString(body, "client-1")
+		if err := writeString(body, "client-1"); err != nil {
+			t.Fatalf("write client id: %v", err)
+		}
 		header := make([]byte, 0, 1+4)
 		header = append(header, packetTypeCONNECT<<4)
 		header = append(header, encodeRemainingLength(body.Len())...)
@@ -458,7 +480,9 @@ func TestMQTTServerTailVsBacklog(t *testing.T) {
 	subscribe := func(conn net.Conn) error {
 		subBody := &bytes.Buffer{}
 		subBody.Write([]byte{0, 1})
-		_ = writeString(subBody, "topic")
+		if err := writeString(subBody, "topic"); err != nil {
+			return err
+		}
 		subBody.WriteByte(0) // QoS0
 
 		subHeader := make([]byte, 0, 1+4)
@@ -471,18 +495,25 @@ func TestMQTTServerTailVsBacklog(t *testing.T) {
 
 	// Backlog mode (CleanStart=false): should read old messages
 	client1, server1 := net.Pipe()
-	defer client1.Close()
-	defer server1.Close()
+	defer mustCloseConn(t, client1, "client1")
+	defer mustCloseConn(t, server1, "server1")
 
-	srv, _ := NewServer("localhost:0", b)
+	srv, err := NewServer("localhost:0", b)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
 	go srv.handleConnection(server1)
 
-	_, _ = client1.Write(makeConnect(false))
+	if _, err := client1.Write(makeConnect(false)); err != nil {
+		t.Fatalf("write connect (client1): %v", err)
+	}
 	if _, _, err := readPacketTypeClient(client1); err != nil {
 		t.Fatalf("connack read (client1): %v", err)
 	}
 
-	_ = subscribe(client1)
+	if err := subscribe(client1); err != nil {
+		t.Fatalf("write subscribe (client1): %v", err)
+	}
 	if _, _, err := readPacketTypeClient(client1); err != nil {
 		t.Fatalf("suback read (client1): %v", err)
 	}
@@ -493,29 +524,39 @@ func TestMQTTServerTailVsBacklog(t *testing.T) {
 	}
 
 	buf := bytes.NewBuffer(body)
-	_, _ = readString(buf)
+	if _, err := readString(buf); err != nil {
+		t.Fatalf("decode backlog publish topic: %v", err)
+	}
 
 	payload := buf.Bytes()
 	if string(payload) != "old1" {
 		t.Fatalf("expected old1, got %s", string(payload))
 	}
 
-	client1.Close()
-	server1.Close()
+	if err := client1.Close(); err != nil {
+		t.Fatalf("close client1: %v", err)
+	}
+	if err := server1.Close(); err != nil {
+		t.Fatalf("close server1: %v", err)
+	}
 
 	// Tail-only (CleanStart=true): start after latest
 	client2, server2 := net.Pipe()
-	defer client2.Close()
-	defer server2.Close()
+	defer mustCloseConn(t, client2, "client2")
+	defer mustCloseConn(t, server2, "server2")
 
 	go srv.handleConnection(server2)
 
-	_, _ = client2.Write(makeConnect(true))
+	if _, err := client2.Write(makeConnect(true)); err != nil {
+		t.Fatalf("write connect (client2): %v", err)
+	}
 	if _, _, err := readPacketTypeClient(client2); err != nil {
 		t.Fatalf("connack read (client2): %v", err)
 	}
 
-	_ = subscribe(client2)
+	if err := subscribe(client2); err != nil {
+		t.Fatalf("write subscribe (client2): %v", err)
+	}
 	if _, _, err := readPacketTypeClient(client2); err != nil {
 		t.Fatalf("suback read (client2): %v", err)
 	}
@@ -528,7 +569,9 @@ func TestMQTTServerTailVsBacklog(t *testing.T) {
 	}
 
 	buf = bytes.NewBuffer(body)
-	_, _ = readString(buf)
+	if _, err := readString(buf); err != nil {
+		t.Fatalf("decode tail publish topic: %v", err)
+	}
 
 	payload = buf.Bytes()
 	if string(payload) != "new" {
@@ -536,11 +579,74 @@ func TestMQTTServerTailVsBacklog(t *testing.T) {
 	}
 }
 
+func TestConsumeLoopStopsPromptlyOnCancelDuringWait(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		fetchErr error
+	}{
+		{name: "fetch error backoff", fetchErr: fmt.Errorf("fetch failed")},
+		{name: "empty poll wait"},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			b := newFakeBroker()
+			b.fetchErr = tc.fetchErr
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			state := &clientState{
+				ctx:    ctx,
+				cancel: cancel,
+				broker: b,
+				opts: ServerOptions{
+					EmptyPollInterval:  time.Second,
+					FetchErrorBackoff:  time.Second,
+					QoS1RetryInterval:  time.Second,
+					CommitRetryBackoff: time.Second,
+				},
+				subs:             make(map[string]subscriptionState),
+				outboundQoS1Acks: make(map[uint16]outboundQoS1),
+				inboundQoS1Seen:  make(map[uint16]uint64),
+			}
+
+			done := make(chan struct{})
+			go func() {
+				state.consumeLoop(ctx, "topic", subscriptionState{
+					topic:     "topic",
+					partition: 0,
+					qos:       qos0,
+					offset:    0,
+				})
+				close(done)
+			}()
+
+			waitForCondition(t, 500*time.Millisecond, func() bool { return b.fetchCount() > 0 }, "expected consume loop fetch")
+
+			cancel()
+
+			select {
+			case <-done:
+			case <-time.After(200 * time.Millisecond):
+				t.Fatalf("consume loop did not stop promptly after cancel")
+			}
+		})
+	}
+}
+
 // readPacketTypeClient is a helper similar to the inline one in basic flow.
 func readPacketTypeClient(c net.Conn) (byte, []byte, error) {
 	var header [1]byte
 
-	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := c.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return 0, nil, err
+	}
 	if _, err := c.Read(header[:]); err != nil {
 		return 0, nil, err
 	}
@@ -558,4 +664,16 @@ func readPacketTypeClient(c net.Conn) (byte, []byte, error) {
 	}
 
 	return tp, body, nil
+}
+
+func mustCloseConn(t *testing.T, conn net.Conn, name string) {
+	t.Helper()
+
+	if conn == nil {
+		return
+	}
+
+	if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("close %s: %v", name, err)
+	}
 }

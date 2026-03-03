@@ -93,7 +93,12 @@ func TestPostRegisterBrokerToLeaderSendsExtendedPayload(t *testing.T) {
 }
 
 type fakeCtrl struct {
-	meta api.ClusterMetadata
+	meta          api.ClusterMetadata
+	mode          string
+	state         string
+	leader        string
+	registerErr   error
+	registerCalls int
 }
 
 func (f *fakeCtrl) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
@@ -116,7 +121,9 @@ func (f *fakeCtrl) RegisterBroker(ctx context.Context, info api.BrokerInfo) erro
 	_ = ctx
 	_ = info
 
-	return nil
+	f.registerCalls++
+
+	return f.registerErr
 }
 
 func (f *fakeCtrl) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
@@ -143,6 +150,26 @@ func (f *fakeCtrl) ReportReplicaProgress(
 	_ = leaderHighWatermark
 
 	return f.meta, nil
+}
+
+func (f *fakeCtrl) ControllerMode() string {
+	if f.mode == "" {
+		return "single"
+	}
+
+	return f.mode
+}
+
+func (f *fakeCtrl) RaftState() string {
+	if f.state == "" {
+		return "follower"
+	}
+
+	return f.state
+}
+
+func (f *fakeCtrl) RaftLeader() string {
+	return f.leader
 }
 
 func TestLeaderRegisterBrokerURLUsesLeaderHTTPAddrFromMetadata(t *testing.T) {
@@ -254,5 +281,22 @@ func TestRunReturnsStorageInitError(t *testing.T) {
 	}, factory)
 	if !errors.Is(err, want) {
 		t.Fatalf("run err = %v, want %v", err, want)
+	}
+}
+
+func TestRegisterBrokerWithRaftReturnsContextCanceled(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctrl := &fakeCtrl{
+		mode:   "raft",
+		state:  "follower",
+		leader: "",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := registerBrokerWithRaft(ctx, logger, ctrl, api.BrokerConfig{ControllerMode: "raft"}, api.BrokerInfo{BrokerID: 1})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("registerBrokerWithRaft err = %v, want %v", err, context.Canceled)
 	}
 }

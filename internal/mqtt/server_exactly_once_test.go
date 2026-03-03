@@ -25,13 +25,13 @@ func TestMQTTQoS1CommitOnlyAfterPuback(t *testing.T) {
 	}
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer mustCloseConn(t, client, "client")
+	defer mustCloseConn(t, server, "server")
 
 	go srv.handleConnection(server)
 
 	mustWritePacket(t, client, buildConnectPacket("client-qos1", false))
-	_ = mustReadConnack(t, client)
+	mustReadConnack(t, client)
 
 	mustWritePacket(t, client, buildSubscribePacket(1, "topic", qos1))
 
@@ -82,13 +82,16 @@ func TestMQTTQoS1RedeliveryAfterReconnectWithoutPuback(t *testing.T) {
 	}
 
 	client1, server1 := net.Pipe()
+	defer mustCloseConn(t, client1, "client1")
+	defer mustCloseConn(t, server1, "server1")
+
 	go srv.handleConnection(server1)
 
 	mustWritePacket(t, client1, buildConnectPacket("client-resume", false))
-	_ = mustReadConnack(t, client1)
+	mustReadConnack(t, client1)
 
 	mustWritePacket(t, client1, buildSubscribePacket(1, "topic", qos1))
-	_ = mustReadSuback(t, client1)
+	mustReadSuback(t, client1)
 
 	b.appendRecord("topic", 0, 0, []byte("event-1"))
 
@@ -97,8 +100,12 @@ func TestMQTTQoS1RedeliveryAfterReconnectWithoutPuback(t *testing.T) {
 		t.Fatalf("unexpected first publish payload: %q", string(pub1.Payload))
 	}
 
-	_ = client1.Close()
-	_ = server1.Close()
+	if err := client1.Close(); err != nil {
+		t.Fatalf("close client1: %v", err)
+	}
+	if err := server1.Close(); err != nil {
+		t.Fatalf("close server1: %v", err)
+	}
 
 	assertConditionStable(
 		t,
@@ -108,16 +115,16 @@ func TestMQTTQoS1RedeliveryAfterReconnectWithoutPuback(t *testing.T) {
 	)
 
 	client2, server2 := net.Pipe()
-	defer client2.Close()
-	defer server2.Close()
+	defer mustCloseConn(t, client2, "client2")
+	defer mustCloseConn(t, server2, "server2")
 
 	go srv.handleConnection(server2)
 
 	mustWritePacket(t, client2, buildConnectPacket("client-resume", false))
-	_ = mustReadConnack(t, client2)
+	mustReadConnack(t, client2)
 
 	mustWritePacket(t, client2, buildSubscribePacket(2, "topic", qos1))
-	_ = mustReadSuback(t, client2)
+	mustReadSuback(t, client2)
 
 	pub2 := mustReadPublish(t, client2)
 	if string(pub2.Payload) != "event-1" {
@@ -152,13 +159,13 @@ func TestMQTTQoS1IncomingDuplicateIsIdempotent(t *testing.T) {
 	}
 
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer mustCloseConn(t, client, "client")
+	defer mustCloseConn(t, server, "server")
 
 	go srv.handleConnection(server)
 
 	mustWritePacket(t, client, buildConnectPacket("publisher-1", true))
-	_ = mustReadConnack(t, client)
+	mustReadConnack(t, client)
 
 	first := &PublishPacket{
 		Topic:    "ingest",
@@ -410,7 +417,9 @@ func assertConditionStable(t *testing.T, window time.Duration, cond func() bool,
 
 func buildConnectPacket(clientID string, cleanStart bool) []byte {
 	body := &bytes.Buffer{}
-	_ = writeString(body, "MQTT")
+	if err := writeString(body, "MQTT"); err != nil {
+		panic(err)
+	}
 	body.WriteByte(4)
 
 	flags := byte(0)
@@ -420,7 +429,9 @@ func buildConnectPacket(clientID string, cleanStart bool) []byte {
 
 	body.WriteByte(flags)
 	body.Write([]byte{0, 10})
-	_ = writeString(body, clientID)
+	if err := writeString(body, clientID); err != nil {
+		panic(err)
+	}
 
 	header := make([]byte, 0, 1+4)
 	header = append(header, packetTypeCONNECT<<4)
@@ -431,8 +442,12 @@ func buildConnectPacket(clientID string, cleanStart bool) []byte {
 
 func buildSubscribePacket(packetID uint16, topic string, qos byte) []byte {
 	body := &bytes.Buffer{}
-	_ = binary.Write(body, binary.BigEndian, packetID)
-	_ = writeString(body, topic)
+	if err := binary.Write(body, binary.BigEndian, packetID); err != nil {
+		panic(err)
+	}
+	if err := writeString(body, topic); err != nil {
+		panic(err)
+	}
 	body.WriteByte(qos)
 
 	header := make([]byte, 0, 1+4)

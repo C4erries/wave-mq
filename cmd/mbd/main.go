@@ -195,7 +195,7 @@ func run(parentCtx context.Context, logger *slog.Logger, opts startupOptions, fa
 	if err != nil {
 		return fmt.Errorf("storage init failed: %w", err)
 	}
-	defer store.Close()
+	defer closeWithLog(logger, "storage manager", store.Close)
 
 	if err := store.Recover(parentCtx); err != nil {
 		return fmt.Errorf("storage recover failed: %w", err)
@@ -205,7 +205,7 @@ func run(parentCtx context.Context, logger *slog.Logger, opts startupOptions, fa
 	if err != nil {
 		return fmt.Errorf("metadata store init failed: %w", err)
 	}
-	defer metadataStore.Close()
+	defer closeWithLog(logger, "metadata store", metadataStore.Close)
 
 	recoveredTopics, err := metadataStore.RecoverTopics(parentCtx)
 	if err != nil {
@@ -247,25 +247,25 @@ func run(parentCtx context.Context, logger *slog.Logger, opts startupOptions, fa
 	if err != nil {
 		return fmt.Errorf("offset store init failed: %w", err)
 	}
-	defer offsetStore.Close()
+	defer closeWithLog(logger, "offset store", offsetStore.Close)
 
 	b, err := factory.newBroker(cfg, store, offsetStore, metadataStore, ctrl, &metaSnapshot)
 	if err != nil {
 		return fmt.Errorf("broker init failed: %w", err)
 	}
-	defer b.Close()
+	defer closeWithLog(logger, "broker", b.Close)
 
 	netServer, err := factory.newNetServer(cfg.BinaryAddr, b)
 	if err != nil {
 		return fmt.Errorf("netproto init failed: %w", err)
 	}
-	defer netServer.Close()
+	defer closeWithLog(logger, "netproto server", netServer.Close)
 
 	mqttServer, err := factory.newMQTTServer(cfg.MQTTAddr, b)
 	if err != nil {
 		return fmt.Errorf("mqtt init failed: %w", err)
 	}
-	defer mqttServer.Close()
+	defer closeWithLog(logger, "mqtt server", mqttServer.Close)
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
@@ -338,6 +338,8 @@ func run(parentCtx context.Context, logger *slog.Logger, opts startupOptions, fa
 func waitForSignal() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
 	<-sigCh
 }
 
@@ -384,7 +386,9 @@ func registerBrokerWithRaft(ctx context.Context, logger *slog.Logger, ctrl contr
 			}
 		}
 
-		time.Sleep(500 * time.Millisecond)
+		if err := waitWithContext(ctx, 500*time.Millisecond); err != nil {
+			return err
+		}
 	}
 
 	if lastErr == nil {
@@ -436,7 +440,11 @@ func postRegisterBrokerToLeader(
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			logger.Warn("failed to close leader register response body", "leader", leaderAddr, "err", closeErr)
+		}
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("leader register broker http status %d", resp.StatusCode)
@@ -583,5 +591,32 @@ func isWildcardHost(host string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func waitWithContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func closeWithLog(logger *slog.Logger, name string, closeFn func() error) {
+	if err := closeFn(); err != nil {
+		logger.Warn("close failed", "component", name, "err", err)
 	}
 }

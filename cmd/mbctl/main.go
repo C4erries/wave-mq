@@ -16,6 +16,11 @@ import (
 
 const maxInt32 = int(^uint32(0) >> 1)
 
+const (
+	defaultDialTimeout    = 5 * time.Second
+	defaultRequestTimeout = 10 * time.Second
+)
+
 type command struct {
 	name        string
 	description string
@@ -463,12 +468,20 @@ func sendPing(addr string) (*netproto.PingResponse, error) {
 	return netproto.DecodePingResponse(respPayload)
 }
 
-func sendRequest(addr string, apiKey api.APIKey, payloadFn func() ([]byte, error)) ([]byte, error) {
-	conn, err := net.Dial("tcp", addr)
+func sendRequest(addr string, apiKey api.APIKey, payloadFn func() ([]byte, error)) (respPayload []byte, err error) {
+	conn, err := (&net.Dialer{Timeout: defaultDialTimeout}).Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
+
+	if err := conn.SetDeadline(time.Now().Add(defaultRequestTimeout)); err != nil {
+		return nil, err
+	}
 
 	payload, err := payloadFn()
 	if err != nil {
@@ -484,7 +497,7 @@ func sendRequest(addr string, apiKey api.APIKey, payloadFn func() ([]byte, error
 		return nil, err
 	}
 
-	_, _, respPayload, err := netproto.DecodeResponseFrame(conn)
+	_, _, respPayload, err = netproto.DecodeResponseFrame(conn)
 
 	return respPayload, err
 }

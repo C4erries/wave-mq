@@ -618,8 +618,12 @@ func waitForDuration(ctx context.Context, delay time.Duration) bool {
 
 func publishFingerprint(topic string, payload []byte) uint64 {
 	hash := fnv.New64a()
-	_, _ = hash.Write([]byte(topic))
-	_, _ = hash.Write(payload)
+	if _, err := hash.Write([]byte(topic)); err != nil {
+		return 0
+	}
+	if _, err := hash.Write(payload); err != nil {
+		return 0
+	}
 
 	return hash.Sum64()
 }
@@ -645,8 +649,12 @@ func (s *Server) mapTopic(ctx context.Context, mqttTopic, clientID string) (stri
 	sort.Ints(partitions)
 
 	hash := fnv.New32a()
-	_, _ = hash.Write([]byte(mqttTopic))
-	_, _ = hash.Write([]byte(clientID))
+	if _, err := hash.Write([]byte(mqttTopic)); err != nil {
+		return "", 0, err
+	}
+	if _, err := hash.Write([]byte(clientID)); err != nil {
+		return "", 0, err
+	}
 	pid := int(hash.Sum32()) % len(partitions)
 
 	return mqttTopic, partitions[pid], nil

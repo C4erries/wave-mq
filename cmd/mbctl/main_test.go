@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"math"
 	"strings"
 	"testing"
 )
@@ -71,5 +72,45 @@ func TestRunCLIFetchRejectsTooLargeMaxBytes(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "max-bytes out of int32 range") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestToInt32(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		value   int
+		want    int32
+		wantErr bool
+	}{
+		{name: "zero", value: 0, want: 0},
+		{name: "max int32", value: math.MaxInt32, want: math.MaxInt32},
+		{name: "negative", value: -1, wantErr: true},
+		{name: "overflow", value: math.MaxInt32 + 1, wantErr: true},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := toInt32(tc.value, "field")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("toInt32(%d) expected error", tc.value)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("toInt32(%d) err = %v", tc.value, err)
+			}
+
+			if got != tc.want {
+				t.Fatalf("toInt32(%d) = %d, want %d", tc.value, got, tc.want)
+			}
+		})
 	}
 }
