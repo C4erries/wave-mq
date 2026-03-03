@@ -524,6 +524,10 @@ class MultiBlackboxSuite:
         self.wait_full_isr()
 
     def scenario_metrics(self) -> None:
+        summaries: dict[int, dict[str, Any]] = {}
+        produced_metrics: dict[int, float] = {}
+        consumed_metrics: dict[int, float] = {}
+
         for broker_id in (1, 2):
             summary = self.clients[broker_id].get_json("/api/summary")
             if not isinstance(summary, dict):
@@ -531,14 +535,37 @@ class MultiBlackboxSuite:
             for key in ("topics", "partitions", "produced", "consumed", "errors"):
                 if key not in summary:
                     raise BlackboxError(f"broker{broker_id} summary missing key {key!r}")
+            summaries[broker_id] = summary
 
             _, metrics = self.clients[broker_id].request("GET", "/metrics", expected_status=200)
             produced = sum_metric(metrics, "wavemq_messages_produced_total")
             consumed = sum_metric(metrics, "wavemq_messages_consumed_total")
+            produced_metrics[broker_id] = produced
+            consumed_metrics[broker_id] = consumed
             if produced <= 0:
                 raise BlackboxError(f"broker{broker_id} produced metric must be > 0")
             if consumed < 0:
                 raise BlackboxError(f"broker{broker_id} consumed metric must be >= 0")
+
+        expected_total = sum(self.expected_per_partition.values())
+        produced_summary_total = sum(float(s.get("produced", -1)) for s in summaries.values())
+        consumed_summary_total = sum(float(s.get("consumed", -1)) for s in summaries.values())
+        produced_metric_total = sum(produced_metrics.values())
+        consumed_metric_total = sum(consumed_metrics.values())
+
+        if expected_total > 0:
+            if produced_summary_total < expected_total:
+                raise BlackboxError(
+                    f"summary produced total {produced_summary_total} < expected at least {expected_total}"
+                )
+            if produced_metric_total < expected_total:
+                raise BlackboxError(
+                    f"metrics produced total {produced_metric_total} < expected at least {expected_total}"
+                )
+            if consumed_summary_total <= 0:
+                raise BlackboxError("summary consumed total must be > 0 after test flow")
+            if consumed_metric_total <= 0:
+                raise BlackboxError("metrics consumed total must be > 0 after test flow")
 
     restart_callback: Callable[[str], None] | None = None
 

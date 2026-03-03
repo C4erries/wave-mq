@@ -401,6 +401,13 @@ func (l *segmentedLog) openSegment(path string, base api.Offset, repair bool) (*
 		}
 	}
 
+	// AppendBatch writes with file.Write (current cursor based), so we must
+	// align the descriptor cursor with the validated tail after reopen/recover.
+	if _, err := f.Seek(goodBytes, io.SeekStart); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+
 	info, _ := f.Stat()
 
 	seg := &segment{

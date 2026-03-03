@@ -78,34 +78,34 @@ func (h *Handler) handleControllerStatus(w http.ResponseWriter, r *http.Request)
 	peers := []controller.PeerInfo{}
 	leader := ""
 	leaderID := ""
+	meta := api.ClusterMetadata{}
 
-	if rc, ok := h.ctrl.(interface {
-		ControllerMode() string
-		RaftState() string
-		RaftTerm() uint64
-		RaftPeers() []controller.PeerInfo
-	}); ok {
-		mode = rc.ControllerMode()
-		raftState = strings.ToLower(rc.RaftState())
-		term = rc.RaftTerm()
-		peers = rc.RaftPeers()
-	}
+	if h.ctrl != nil {
+		if rc, ok := h.ctrl.(interface {
+			ControllerMode() string
+			RaftState() string
+			RaftTerm() uint64
+			RaftPeers() []controller.PeerInfo
+		}); ok {
+			mode = rc.ControllerMode()
+			raftState = strings.ToLower(rc.RaftState())
+			term = rc.RaftTerm()
+			peers = rc.RaftPeers()
+		}
 
-	if rl, ok := h.ctrl.(interface {
-		RaftLeader() string
-	}); ok {
-		leader = rl.RaftLeader()
-	}
+		if rl, ok := h.ctrl.(interface {
+			RaftLeader() string
+		}); ok {
+			leader = rl.RaftLeader()
+		}
 
-	if rl, ok := h.ctrl.(interface {
-		RaftLeaderID() string
-	}); ok {
-		leaderID = rl.RaftLeaderID()
-	}
+		if rl, ok := h.ctrl.(interface {
+			RaftLeaderID() string
+		}); ok {
+			leaderID = rl.RaftLeaderID()
+		}
 
-	meta, _ := h.ctrl.GetClusterMetadata(r.Context())
-	if h.ctrl == nil {
-		meta = api.ClusterMetadata{}
+		meta, _ = h.ctrl.GetClusterMetadata(r.Context())
 	}
 
 	resp := map[string]interface{}{

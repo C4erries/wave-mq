@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -209,6 +210,87 @@ func TestRecoverTruncatesCorruptTail(t *testing.T) {
 	for i, r := range records {
 		if r.Offset != api.Offset(i) {
 			t.Fatalf("offset mismatch after recover at %d: %d", i, r.Offset)
+		}
+	}
+}
+
+func TestAppendAfterReopenPreservesExistingSegmentData(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1 << 20,
+		IndexInterval:   1,
+	}
+
+	first, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("first manager: %v", err)
+	}
+
+	log, err := first.OpenLog(LogOptions{Topic: "t1", Partition: 0})
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		if _, err := log.Append(ctx, api.Record{Value: []byte("before-" + strconv.Itoa(i))}); err != nil {
+			t.Fatalf("append before %d: %v", i, err)
+		}
+	}
+
+	if err := log.Close(); err != nil {
+		t.Fatalf("close first log: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first manager: %v", err)
+	}
+
+	second, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("second manager: %v", err)
+	}
+	defer second.Close()
+
+	log, err = second.OpenLog(LogOptions{Topic: "t1", Partition: 0})
+	if err != nil {
+		t.Fatalf("reopen log: %v", err)
+	}
+	defer log.Close()
+
+	for i := 0; i < 2; i++ {
+		if _, err := log.Append(ctx, api.Record{Value: []byte("after-" + strconv.Itoa(i))}); err != nil {
+			t.Fatalf("append after %d: %v", i, err)
+		}
+	}
+
+	records, err := log.Read(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("read after reopen append: %v", err)
+	}
+
+	if len(records) != 7 {
+		t.Fatalf("expected 7 records, got %d", len(records))
+	}
+
+	for i, rec := range records {
+		if rec.Offset != api.Offset(i) {
+			t.Fatalf("offset mismatch at %d: got %d", i, rec.Offset)
+		}
+	}
+
+	for i := 0; i < 5; i++ {
+		got := string(records[i].Value)
+		want := "before-" + strconv.Itoa(i)
+		if got != want {
+			t.Fatalf("before record %d mismatch: got %q want %q", i, got, want)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		got := string(records[5+i].Value)
+		want := "after-" + strconv.Itoa(i)
+		if got != want {
+			t.Fatalf("after record %d mismatch: got %q want %q", i, got, want)
 		}
 	}
 }

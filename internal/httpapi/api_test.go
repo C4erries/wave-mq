@@ -986,6 +986,77 @@ func TestControllerStatusEndpoint(t *testing.T) {
 	}
 }
 
+func TestControllerStatusEndpointWithoutController(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1 << 20,
+		IndexInterval:   1,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+
+	offsetStore, err := broker.NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
+
+	b, err := broker.NewBroker(api.BrokerConfig{
+		BrokerID:          1,
+		DataDir:           dir,
+		ReplicationFactor: 1,
+	}, store, offsetStore, metaStore, nil, nil)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+
+	cfg := api.BrokerConfig{
+		BrokerID:       1,
+		ControllerMode: "single",
+	}
+
+	handler := New(b, cfg, nil)
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+
+	defer func() {
+		server.Close()
+		b.Close()
+		store.Close()
+		offsetStore.Close()
+		metaStore.Close()
+	}()
+
+	resp, err := http.Get(server.URL + "/api/controller")
+	if err != nil {
+		t.Fatalf("get controller: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var status map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if status["mode"] != "single" {
+		t.Fatalf("expected mode single, got %v", status["mode"])
+	}
+	if status["raftState"] != "none" {
+		t.Fatalf("expected raftState none, got %v", status["raftState"])
+	}
+	if status["clusterID"] != "" {
+		t.Fatalf("expected empty clusterID, got %v", status["clusterID"])
+	}
+}
+
 func TestControllerStatusEndpointRaft(t *testing.T) {
 	dir := t.TempDir()
 
