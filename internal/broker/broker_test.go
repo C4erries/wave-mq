@@ -86,6 +86,7 @@ func (f *fakeClusterStore) WatchClusterMetadata(ctx context.Context, sinceVersio
 func (f *fakeClusterStore) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
 	_ = ctx
 	_ = info
+
 	return nil
 }
 
@@ -93,6 +94,7 @@ func (f *fakeClusterStore) AssignTopic(ctx context.Context, name string, cfg api
 	_ = ctx
 	_ = name
 	_ = cfg
+
 	return api.ClusterMetadata{}, nil
 }
 
@@ -110,6 +112,7 @@ func (f *fakeClusterStore) ReportReplicaProgress(
 	_ = brokerID
 	_ = lastOffset
 	_ = leaderHighWatermark
+
 	return api.ClusterMetadata{}, nil
 }
 
@@ -600,6 +603,7 @@ func TestProduceFetchConcurrentWithMetadataUpdates(t *testing.T) {
 	var wg sync.WaitGroup
 
 	wg.Add(1)
+
 	go func() {
 		defer wg.Done()
 
@@ -613,6 +617,7 @@ func TestProduceFetchConcurrentWithMetadataUpdates(t *testing.T) {
 	}()
 
 	wg.Add(1)
+
 	go func() {
 		defer wg.Done()
 
@@ -622,6 +627,7 @@ func TestProduceFetchConcurrentWithMetadataUpdates(t *testing.T) {
 	}()
 
 	wg.Add(1)
+
 	go func() {
 		defer wg.Done()
 

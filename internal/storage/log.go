@@ -146,6 +146,7 @@ func (m *Manager) OpenLog(opts LogOptions) (Log, error) {
 	if opts.RetentionBytes != 0 {
 		logCfg.MaxLogBytes = opts.RetentionBytes
 	}
+
 	if opts.RetentionTime != 0 {
 		logCfg.SegmentMaxAge = opts.RetentionTime
 	}

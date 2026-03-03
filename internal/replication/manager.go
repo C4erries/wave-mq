@@ -38,8 +38,10 @@ type ReplicationWorker interface {
 	Run(ctx context.Context) error
 }
 
-type SinkFactory func(topic string, partition int) Sink
-type WorkerFactory func(repl Replicator, leader api.BrokerInfo, topic string, partition int, sink Sink) ReplicationWorker
+type (
+	SinkFactory   func(topic string, partition int) Sink
+	WorkerFactory func(repl Replicator, leader api.BrokerInfo, topic string, partition int, sink Sink) ReplicationWorker
+)
 
 // NewManager prepares a replication manager.
 func NewManager(cfg api.BrokerConfig, store *storage.Manager, ctrl controller.MetadataStore, repl Replicator) *Manager {

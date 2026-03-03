@@ -86,6 +86,7 @@ func usage(w io.Writer) {
 	var b strings.Builder
 	b.WriteString("Usage: mbctl <command> [options]\n")
 	b.WriteString("Commands:\n")
+
 	for _, cmd := range commandList {
 		fmt.Fprintf(&b, "  %-14s %s\n", cmd.name, cmd.description)
 	}
@@ -96,6 +97,7 @@ func usage(w io.Writer) {
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
+
 	return fs
 }
 
@@ -104,6 +106,7 @@ func runCreateTopic(ctx *commandContext, args []string) error {
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name")
 	partitions := fs.Int("partitions", 1, "number of partitions")
+
 	replication := fs.Int("replication-factor", 1, "replication factor")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -128,6 +131,7 @@ func runCreateTopic(ctx *commandContext, args []string) error {
 	}
 
 	fmt.Fprintf(ctx.stdout, "topic %s created (partitions=%d rf=%d)\n", req.Topic, req.Partitions, req.ReplicationFactor)
+
 	return nil
 }
 
@@ -137,6 +141,7 @@ func runProduce(ctx *commandContext, args []string) error {
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
 	key := fs.String("key", "", "record key (optional)")
+
 	value := fs.String("value", "", "record value")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -165,6 +170,7 @@ func runProduce(ctx *commandContext, args []string) error {
 	}
 
 	fmt.Fprintf(ctx.stdout, "produced baseOffset=%d\n", resp.BaseOffset)
+
 	return nil
 }
 
@@ -174,6 +180,7 @@ func runFetch(ctx *commandContext, args []string) error {
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
 	offset := fs.Int64("offset", 0, "starting offset")
+
 	maxBytes := fs.Int("max-bytes", 1<<20, "max bytes to fetch")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -214,6 +221,7 @@ func runFetch(ctx *commandContext, args []string) error {
 func runMetadata(ctx *commandContext, args []string) error {
 	fs := newFlagSet("metadata", ctx.stderr)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
+
 	topic := fs.String("topic", "", "topic name (optional)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -245,6 +253,7 @@ func runListOffsets(ctx *commandContext, args []string) error {
 	fs := newFlagSet("list-offsets", ctx.stderr)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name")
+
 	partition := fs.Int("partition", 0, "partition id")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -266,6 +275,7 @@ func runListOffsets(ctx *commandContext, args []string) error {
 	}
 
 	fmt.Fprintf(ctx.stdout, "earliest=%d latest=%d\n", resp.Earliest, resp.Latest)
+
 	return nil
 }
 
@@ -275,6 +285,7 @@ func runCommitOffset(ctx *commandContext, args []string) error {
 	group := fs.String("group", "", "consumer group")
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
+
 	offset := fs.Int64("offset", 0, "offset to commit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -301,6 +312,7 @@ func runCommitOffset(ctx *commandContext, args []string) error {
 	}
 
 	fmt.Fprintln(ctx.stdout, "commit-offset ok")
+
 	return nil
 }
 
@@ -309,6 +321,7 @@ func runFetchCommitted(ctx *commandContext, args []string) error {
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	group := fs.String("group", "", "consumer group")
 	topic := fs.String("topic", "", "topic name")
+
 	partition := fs.Int("partition", 0, "partition id")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -334,17 +347,20 @@ func runFetchCommitted(ctx *commandContext, args []string) error {
 	}
 
 	fmt.Fprintf(ctx.stdout, "committed offset=%d\n", resp.Offset)
+
 	return nil
 }
 
 func runPing(ctx *commandContext, args []string) error {
 	fs := newFlagSet("ping", ctx.stderr)
+
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	start := ctx.now()
+
 	resp, err := sendPing(*brokerAddr)
 	if err != nil {
 		return err
@@ -355,6 +371,7 @@ func runPing(ctx *commandContext, args []string) error {
 	}
 
 	fmt.Fprintf(ctx.stdout, "pong rtt=%s\n", ctx.now().Sub(start))
+
 	return nil
 }
 

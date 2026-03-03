@@ -338,8 +338,10 @@ func (h *Handler) topicProduceByKey(w http.ResponseWriter, r *http.Request, topi
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
 				_, _ = w.Write(payload) // #nosec G705 -- payload is trusted JSON response from peer broker.
+
 				return
 			}
+
 			w.WriteHeader(http.StatusConflict)
 			writeJSON(w, map[string]interface{}{
 				"error":          "not_leader",
@@ -347,6 +349,7 @@ func (h *Handler) topicProduceByKey(w http.ResponseWriter, r *http.Request, topi
 				"topic":          topic,
 				"partition":      nle.Partition,
 			})
+
 			return
 		case errors.Is(err, broker.ErrTopicNotFound):
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -366,6 +369,7 @@ func (h *Handler) topicProduceByKey(w http.ResponseWriter, r *http.Request, topi
 func (h *Handler) topicMessagesAll(w http.ResponseWriter, r *http.Request, topic string) {
 	q := r.URL.Query()
 	limit := 50
+
 	if l := q.Get("limit"); l != "" {
 		if v, err := strconv.Atoi(l); err == nil && v > 0 {
 			limit = v
@@ -376,6 +380,7 @@ func (h *Handler) topicMessagesAll(w http.ResponseWriter, r *http.Request, topic
 	}
 
 	offsetParam := q.Get("offset")
+
 	partitions, err := h.topicPartitionIDs(r.Context(), topic)
 	if err != nil {
 		if errors.Is(err, broker.ErrTopicNotFound) {
@@ -384,6 +389,7 @@ func (h *Handler) topicMessagesAll(w http.ResponseWriter, r *http.Request, topic
 		}
 
 		http.Error(w, err.Error(), http.StatusBadRequest)
+
 		return
 	}
 
@@ -404,12 +410,15 @@ func (h *Handler) topicMessagesAll(w http.ResponseWriter, r *http.Request, topic
 						http.Error(w, "invalid leader payload", http.StatusBadGateway)
 						return
 					}
+
 					all = append(all, forwarded...)
+
 					continue
 				}
 			}
 
 			http.Error(w, err.Error(), http.StatusBadRequest)
+
 			return
 		}
 
@@ -418,6 +427,7 @@ func (h *Handler) topicMessagesAll(w http.ResponseWriter, r *http.Request, topic
 
 	sort.Slice(all, func(i, j int) bool {
 		ti := fmt.Sprint(all[i]["timestamp"])
+
 		tj := fmt.Sprint(all[j]["timestamp"])
 		if ti != tj {
 			return ti > tj
@@ -435,6 +445,7 @@ func (h *Handler) topicMessagesAll(w http.ResponseWriter, r *http.Request, topic
 
 func (h *Handler) topicPartitionIDs(ctx context.Context, topic string) ([]int, error) {
 	ids := make(map[int]struct{})
+
 	if h.ctrl != nil {
 		meta, err := h.ctrl.GetClusterMetadata(ctx)
 		if err == nil {
@@ -451,6 +462,7 @@ func (h *Handler) topicPartitionIDs(ctx context.Context, topic string) ([]int, e
 		if !ok {
 			return nil, fmt.Errorf("%w", broker.ErrTopicNotFound)
 		}
+
 		for _, p := range detail.Partitions {
 			ids[p.ID] = struct{}{}
 		}
@@ -464,6 +476,7 @@ func (h *Handler) topicPartitionIDs(ctx context.Context, topic string) ([]int, e
 	for pid := range ids {
 		partitions = append(partitions, pid)
 	}
+
 	sort.Ints(partitions)
 
 	return partitions, nil
@@ -498,6 +511,7 @@ func (h *Handler) partitionMessages(w http.ResponseWriter, r *http.Request, topi
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
 				_, _ = w.Write(payload) // #nosec G705 -- payload is trusted JSON response from peer broker.
+
 				return
 			}
 
@@ -854,6 +868,7 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
 				_, _ = w.Write(payload) // #nosec G705 -- payload is trusted JSON response from peer broker.
+
 				return
 			}
 
@@ -929,7 +944,7 @@ func (h *Handler) forwardPartitionMessagesToLeader(
 		u += "?" + raw
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, http.NoBody)
 	if err != nil {
 		return 0, nil, false
 	}
@@ -968,6 +983,7 @@ func (h *Handler) forwardPartitionProduceToLeader(
 	}
 
 	u := baseURL + "/" + url.PathEscape(topic) + "/partitions/" + strconv.Itoa(partition) + "/messages"
+
 	return h.forwardToURL(r, http.MethodPost, u, data)
 }
 
@@ -1001,6 +1017,7 @@ func (h *Handler) forwardTopicProduceToLeader(
 	}
 
 	u := baseURL + "/" + url.PathEscape(topic) + "/messages"
+
 	return h.forwardToURL(r, http.MethodPost, u, data)
 }
 
@@ -1061,6 +1078,7 @@ func (h *Handler) forwardToURL(r *http.Request, method, target string, body []by
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
 	req.Header.Set(forwardedCreateTopicHeader, "1")
 
 	return h.forwardRequest(req)
@@ -1100,6 +1118,7 @@ func sumCounter(metricName string) float64 {
 	var total float64
 
 	var collector prometheus.Collector
+
 	switch metricName {
 	case "wavemq_messages_produced_total":
 		collector = observability.MessagesProduced

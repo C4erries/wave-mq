@@ -242,6 +242,7 @@ func TestAppendAfterReopenPreservesExistingSegmentData(t *testing.T) {
 	if err := log.Close(); err != nil {
 		t.Fatalf("close first log: %v", err)
 	}
+
 	if err := first.Close(); err != nil {
 		t.Fatalf("close first manager: %v", err)
 	}
@@ -281,13 +282,16 @@ func TestAppendAfterReopenPreservesExistingSegmentData(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		got := string(records[i].Value)
+
 		want := "before-" + strconv.Itoa(i)
 		if got != want {
 			t.Fatalf("before record %d mismatch: got %q want %q", i, got, want)
 		}
 	}
+
 	for i := 0; i < 2; i++ {
 		got := string(records[5+i].Value)
+
 		want := "after-" + strconv.Itoa(i)
 		if got != want {
 			t.Fatalf("after record %d mismatch: got %q want %q", i, got, want)

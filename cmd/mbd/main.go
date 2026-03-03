@@ -163,6 +163,7 @@ func validateBrokerConfig(logger *slog.Logger, cfg api.BrokerConfig) error {
 	}
 
 	inPeers := false
+
 	for _, peer := range cfg.RaftPeers {
 		if peer == cfg.RaftBindAddr {
 			inPeers = true
@@ -179,6 +180,7 @@ func validateBrokerConfig(logger *slog.Logger, cfg api.BrokerConfig) error {
 
 func run(parentCtx context.Context, logger *slog.Logger, opts startupOptions, factory appFactory) error {
 	cfg := opts.cfg
+
 	var readyFlag atomic.Bool
 
 	store, err := factory.newStorageManager(storage.Config{
@@ -214,6 +216,7 @@ func run(parentCtx context.Context, logger *slog.Logger, opts startupOptions, fa
 	if err != nil {
 		return fmt.Errorf("controller init failed: %w", err)
 	}
+
 	logger.Info("controller initialized", "mode", cfg.ControllerMode)
 
 	brokerHost := cfg.AdvertisedAddr
@@ -230,12 +233,14 @@ func run(parentCtx context.Context, logger *slog.Logger, opts startupOptions, fa
 	if err := registerBrokerWithRaft(parentCtx, logger, ctrl, cfg, bInfo); err != nil {
 		return fmt.Errorf("broker registration failed: %w", err)
 	}
+
 	logger.Info("broker registered in controller", "brokerID", bInfo.BrokerID, "host", bInfo.Host)
 
 	metaSnapshot, err := ctrl.GetClusterMetadata(parentCtx)
 	if err != nil {
 		return fmt.Errorf("cluster metadata fetch failed: %w", err)
 	}
+
 	logger.Info("fetched initial cluster metadata", "version", metaSnapshot.Version, "partitions", len(metaSnapshot.Partitions))
 
 	offsetStore, err := factory.newOffsetStore(cfg.DataDir)
@@ -286,6 +291,7 @@ func run(parentCtx context.Context, logger *slog.Logger, opts startupOptions, fa
 	}
 
 	errCh := make(chan error, 4)
+
 	if cfg.Replication {
 		rep := factory.newReplicator()
 		replMgr := factory.newReplicationRunner(cfg, store, ctrl, rep)
@@ -297,6 +303,7 @@ func run(parentCtx context.Context, logger *slog.Logger, opts startupOptions, fa
 	}
 
 	ready := readyFlag.Load
+
 	go func() {
 		apiHandler := factory.newHTTPHandler(b, cfg, ctrl)
 		reportRunError("http server stopped", factory.startHTTPServer(ctx, cfg.HTTPAddr, ready, apiHandler.Register, nil), errCh)
@@ -311,8 +318,10 @@ func run(parentCtx context.Context, logger *slog.Logger, opts startupOptions, fa
 	readyFlag.Store(true)
 
 	signalCh := make(chan struct{}, 1)
+
 	go func() {
 		factory.waitForSignal()
+
 		signalCh <- struct{}{}
 	}()
 

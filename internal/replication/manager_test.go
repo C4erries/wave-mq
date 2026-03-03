@@ -275,6 +275,7 @@ func TestManagerStartsReplicatorsForFollowers(t *testing.T) {
 	waitForCondition(t, time.Second, func() bool {
 		repl.mu.Lock()
 		defer repl.mu.Unlock()
+
 		return len(repl.fetch) > 0
 	}, "expected at least one fetch from replicator for follower partition")
 
@@ -460,6 +461,7 @@ func TestManagerUsesInjectedFactories(t *testing.T) {
 			_ = topic
 			_ = partition
 			_ = sink
+
 			created <- struct{}{}
 
 			return &fakeWorker{runCh: make(chan struct{})}

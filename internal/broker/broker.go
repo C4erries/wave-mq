@@ -788,6 +788,7 @@ func (b *Broker) topicPartitionIDs(topic string) []int {
 		for pid := range assignments {
 			partitions = append(partitions, pid)
 		}
+
 		sort.Ints(partitions)
 
 		return partitions
@@ -1347,7 +1348,9 @@ func (b *Broker) TopicDetail(name string) (TopicDetail, bool) {
 				continue
 			}
 		}
+
 		meta := p.metadataSnapshot()
+
 		info := PartitionInfo{
 			ID:            pid,
 			Leader:        meta.Replica.BrokerID,

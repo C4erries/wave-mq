@@ -180,6 +180,7 @@ func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]b
 	_ = conn
 
 	ctx := context.Background()
+
 	handler, ok := s.handlers[apiKey]
 	if !ok {
 		return nil, fmt.Errorf("unknown api key %d", apiKey)
@@ -206,12 +207,15 @@ func (s *Server) handleCreateTopic(ctx context.Context, payload []byte) ([]byte,
 	if decoded == nil || err != nil {
 		return earlyResp, err
 	}
+
 	req := decoded.(*CreateTopicRequest)
 
 	resp := &CreateTopicResponse{}
+
 	err = s.broker.CreateTopic(ctx, req.Topic, api.TopicConfig{Partitions: req.Partitions, ReplicationFactor: req.ReplicationFactor})
 	if err != nil {
 		resp.Error = mapError(err)
+
 		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 	}
 
@@ -223,12 +227,15 @@ func (s *Server) handleProduce(ctx context.Context, payload []byte) ([]byte, err
 	if decoded == nil || err != nil {
 		return earlyResp, err
 	}
+
 	req := decoded.(*ProduceRequest)
 
 	base, err := s.broker.Produce(ctx, req.Topic, req.Partition, req.Records)
+
 	resp := &ProduceResponse{BaseOffset: base}
 	if err != nil {
 		resp.Error = mapError(err)
+
 		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 	}
 
@@ -240,12 +247,15 @@ func (s *Server) handleFetch(ctx context.Context, payload []byte) ([]byte, error
 	if decoded == nil || err != nil {
 		return earlyResp, err
 	}
+
 	req := decoded.(*FetchRequest)
 
 	recs, err := s.broker.Fetch(ctx, req.Topic, req.Partition, req.Offset, req.MaxBytes)
+
 	resp := &FetchResponse{Records: recs}
 	if err != nil {
 		resp.Error = mapError(err)
+
 		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 	} else {
 		_, latest, offErr := s.broker.ListOffsets(ctx, req.Topic, req.Partition)
@@ -262,12 +272,15 @@ func (s *Server) handleMetadata(ctx context.Context, payload []byte) ([]byte, er
 	if decoded == nil || err != nil {
 		return earlyResp, err
 	}
+
 	req := decoded.(*MetadataRequest)
 
 	md, err := s.broker.Metadata(ctx, req.Topics)
+
 	resp := &MetadataResponse{Partitions: md}
 	if err != nil {
 		resp.Error = mapError(err)
+
 		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 	}
 
@@ -288,11 +301,13 @@ func (s *Server) handleCommitOffset(ctx context.Context, payload []byte) ([]byte
 	if decoded == nil || err != nil {
 		return earlyResp, err
 	}
+
 	req := decoded.(*CommitOffsetRequest)
 
 	resp := &CommitOffsetResponse{}
 	if err := s.broker.CommitOffset(ctx, req.Group, req.Topic, req.Partition, req.Offset); err != nil {
 		resp.Error = mapError(err)
+
 		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 	}
 
@@ -304,12 +319,15 @@ func (s *Server) handleFetchCommitted(ctx context.Context, payload []byte) ([]by
 	if decoded == nil || err != nil {
 		return earlyResp, err
 	}
+
 	req := decoded.(*FetchCommittedRequest)
 
 	offset, err := s.broker.FetchCommitted(ctx, req.Group, req.Topic, req.Partition)
+
 	resp := &FetchCommittedResponse{Offset: offset}
 	if err != nil {
 		resp.Error = mapError(err)
+
 		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 	}
 
@@ -321,12 +339,15 @@ func (s *Server) handleListOffsets(ctx context.Context, payload []byte) ([]byte,
 	if decoded == nil || err != nil {
 		return earlyResp, err
 	}
+
 	req := decoded.(*ListOffsetsRequest)
 
 	earliest, latest, err := s.broker.ListOffsets(ctx, req.Topic, req.Partition)
+
 	resp := &ListOffsetsResponse{Earliest: earliest, Latest: latest}
 	if err != nil {
 		resp.Error = mapError(err)
+
 		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 	}
 
@@ -344,6 +365,7 @@ func decodeRequest[Req any](
 		observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
 
 		resp, respErr := errorRespFn(apiKey, api.ErrInvalidRequest)
+
 		return nil, resp, respErr
 	}
 

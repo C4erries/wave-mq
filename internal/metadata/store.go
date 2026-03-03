@@ -420,6 +420,7 @@ func encodeCreateTopicEvent(ev CreateTopicEvent) ([]byte, error) {
 
 func decodeCreateTopicEvent(version uint8, data []byte) (CreateTopicEvent, error) {
 	var ev CreateTopicEvent
+
 	switch version {
 	case eventVersionV1:
 		return decodeCreateTopicEventV1(data)

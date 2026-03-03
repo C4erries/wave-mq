@@ -1050,9 +1050,11 @@ func TestControllerStatusEndpointWithoutController(t *testing.T) {
 	if status["mode"] != "single" {
 		t.Fatalf("expected mode single, got %v", status["mode"])
 	}
+
 	if status["raftState"] != "none" {
 		t.Fatalf("expected raftState none, got %v", status["raftState"])
 	}
+
 	if status["clusterID"] != "" {
 		t.Fatalf("expected empty clusterID, got %v", status["clusterID"])
 	}
@@ -1202,6 +1204,7 @@ func TestTopicProduceByKeyEndpoint(t *testing.T) {
 
 	send := func(value string) map[string]interface{} {
 		body := []byte(`{"key":"sensor-7","value":"` + value + `"}`)
+
 		resp, err := http.Post(server.URL+"/api/topics/keyed/messages", "application/json", bytes.NewReader(body))
 		if err != nil {
 			t.Fatalf("post: %v", err)
@@ -1244,6 +1247,7 @@ func TestTopicMessagesEndpointAggregatesAllPartitions(t *testing.T) {
 	if _, err := b.Produce(ctx, "agg", 0, []api.Record{{Value: []byte("p0")}}); err != nil {
 		t.Fatalf("produce p0: %v", err)
 	}
+
 	if _, err := b.Produce(ctx, "agg", 1, []api.Record{{Value: []byte("p1")}}); err != nil {
 		t.Fatalf("produce p1: %v", err)
 	}
@@ -1269,6 +1273,7 @@ func TestTopicMessagesEndpointAggregatesAllPartitions(t *testing.T) {
 
 	hasP0 := false
 	hasP1 := false
+
 	for _, m := range out {
 		switch int(m["partition"].(float64)) {
 		case 0:
@@ -1566,7 +1571,7 @@ func TestForwardToURLUsesInjectedHTTPClient(t *testing.T) {
 		body:   `{"ok":true}`,
 	}
 	h := NewWithHTTPClient(nil, api.BrokerConfig{}, nil, doer)
-	req := httptest.NewRequest(http.MethodPost, "http://follower/api/topics", nil)
+	req := httptest.NewRequest(http.MethodPost, "http://follower/api/topics", http.NoBody)
 
 	status, payload, ok := h.forwardToURL(req, http.MethodPost, "http://leader/api/topics", []byte(`{"name":"t"}`))
 	if !ok {

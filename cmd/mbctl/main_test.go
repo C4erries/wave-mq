@@ -7,8 +7,10 @@ import (
 )
 
 func TestRunCLIShowsUsageWithoutArgs(t *testing.T) {
-	var out bytes.Buffer
-	var errOut bytes.Buffer
+	var (
+		out    bytes.Buffer
+		errOut bytes.Buffer
+	)
 
 	err := runCLI(nil, &out, &errOut)
 	if err != nil {
@@ -21,8 +23,10 @@ func TestRunCLIShowsUsageWithoutArgs(t *testing.T) {
 }
 
 func TestRunCLIUnknownCommand(t *testing.T) {
-	var out bytes.Buffer
-	var errOut bytes.Buffer
+	var (
+		out    bytes.Buffer
+		errOut bytes.Buffer
+	)
 
 	err := runCLI([]string{"unknown"}, &out, &errOut)
 	if err == nil {
@@ -39,8 +43,10 @@ func TestRunCLIUnknownCommand(t *testing.T) {
 }
 
 func TestRunCLIProduceRequiresTopic(t *testing.T) {
-	var out bytes.Buffer
-	var errOut bytes.Buffer
+	var (
+		out    bytes.Buffer
+		errOut bytes.Buffer
+	)
 
 	err := runCLI([]string{"produce", "-value", "v1"}, &out, &errOut)
 	if err == nil {
@@ -53,8 +59,10 @@ func TestRunCLIProduceRequiresTopic(t *testing.T) {
 }
 
 func TestRunCLIFetchRejectsTooLargeMaxBytes(t *testing.T) {
-	var out bytes.Buffer
-	var errOut bytes.Buffer
+	var (
+		out    bytes.Buffer
+		errOut bytes.Buffer
+	)
 
 	err := runCLI([]string{"fetch", "-topic", "t1", "-max-bytes", "2147483648"}, &out, &errOut)
 	if err == nil {
