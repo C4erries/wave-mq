@@ -1,6 +1,9 @@
 package api
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Offset is a logical position inside a partition log.
 // It starts from 0 and increases by one per record.
@@ -39,12 +42,77 @@ type BrokerConfig struct {
 	Replication       bool // enable follower replication manager
 }
 
+const (
+	ControllerModeSingle = "single"
+	ControllerModeRaft   = "raft"
+)
+
+// Validate checks base invariants for broker configuration.
+func (c BrokerConfig) Validate() error {
+	if c.BrokerID <= 0 {
+		return fmt.Errorf("broker id must be > 0")
+	}
+
+	if c.ReplicationFactor <= 0 {
+		return fmt.Errorf("replication factor must be > 0")
+	}
+
+	if c.MaxSegmentBytes < 0 {
+		return fmt.Errorf("max segment bytes must be >= 0")
+	}
+
+	if c.RetentionBytes < -1 {
+		return fmt.Errorf("retention bytes must be >= -1")
+	}
+
+	if c.RetentionTime < 0 {
+		return fmt.Errorf("retention time must be >= 0")
+	}
+
+	if !IsValidControllerMode(c.ControllerMode) {
+		return fmt.Errorf("invalid controller mode %q", c.ControllerMode)
+	}
+
+	return nil
+}
+
 // TopicConfig describes how a topic should be created.
 type TopicConfig struct {
 	Partitions        int
 	ReplicationFactor int
 	RetentionBytes    int64
 	RetentionTime     time.Duration
+}
+
+// Validate checks base invariants for topic configuration.
+func (c TopicConfig) Validate() error {
+	if c.Partitions <= 0 {
+		return fmt.Errorf("partitions must be > 0")
+	}
+
+	if c.ReplicationFactor <= 0 {
+		return fmt.Errorf("replication factor must be > 0")
+	}
+
+	if c.RetentionBytes < -1 {
+		return fmt.Errorf("retention bytes must be >= -1")
+	}
+
+	if c.RetentionTime < 0 {
+		return fmt.Errorf("retention time must be >= 0")
+	}
+
+	return nil
+}
+
+// IsValidControllerMode validates controller mode values.
+func IsValidControllerMode(mode string) bool {
+	switch mode {
+	case "", ControllerModeSingle, ControllerModeRaft:
+		return true
+	default:
+		return false
+	}
 }
 
 // PartitionReplica identifies a concrete partition replica on a broker.

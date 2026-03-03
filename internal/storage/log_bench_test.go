@@ -24,7 +24,15 @@ func BenchmarkLogAppendSmallRecords(b *testing.B) {
 	if err != nil {
 		b.Fatalf("open log: %v", err)
 	}
-	defer log.Close()
+	b.Cleanup(func() {
+		if err := log.Close(); err != nil {
+			b.Errorf("close log: %v", err)
+		}
+
+		if err := m.Close(); err != nil {
+			b.Errorf("close manager: %v", err)
+		}
+	})
 
 	ctx := context.Background()
 	payload := make([]byte, 100)
@@ -60,7 +68,15 @@ func BenchmarkLogReadSequential(b *testing.B) {
 	if err != nil {
 		b.Fatalf("open log: %v", err)
 	}
-	defer log.Close()
+	b.Cleanup(func() {
+		if err := log.Close(); err != nil {
+			b.Errorf("close log: %v", err)
+		}
+
+		if err := m.Close(); err != nil {
+			b.Errorf("close manager: %v", err)
+		}
+	})
 
 	ctx := context.Background()
 
@@ -103,7 +119,15 @@ func BenchmarkLogRandomRead(b *testing.B) {
 	if err != nil {
 		b.Fatalf("open log: %v", err)
 	}
-	defer log.Close()
+	b.Cleanup(func() {
+		if err := log.Close(); err != nil {
+			b.Errorf("close log: %v", err)
+		}
+
+		if err := m.Close(); err != nil {
+			b.Errorf("close manager: %v", err)
+		}
+	})
 
 	ctx := context.Background()
 

@@ -4,12 +4,15 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/c4erries/wave-mq/pkg/api"
 )
 
 func TestStoreRecoverCreateTopicEvents(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	cfg := api.BrokerConfig{DataDir: dir}
 
@@ -49,7 +52,9 @@ func TestStoreRecoverCreateTopicEvents(t *testing.T) {
 		t.Fatalf("append alpha dup: %v", err)
 	}
 
-	store.Close()
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store before reopen: %v", err)
+	}
 
 	store, err = NewStore(cfg)
 	if err != nil {
@@ -85,6 +90,8 @@ func TestStoreRecoverCreateTopicEvents(t *testing.T) {
 }
 
 func TestStoreTruncatesPartialTail(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	cfg := api.BrokerConfig{DataDir: dir}
 
@@ -114,7 +121,9 @@ func TestStoreTruncatesPartialTail(t *testing.T) {
 
 	sizeBefore := info.Size()
 
-	store.Close()
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store before corruption: %v", err)
+	}
 
 	// Corrupt tail with partial bytes.
 	path := filepath.Join(dir, "metadata.log")
@@ -128,7 +137,9 @@ func TestStoreTruncatesPartialTail(t *testing.T) {
 		t.Fatalf("write junk: %v", err)
 	}
 
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatalf("close corruption file: %v", err)
+	}
 
 	store, err = NewStore(cfg)
 	if err != nil {
@@ -156,6 +167,8 @@ func TestStoreTruncatesPartialTail(t *testing.T) {
 }
 
 func TestAppendAfterRecoveryAppendsToEnd(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	cfg := api.BrokerConfig{DataDir: dir}
 	ctx := context.Background()
@@ -186,7 +199,9 @@ func TestAppendAfterRecoveryAppendsToEnd(t *testing.T) {
 		t.Fatalf("append ev1: %v", err)
 	}
 
-	store.Close()
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store after first append: %v", err)
+	}
 
 	// Simulate broker restart: recover then append new topic.
 	store, err = NewStore(cfg)
@@ -202,7 +217,9 @@ func TestAppendAfterRecoveryAppendsToEnd(t *testing.T) {
 		t.Fatalf("append ev2 after recover: %v", err)
 	}
 
-	store.Close()
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store after second append: %v", err)
+	}
 
 	// Final reopen and recover should see both topics intact.
 	store, err = NewStore(cfg)
@@ -230,6 +247,8 @@ func TestAppendAfterRecoveryAppendsToEnd(t *testing.T) {
 }
 
 func TestStoreRecoverReplicationFactorGreaterThanOne(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	cfg := api.BrokerConfig{DataDir: dir}
 
@@ -256,7 +275,9 @@ func TestStoreRecoverReplicationFactorGreaterThanOne(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	store.Close()
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store before reopen: %v", err)
+	}
 
 	store, err = NewStore(cfg)
 	if err != nil {
@@ -280,5 +301,86 @@ func TestStoreRecoverReplicationFactorGreaterThanOne(t *testing.T) {
 
 	if len(topic.Partitions) != 1 || len(topic.Partitions[0].Replicas) != 3 {
 		t.Fatalf("expected 1 partition with 3 replicas, got %+v", topic.Partitions)
+	}
+}
+
+func TestEncodeCreateTopicEventRejectsInvalidReplicaRole(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		role api.PartitionRole
+	}{
+		{name: "negative", role: api.PartitionRole(-1)},
+		{name: "unknown positive", role: api.PartitionRole(99)},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ev := CreateTopicEvent{
+				Name:              "bad-role",
+				NumPartitions:     1,
+				ReplicationFactor: 1,
+				Partitions: []PartitionSpec{
+					{ID: 0, Replicas: []ReplicaSpec{{BrokerID: 1, Role: tc.role, LeaderEpoch: 1}}},
+				},
+			}
+
+			_, err := encodeCreateTopicEvent(ev)
+			if err == nil {
+				t.Fatalf("expected error for invalid role %d", tc.role)
+			}
+
+			if !strings.Contains(err.Error(), "invalid partition role") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeRecordRejectsInvalidReplicaRole(t *testing.T) {
+	t.Parallel()
+
+	ev := CreateTopicEvent{
+		Name:              "role-mutation",
+		NumPartitions:     1,
+		ReplicationFactor: 1,
+		Partitions: []PartitionSpec{
+			{ID: 0, Replicas: []ReplicaSpec{{BrokerID: 1, Role: api.RoleLeader, LeaderEpoch: 1}}},
+		},
+	}
+
+	payload, err := encodeCreateTopicEvent(ev)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	roleOffset := 2 + // version + type
+		2 + len(ev.Name) + // name
+		2 + // partitions
+		2 + // rf
+		8 + // retention bytes
+		8 + // retention time
+		2 + // partition spec count
+		4 + // partition id
+		2 + // replica count
+		4 // broker id
+	payload[roleOffset] = byte(255)
+
+	record, err := wrapRecord(payload)
+	if err != nil {
+		t.Fatalf("wrap record: %v", err)
+	}
+
+	_, err = decodeRecord(record[4:])
+	if err == nil {
+		t.Fatal("expected decode error for invalid role")
+	}
+
+	if !strings.Contains(err.Error(), "invalid partition role") {
+		t.Fatalf("unexpected decode error: %v", err)
 	}
 }

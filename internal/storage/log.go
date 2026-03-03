@@ -457,7 +457,11 @@ func (l *segmentedLog) AppendBatch(ctx context.Context, records []api.Record) (a
 		return l.nextOffset, nil
 	}
 
-	active := l.ensureActiveSegmentLocked()
+	active, err := l.ensureActiveSegmentLocked()
+	if err != nil {
+		return -1, err
+	}
+
 	baseOffset := l.nextOffset
 
 	for i := range records {
@@ -501,9 +505,11 @@ func (l *segmentedLog) AppendBatch(ctx context.Context, records []api.Record) (a
 		recordCount := int(active.nextOffset - active.baseOffset)
 		if recordCount%l.cfg.IndexInterval == 0 && active.idxFile != nil {
 			rel := int64(records[i].Offset - active.baseOffset)
-			if err := binary.Write(active.idxFile, binary.LittleEndian, rel); err == nil {
-				_ = binary.Write(active.idxFile, binary.LittleEndian, pos)
-				active.idx = append(active.idx, indexEntry{RelativeOffset: rel, Position: pos})
+
+			// If index write fails mid-stream we disable index writes for this
+			// segment and rely on deterministic rebuild on reopen/recovery.
+			if err := appendIndexEntry(active, rel, pos); err != nil {
+				disableIndexWrites(active)
 			}
 		}
 
@@ -708,12 +714,14 @@ func (l *segmentedLog) Close() error {
 	return firstErr
 }
 
-func (l *segmentedLog) ensureActiveSegmentLocked() *segment {
+func (l *segmentedLog) ensureActiveSegmentLocked() (*segment, error) {
 	if len(l.segments) == 0 {
-		_ = l.createSegment(l.opts.BaseOffset)
+		if err := l.createSegment(l.opts.BaseOffset); err != nil {
+			return nil, err
+		}
 	}
 
-	return l.segments[len(l.segments)-1]
+	return l.segments[len(l.segments)-1], nil
 }
 
 func (l *segmentedLog) enforceRetentionLocked() {
@@ -837,7 +845,11 @@ func rebuildIndex(logPath, idxPath string, base api.Offset, interval int) error 
 
 		recordBuf := make([]byte, size)
 		if _, err := logFile.ReadAt(recordBuf, readerOffset+4); err != nil {
-			return nil
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil
+			}
+
+			return err
 		}
 
 		if err := validateRecord(recordBuf, expected); err != nil {
@@ -875,17 +887,40 @@ func loadIndex(idxPath string, base api.Offset) (*os.File, []indexEntry, error) 
 
 	var entries []indexEntry
 
+	var (
+		lastRel int64 = -1
+		lastPos int64 = -1
+	)
+
 	for {
 		var rel, pos int64
 		if err := binary.Read(f, binary.LittleEndian, &rel); err != nil {
-			break
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			_ = f.Close()
+			return nil, nil, fmt.Errorf("invalid index: read relative offset: %w", err)
 		}
 
 		if err := binary.Read(f, binary.LittleEndian, &pos); err != nil {
-			break
+			_ = f.Close()
+			return nil, nil, fmt.Errorf("invalid index: read position: %w", err)
+		}
+
+		if rel < 0 || pos < 0 {
+			_ = f.Close()
+			return nil, nil, fmt.Errorf("invalid index entry rel=%d pos=%d", rel, pos)
+		}
+
+		if rel < lastRel || pos < lastPos {
+			_ = f.Close()
+			return nil, nil, fmt.Errorf("invalid index ordering rel=%d pos=%d", rel, pos)
 		}
 
 		entries = append(entries, indexEntry{RelativeOffset: rel, Position: pos})
+		lastRel = rel
+		lastPos = pos
 	}
 
 	return f, entries, nil
@@ -908,7 +943,7 @@ func scanSegment(f *os.File, base api.Offset) (api.Offset, int64, error) {
 				return nextOffset, validBytes, nil
 			}
 
-			return nextOffset, validBytes, nil
+			return nextOffset, validBytes, err
 		}
 
 		size := binary.LittleEndian.Uint32(headerBuf)
@@ -952,6 +987,10 @@ func validateRecord(data []byte, expectedOffset api.Offset) error {
 
 	if offset != expectedOffset {
 		return fmt.Errorf("offset mismatch: got %d expected %d", offset, expectedOffset)
+	}
+
+	if _, err := decodeRecord(data); err != nil {
+		return fmt.Errorf("invalid record body: %w", err)
 	}
 
 	return nil
@@ -1167,7 +1206,32 @@ func decodeRecord(data []byte) (api.Record, error) {
 	r.Value = val
 	r.Headers = headers
 
+	if idx != len(data) {
+		return r, fmt.Errorf("trailing bytes in record")
+	}
+
 	return r, nil
+}
+
+func appendIndexEntry(seg *segment, rel, pos int64) error {
+	if err := binary.Write(seg.idxFile, binary.LittleEndian, rel); err != nil {
+		return err
+	}
+
+	if err := binary.Write(seg.idxFile, binary.LittleEndian, pos); err != nil {
+		return err
+	}
+
+	seg.idx = append(seg.idx, indexEntry{RelativeOffset: rel, Position: pos})
+
+	return nil
+}
+
+func disableIndexWrites(seg *segment) {
+	if seg.idxFile != nil {
+		_ = seg.idxFile.Close()
+		seg.idxFile = nil
+	}
 }
 
 func writeRecordPrefix(buf *bytes.Buffer) error {

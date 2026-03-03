@@ -7,6 +7,8 @@ var (
 	ErrNotLeader = errors.New("not leader")
 	// ErrLeaderNotElected indicates that the cluster has no known leader yet.
 	ErrLeaderNotElected = errors.New("leader not elected")
+	// ErrTopicExists indicates that a topic already has partition assignments.
+	ErrTopicExists = errors.New("topic already exists")
 )
 
 // NotLeaderError provides leader routing hint for callers.

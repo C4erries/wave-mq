@@ -88,6 +88,10 @@ func (c *SingleNodeController) WatchClusterMetadata(ctx context.Context, sinceVe
 func (c *SingleNodeController) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
 	_ = ctx
 
+	if info.BrokerID <= 0 {
+		return fmt.Errorf("invalid broker id %d", info.BrokerID)
+	}
+
 	if c.cfg.StaticCluster == nil && info.BrokerID != c.cfg.BrokerID {
 		return fmt.Errorf("single-node controller refuses broker %d (local %d)", info.BrokerID, c.cfg.BrokerID)
 	}
@@ -97,7 +101,37 @@ func (c *SingleNodeController) RegisterBroker(ctx context.Context, info api.Brok
 			return fmt.Errorf("broker %d not in static cluster", info.BrokerID)
 		}
 	}
-	// TODO: expand to manage multiple brokers.
+
+	c.mu.Lock()
+
+	updated := false
+
+	for i, b := range c.meta.Brokers {
+		if b.BrokerID != info.BrokerID {
+			continue
+		}
+
+		if brokerInfoEqual(b, info) {
+			c.mu.Unlock()
+			return nil
+		}
+
+		c.meta.Brokers[i] = info
+		updated = true
+
+		break
+	}
+
+	if !updated {
+		c.meta.Brokers = append(c.meta.Brokers, info)
+	}
+
+	sort.Slice(c.meta.Brokers, func(i, j int) bool { return c.meta.Brokers[i].BrokerID < c.meta.Brokers[j].BrokerID })
+	c.meta.Version++
+	meta := c.meta
+	c.mu.Unlock()
+	c.pub.publish(meta)
+
 	return nil
 }
 
@@ -105,17 +139,23 @@ func (c *SingleNodeController) AssignTopic(ctx context.Context, name string, cfg
 	_ = ctx
 
 	c.mu.Lock()
-	if cfg.Partitions <= 0 {
-		cfg.Partitions = 1
+
+	if name == "" {
+		c.mu.Unlock()
+		return api.ClusterMetadata{}, fmt.Errorf("topic name is required")
 	}
 
-	if cfg.ReplicationFactor <= 0 {
-		cfg.ReplicationFactor = c.cfg.ReplicationFactor
+	if topicAssigned(c.meta.Partitions, name) {
+		c.mu.Unlock()
+		return api.ClusterMetadata{}, ErrTopicExists
 	}
 
-	if cfg.ReplicationFactor <= 0 {
-		cfg.ReplicationFactor = 1
+	if cfg.Partitions < 0 {
+		c.mu.Unlock()
+		return api.ClusterMetadata{}, fmt.Errorf("partitions must be >= 0")
 	}
+
+	cfg = normalizeTopicConfig(c.cfg.ReplicationFactor, cfg)
 
 	newParts := assignTopicPartitions(c.cfg, c.meta.Brokers, name, cfg.Partitions, cfg.ReplicationFactor, c.meta.Partitions)
 	c.meta.Partitions = append(c.meta.Partitions, newParts...)
@@ -203,10 +243,7 @@ func buildAssignments(cfg api.BrokerConfig, brokers []api.BrokerInfo, topics map
 		parts := append([]metadata.PartitionSpec(nil), state.Partitions...)
 		sort.Slice(parts, func(i, j int) bool { return parts[i].ID < parts[j].ID })
 
-		rf := state.ReplicationFactor
-		if rf <= 0 {
-			rf = cfg.ReplicationFactor
-		}
+		rf := normalizeReplicationFactor(cfg.ReplicationFactor, state.ReplicationFactor)
 		// TODO: reuse recovered replica layout when multi-broker placement is persisted.
 		assignments := assignTopicPartitions(cfg, brokers, name, len(parts), rf, res)
 		for i := range assignments {
@@ -279,16 +316,10 @@ func assignTopicPartitions(cfg api.BrokerConfig, brokers []api.BrokerInfo, name 
 
 	sort.Slice(brokers, func(i, j int) bool { return brokers[i].BrokerID < brokers[j].BrokerID })
 
-	if rf <= 0 {
-		rf = cfg.ReplicationFactor
-	}
+	rf = normalizeReplicationFactor(cfg.ReplicationFactor, rf)
 
 	if partitions < 0 {
 		partitions = 0
-	}
-
-	if rf < 1 {
-		rf = 1
 	}
 
 	replicaCount := rf
@@ -359,4 +390,45 @@ func remove(list []int, id int) []int {
 	}
 
 	return res
+}
+
+func normalizeTopicConfig(defaultRF int, cfg api.TopicConfig) api.TopicConfig {
+	if cfg.Partitions <= 0 {
+		cfg.Partitions = 1
+	}
+
+	cfg.ReplicationFactor = normalizeReplicationFactor(defaultRF, cfg.ReplicationFactor)
+
+	return cfg
+}
+
+func normalizeReplicationFactor(defaultRF int, rf int) int {
+	if rf <= 0 {
+		rf = defaultRF
+	}
+
+	if rf <= 0 {
+		rf = 1
+	}
+
+	return rf
+}
+
+func topicAssigned(assignments []api.PartitionAssignment, name string) bool {
+	for _, p := range assignments {
+		if p.Topic == name {
+			return true
+		}
+	}
+
+	return false
+}
+
+func brokerInfoEqual(a, b api.BrokerInfo) bool {
+	return a.BrokerID == b.BrokerID &&
+		a.Host == b.Host &&
+		a.Port == b.Port &&
+		a.Rack == b.Rack &&
+		a.HTTPAddr == b.HTTPAddr &&
+		a.ControllerAddr == b.ControllerAddr
 }

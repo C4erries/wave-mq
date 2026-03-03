@@ -289,28 +289,8 @@ func decodeRecord(record []byte) (interface{}, error) {
 }
 
 func encodeCreateTopicEvent(ev CreateTopicEvent) ([]byte, error) {
-	if ev.Name == "" {
-		return nil, fmt.Errorf("topic name required")
-	}
-
-	if ev.NumPartitions <= 0 {
-		return nil, fmt.Errorf("partitions must be >0")
-	}
-
-	if ev.ReplicationFactor <= 0 {
-		return nil, fmt.Errorf("replication factor must be >0")
-	}
-
-	if ev.RetentionBytes < -1 {
-		return nil, fmt.Errorf("retention bytes must be >= -1")
-	}
-
-	if ev.RetentionTime < 0 {
-		return nil, fmt.Errorf("retention time must be >= 0")
-	}
-
-	if len(ev.Partitions) != ev.NumPartitions {
-		return nil, fmt.Errorf("partition specs must match num partitions")
+	if err := validateCreateTopicEvent(ev); err != nil {
+		return nil, err
 	}
 
 	buf := &bytes.Buffer{}
@@ -370,20 +350,8 @@ func encodeCreateTopicEvent(ev CreateTopicEvent) ([]byte, error) {
 	}
 
 	for _, p := range ev.Partitions {
-		if len(p.Replicas) == 0 {
-			return nil, fmt.Errorf("partition %d has no replicas", p.ID)
-		}
-
-		if ev.ReplicationFactor > 0 && len(p.Replicas) != ev.ReplicationFactor {
-			return nil, fmt.Errorf("partition %d replica count %d != rf %d", p.ID, len(p.Replicas), ev.ReplicationFactor)
-		}
-
 		if err := binary.Write(buf, binary.LittleEndian, p.ID); err != nil {
 			return nil, err
-		}
-
-		if len(p.Replicas) > 65535 {
-			return nil, fmt.Errorf("too many replicas for partition %d", p.ID)
 		}
 
 		replicaCount, err := toUint16(fmt.Sprintf("partition %d replica count", p.ID), len(p.Replicas))
@@ -416,6 +384,84 @@ func encodeCreateTopicEvent(ev CreateTopicEvent) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+func validateCreateTopicEvent(ev CreateTopicEvent) error {
+	if ev.Name == "" {
+		return fmt.Errorf("topic name required")
+	}
+
+	if ev.NumPartitions <= 0 {
+		return fmt.Errorf("partitions must be >0")
+	}
+
+	if ev.ReplicationFactor <= 0 {
+		return fmt.Errorf("replication factor must be >0")
+	}
+
+	if ev.RetentionBytes < -1 {
+		return fmt.Errorf("retention bytes must be >= -1")
+	}
+
+	if ev.RetentionTime < 0 {
+		return fmt.Errorf("retention time must be >= 0")
+	}
+
+	if len(ev.Partitions) != ev.NumPartitions {
+		return fmt.Errorf("partition specs must match num partitions")
+	}
+
+	seenPartitions := make(map[int32]struct{}, len(ev.Partitions))
+	for _, p := range ev.Partitions {
+		if p.ID < 0 {
+			return fmt.Errorf("invalid negative partition id %d", p.ID)
+		}
+
+		if _, exists := seenPartitions[p.ID]; exists {
+			return fmt.Errorf("duplicate partition id %d", p.ID)
+		}
+		seenPartitions[p.ID] = struct{}{}
+
+		if len(p.Replicas) == 0 {
+			return fmt.Errorf("partition %d has no replicas", p.ID)
+		}
+
+		if ev.ReplicationFactor > 0 && len(p.Replicas) != ev.ReplicationFactor {
+			return fmt.Errorf("partition %d replica count %d != rf %d", p.ID, len(p.Replicas), ev.ReplicationFactor)
+		}
+
+		if len(p.Replicas) > 65535 {
+			return fmt.Errorf("too many replicas for partition %d", p.ID)
+		}
+
+		seenReplicaIDs := make(map[int32]struct{}, len(p.Replicas))
+		leaders := 0
+
+		for _, r := range p.Replicas {
+			if r.BrokerID <= 0 {
+				return fmt.Errorf("partition %d has invalid broker id %d", p.ID, r.BrokerID)
+			}
+
+			if _, exists := seenReplicaIDs[r.BrokerID]; exists {
+				return fmt.Errorf("partition %d has duplicate replica broker id %d", p.ID, r.BrokerID)
+			}
+			seenReplicaIDs[r.BrokerID] = struct{}{}
+
+			if err := validatePartitionRole(r.Role); err != nil {
+				return fmt.Errorf("partition %d: %w", p.ID, err)
+			}
+
+			if r.Role == api.RoleLeader {
+				leaders++
+			}
+		}
+
+		if leaders != 1 {
+			return fmt.Errorf("partition %d must have exactly one leader replica, got %d", p.ID, leaders)
+		}
+	}
+
+	return nil
 }
 
 func decodeCreateTopicEvent(version uint8, data []byte) (CreateTopicEvent, error) {
@@ -494,8 +540,8 @@ func decodeCreateTopicEventV2(data []byte) (CreateTopicEvent, error) {
 
 	ev.Partitions = partitions
 
-	if len(ev.Partitions) != ev.NumPartitions {
-		return ev, fmt.Errorf("create-topic partition count mismatch: expected %d, got %d", ev.NumPartitions, len(ev.Partitions))
+	if err := validateCreateTopicEvent(ev); err != nil {
+		return ev, err
 	}
 
 	return ev, nil
@@ -544,8 +590,8 @@ func decodeCreateTopicEventV1(data []byte) (CreateTopicEvent, error) {
 
 	ev.Partitions = partitions
 
-	if len(ev.Partitions) != ev.NumPartitions {
-		return ev, fmt.Errorf("create-topic partition count mismatch: expected %d, got %d", ev.NumPartitions, len(ev.Partitions))
+	if err := validateCreateTopicEvent(ev); err != nil {
+		return ev, err
 	}
 
 	return ev, nil
@@ -591,6 +637,11 @@ func decodeReplicaSpecs(reader *bytes.Reader, replicaCount uint16) ([]ReplicaSpe
 			return nil, err
 		}
 
+		role, err := partitionRoleFromByte(roleByte)
+		if err != nil {
+			return nil, err
+		}
+
 		var epoch int32
 		if err := binary.Read(reader, binary.LittleEndian, &epoch); err != nil {
 			return nil, err
@@ -598,7 +649,7 @@ func decodeReplicaSpecs(reader *bytes.Reader, replicaCount uint16) ([]ReplicaSpe
 
 		replicas = append(replicas, ReplicaSpec{
 			BrokerID:    brokerID,
-			Role:        api.PartitionRole(roleByte),
+			Role:        role,
 			LeaderEpoch: epoch,
 		})
 	}
@@ -627,10 +678,27 @@ func toUint16(field string, n int) (uint16, error) {
 }
 
 func partitionRoleToByte(role api.PartitionRole) (byte, error) {
-	v := int(role)
-	if v < 0 || v > maxByte {
-		return 0, fmt.Errorf("partition role out of range: %d", v)
+	if err := validatePartitionRole(role); err != nil {
+		return 0, err
 	}
 
-	return byte(v), nil // #nosec G115 -- bounds checked above
+	return byte(role), nil // #nosec G115 -- bounded by validatePartitionRole
+}
+
+func partitionRoleFromByte(b byte) (api.PartitionRole, error) {
+	role := api.PartitionRole(b)
+	if err := validatePartitionRole(role); err != nil {
+		return 0, err
+	}
+
+	return role, nil
+}
+
+func validatePartitionRole(role api.PartitionRole) error {
+	switch role {
+	case api.RoleLeader, api.RoleFollower:
+		return nil
+	default:
+		return fmt.Errorf("invalid partition role: %d", role)
+	}
 }

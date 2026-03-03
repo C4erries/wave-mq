@@ -14,6 +14,8 @@ import (
 )
 
 func TestAppendAndRead(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	m, err := NewManager(Config{
@@ -31,8 +33,13 @@ func TestAppendAndRead(t *testing.T) {
 	}
 
 	defer func() {
-		_ = log.Close()
-		_ = m.Close()
+		if err := log.Close(); err != nil {
+			t.Errorf("close log: %v", err)
+		}
+
+		if err := m.Close(); err != nil {
+			t.Errorf("close manager: %v", err)
+		}
 	}()
 
 	ctx := context.Background()
@@ -80,6 +87,8 @@ func TestAppendAndRead(t *testing.T) {
 }
 
 func TestSegmentRotation(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	m, err := NewManager(Config{
@@ -97,8 +106,13 @@ func TestSegmentRotation(t *testing.T) {
 	}
 
 	defer func() {
-		_ = log.Close()
-		_ = m.Close()
+		if err := log.Close(); err != nil {
+			t.Errorf("close log: %v", err)
+		}
+
+		if err := m.Close(); err != nil {
+			t.Errorf("close manager: %v", err)
+		}
 	}()
 
 	ctx := context.Background()
@@ -146,6 +160,8 @@ func TestSegmentRotation(t *testing.T) {
 }
 
 func TestRecoverTruncatesCorruptTail(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	m, err := NewManager(Config{
@@ -162,7 +178,11 @@ func TestRecoverTruncatesCorruptTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open log: %v", err)
 	}
-	defer m.Close()
+	defer func() {
+		if err := m.Close(); err != nil {
+			t.Errorf("close manager: %v", err)
+		}
+	}()
 
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
@@ -186,7 +206,9 @@ func TestRecoverTruncatesCorruptTail(t *testing.T) {
 		t.Fatalf("corrupt tail: %v", err)
 	}
 
-	_ = f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatalf("close segment after corruption: %v", err)
+	}
 
 	if err := m.Recover(context.Background()); err != nil {
 		t.Fatalf("recover: %v", err)
@@ -196,7 +218,11 @@ func TestRecoverTruncatesCorruptTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen log: %v", err)
 	}
-	defer log.Close()
+	defer func() {
+		if err := log.Close(); err != nil {
+			t.Errorf("close reopened log: %v", err)
+		}
+	}()
 
 	records, err := log.Read(ctx, 0, 0)
 	if err != nil {
@@ -215,6 +241,8 @@ func TestRecoverTruncatesCorruptTail(t *testing.T) {
 }
 
 func TestAppendAfterReopenPreservesExistingSegmentData(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	cfg := Config{
 		DataDir:         dir,
@@ -251,13 +279,21 @@ func TestAppendAfterReopenPreservesExistingSegmentData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second manager: %v", err)
 	}
-	defer second.Close()
+	defer func() {
+		if err := second.Close(); err != nil {
+			t.Errorf("close second manager: %v", err)
+		}
+	}()
 
 	log, err = second.OpenLog(LogOptions{Topic: "t1", Partition: 0})
 	if err != nil {
 		t.Fatalf("reopen log: %v", err)
 	}
-	defer log.Close()
+	defer func() {
+		if err := log.Close(); err != nil {
+			t.Errorf("close second log: %v", err)
+		}
+	}()
 
 	for i := 0; i < 2; i++ {
 		if _, err := log.Append(ctx, api.Record{Value: []byte("after-" + strconv.Itoa(i))}); err != nil {
@@ -300,6 +336,8 @@ func TestAppendAfterReopenPreservesExistingSegmentData(t *testing.T) {
 }
 
 func TestIndexRebuildAndSeek(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	m, err := NewManager(Config{
@@ -318,20 +356,13 @@ func TestIndexRebuildAndSeek(t *testing.T) {
 	}
 
 	defer func() {
-		log.Close()
-		m.Close()
-	}()
-	defer func() {
-		log.Close()
-		m.Close()
-	}()
-	defer func() {
-		log.Close()
-		m.Close()
-	}()
-	defer func() {
-		log.Close()
-		m.Close()
+		if err := log.Close(); err != nil {
+			t.Errorf("close log: %v", err)
+		}
+
+		if err := m.Close(); err != nil {
+			t.Errorf("close manager: %v", err)
+		}
 	}()
 
 	ctx := context.Background()
@@ -356,7 +387,9 @@ func TestIndexRebuildAndSeek(t *testing.T) {
 	}
 
 	// Delete index and reopen, ensure it is rebuilt.
-	log.Close()
+	if err := log.Close(); err != nil {
+		t.Fatalf("close before reopen: %v", err)
+	}
 
 	if err := os.Remove(idxPath); err != nil {
 		t.Fatalf("remove idx: %v", err)
@@ -366,7 +399,11 @@ func TestIndexRebuildAndSeek(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen log: %v", err)
 	}
-	defer log.Close()
+	defer func() {
+		if err := log.Close(); err != nil {
+			t.Errorf("close reopened log: %v", err)
+		}
+	}()
 
 	if _, err := os.Stat(idxPath); err != nil {
 		t.Fatalf("index not rebuilt: %v", err)
@@ -379,6 +416,8 @@ func TestIndexRebuildAndSeek(t *testing.T) {
 }
 
 func TestRetentionBySize(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	m, err := NewManager(Config{
@@ -397,8 +436,13 @@ func TestRetentionBySize(t *testing.T) {
 	}
 
 	defer func() {
-		log.Close()
-		m.Close()
+		if err := log.Close(); err != nil {
+			t.Errorf("close log: %v", err)
+		}
+
+		if err := m.Close(); err != nil {
+			t.Errorf("close manager: %v", err)
+		}
 	}()
 
 	ctx := context.Background()
@@ -409,7 +453,10 @@ func TestRetentionBySize(t *testing.T) {
 	}
 
 	logDir := filepath.Join(dir, "t", "0")
-	entries, _ := os.ReadDir(logDir)
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
 
 	var logFiles int
 
@@ -432,11 +479,18 @@ func TestRetentionBySize(t *testing.T) {
 		t.Fatalf("expected data after retention")
 	}
 
-	log.Close()
-	m.Close()
+	if err := log.Close(); err != nil {
+		t.Fatalf("close log: %v", err)
+	}
+
+	if err := m.Close(); err != nil {
+		t.Fatalf("close manager: %v", err)
+	}
 }
 
 func TestRetentionByAge(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	m, err := NewManager(Config{
@@ -471,7 +525,9 @@ func TestRetentionByAge(t *testing.T) {
 	segPath := files[0]
 	oldTime := time.Now().Add(-time.Second)
 
-	log.Close()
+	if err := log.Close(); err != nil {
+		t.Fatalf("close log before chtimes: %v", err)
+	}
 
 	if err := os.Chtimes(segPath, oldTime, oldTime); err != nil {
 		t.Fatalf("chtimes: %v", err)
@@ -486,7 +542,10 @@ func TestRetentionByAge(t *testing.T) {
 		t.Fatalf("append new: %v", err)
 	}
 
-	entries, _ := os.ReadDir(filepath.Join(dir, "t", "0"))
+	entries, err := os.ReadDir(filepath.Join(dir, "t", "0"))
+	if err != nil {
+		t.Fatalf("readdir after reopen: %v", err)
+	}
 
 	var logFiles int
 
@@ -500,11 +559,18 @@ func TestRetentionByAge(t *testing.T) {
 		t.Fatalf("all segments removed unexpectedly")
 	}
 
-	log.Close()
-	m.Close()
+	if err := log.Close(); err != nil {
+		t.Fatalf("close log: %v", err)
+	}
+
+	if err := m.Close(); err != nil {
+		t.Fatalf("close manager: %v", err)
+	}
 }
 
 func TestStartOffsetAfterRetention(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	m, err := NewManager(Config{
@@ -543,6 +609,86 @@ func TestStartOffsetAfterRetention(t *testing.T) {
 		t.Fatalf("read returned offsets before start: %v", recs)
 	}
 
-	log.Close()
-	m.Close()
+	if err := log.Close(); err != nil {
+		t.Fatalf("close log: %v", err)
+	}
+
+	if err := m.Close(); err != nil {
+		t.Fatalf("close manager: %v", err)
+	}
+}
+
+func TestCorruptedIndexIsRebuiltOnOpen(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	m, err := NewManager(Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1 << 20,
+		IndexInterval:   1,
+		SyncOnAppend:    true,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+
+	log, err := m.OpenLog(LogOptions{Topic: "idx", Partition: 0})
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		if _, err := log.Append(ctx, api.Record{Value: []byte("v")}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	idxPath := filepath.Join(dir, "idx", "0", "00000000000000000000.idx")
+
+	if err := log.Close(); err != nil {
+		t.Fatalf("close before index corruption: %v", err)
+	}
+
+	f, err := os.OpenFile(idxPath, os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open index for corruption: %v", err)
+	}
+
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("stat index: %v", err)
+	}
+
+	if err := f.Truncate(info.Size() - 1); err != nil {
+		t.Fatalf("truncate index: %v", err)
+	}
+
+	if err := f.Close(); err != nil {
+		t.Fatalf("close corrupted index file: %v", err)
+	}
+
+	log, err = m.OpenLog(LogOptions{Topic: "idx", Partition: 0})
+	if err != nil {
+		t.Fatalf("reopen log after index corruption: %v", err)
+	}
+	defer func() {
+		if err := log.Close(); err != nil {
+			t.Errorf("close log: %v", err)
+		}
+
+		if err := m.Close(); err != nil {
+			t.Errorf("close manager: %v", err)
+		}
+	}()
+
+	recs, err := log.Read(ctx, 2, 0)
+	if err != nil {
+		t.Fatalf("read after reopen: %v", err)
+	}
+
+	if len(recs) == 0 || recs[0].Offset != 2 {
+		t.Fatalf("unexpected read result after index rebuild: %+v", recs)
+	}
 }
