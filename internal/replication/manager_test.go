@@ -528,6 +528,7 @@ func TestManagerRestartsWorkerAfterFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+
 	defer func() {
 		if err := store.Close(); err != nil {
 			t.Errorf("close storage: %v", err)
@@ -535,7 +536,9 @@ func TestManagerRestartsWorkerAfterFailure(t *testing.T) {
 	}()
 
 	metaFeed := newStreamMetadataStore()
+
 	var attempts atomic.Int32
+
 	workerStarted := make(chan struct{}, 1)
 
 	mgr := NewManagerWithFactories(

@@ -900,6 +900,7 @@ func loadIndex(idxPath string, base api.Offset) (*os.File, []indexEntry, error) 
 			}
 
 			_ = f.Close()
+
 			return nil, nil, fmt.Errorf("invalid index: read relative offset: %w", err)
 		}
 

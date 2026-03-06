@@ -420,6 +420,7 @@ func validateCreateTopicEvent(ev CreateTopicEvent) error {
 		if _, exists := seenPartitions[p.ID]; exists {
 			return fmt.Errorf("duplicate partition id %d", p.ID)
 		}
+
 		seenPartitions[p.ID] = struct{}{}
 
 		if len(p.Replicas) == 0 {
@@ -445,6 +446,7 @@ func validateCreateTopicEvent(ev CreateTopicEvent) error {
 			if _, exists := seenReplicaIDs[r.BrokerID]; exists {
 				return fmt.Errorf("partition %d has duplicate replica broker id %d", p.ID, r.BrokerID)
 			}
+
 			seenReplicaIDs[r.BrokerID] = struct{}{}
 
 			if err := validatePartitionRole(r.Role); err != nil {

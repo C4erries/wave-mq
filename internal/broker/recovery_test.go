@@ -250,6 +250,7 @@ func produceHTTP(t *testing.T, client *http.Client, baseURL, topic string, parti
 	if err != nil {
 		t.Fatalf("post produce: %v", err)
 	}
+
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			t.Errorf("close produce response body: %v", err)
@@ -268,6 +269,7 @@ func fetchTopics(t *testing.T, baseURL string) map[string]brokerpkg.TopicSummary
 	if err != nil {
 		t.Fatalf("get topics: %v", err)
 	}
+
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			t.Errorf("close topics response body: %v", err)
@@ -294,6 +296,7 @@ func fetchTopicDetail(t *testing.T, baseURL, name string) brokerpkg.TopicDetail 
 	if err != nil {
 		t.Fatalf("get topic detail: %v", err)
 	}
+
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			t.Errorf("close topic detail response body: %v", err)
@@ -317,6 +320,7 @@ func fetchMessages(t *testing.T, baseURL, topic string, partition int) []map[str
 	if err != nil {
 		t.Fatalf("get messages: %v", err)
 	}
+
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			t.Errorf("close messages response body: %v", err)
@@ -338,6 +342,7 @@ func fetchCluster(t *testing.T, baseURL string) api.ClusterMetadata {
 	if err != nil {
 		t.Fatalf("get cluster: %v", err)
 	}
+
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			t.Errorf("close cluster response body: %v", err)

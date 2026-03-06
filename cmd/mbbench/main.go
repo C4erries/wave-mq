@@ -157,6 +157,7 @@ func runProducer(wg *sync.WaitGroup, st *stats, cfg benchConfig, payload []byte,
 			Partition: cfg.partition,
 			Records:   []api.Record{{Value: payload}},
 		}
+
 		payloadBytes, err := netproto.EncodeProduceRequest(req)
 		if err != nil {
 			log.Printf("encode produce request: %v", err)
@@ -212,6 +213,7 @@ func createTopic(addr, topic string, partitions int) error {
 	defer closeConnWithLog(conn)
 
 	req := &netproto.CreateTopicRequest{Topic: topic, Partitions: partitions, ReplicationFactor: 1}
+
 	payload, err := netproto.EncodeCreateTopicRequest(req)
 	if err != nil {
 		return err

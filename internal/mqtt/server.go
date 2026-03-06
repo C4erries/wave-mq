@@ -385,6 +385,7 @@ func (state *clientState) consumeLoop(ctx context.Context, mqttTopic string, sub
 		recs, err := state.broker.Fetch(ctx, sub.topic, sub.partition, offset, 64<<10)
 		if err != nil {
 			observability.RequestErrors.WithLabelValues("mqtt", "fetch").Inc()
+
 			if !waitForDuration(ctx, state.opts.FetchErrorBackoff) {
 				return
 			}
@@ -630,6 +631,7 @@ func publishFingerprint(topic string, payload []byte) uint64 {
 	if _, err := hash.Write([]byte(topic)); err != nil {
 		return 0
 	}
+
 	if _, err := hash.Write(payload); err != nil {
 		return 0
 	}
@@ -661,9 +663,11 @@ func (s *Server) mapTopic(ctx context.Context, mqttTopic, clientID string) (stri
 	if _, err := hash.Write([]byte(mqttTopic)); err != nil {
 		return "", 0, err
 	}
+
 	if _, err := hash.Write([]byte(clientID)); err != nil {
 		return "", 0, err
 	}
+
 	pid := int(hash.Sum32()) % len(partitions)
 
 	return mqttTopic, partitions[pid], nil

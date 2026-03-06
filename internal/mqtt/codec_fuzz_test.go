@@ -26,6 +26,7 @@ func makeConnectPacket(cleanStart bool) []byte {
 	if err := writeString(body, "MQTT"); err != nil {
 		panic(err)
 	}
+
 	body.WriteByte(4)
 
 	flags := byte(0)
@@ -35,9 +36,11 @@ func makeConnectPacket(cleanStart bool) []byte {
 
 	body.WriteByte(flags)
 	body.Write([]byte{0, 10})
+
 	if err := writeString(body, "fuzz-client"); err != nil {
 		panic(err)
 	}
+
 	header := make([]byte, 0, 1+4)
 	header = append(header, packetTypeCONNECT<<4)
 	header = append(header, encodeRemainingLength(body.Len())...)

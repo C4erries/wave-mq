@@ -103,6 +103,7 @@ func TestMQTTQoS1RedeliveryAfterReconnectWithoutPuback(t *testing.T) {
 	if err := client1.Close(); err != nil {
 		t.Fatalf("close client1: %v", err)
 	}
+
 	if err := server1.Close(); err != nil {
 		t.Fatalf("close server1: %v", err)
 	}
@@ -234,6 +235,7 @@ func TestMQTTQoS1CommitAfterPubackOnImmediateDisconnect(t *testing.T) {
 	mustReadConnack(t, client)
 
 	mustWritePacket(t, client, buildSubscribePacket(1, "topic", qos1))
+
 	suback := mustReadSuback(t, client)
 	if len(suback.Granted) != 1 || suback.Granted[0] != qos1 {
 		t.Fatalf("unexpected SUBACK: %#v", suback.Granted)
@@ -479,6 +481,7 @@ func buildConnectPacket(clientID string, cleanStart bool) []byte {
 	if err := writeString(body, "MQTT"); err != nil {
 		panic(err)
 	}
+
 	body.WriteByte(4)
 
 	flags := byte(0)
@@ -488,6 +491,7 @@ func buildConnectPacket(clientID string, cleanStart bool) []byte {
 
 	body.WriteByte(flags)
 	body.Write([]byte{0, 10})
+
 	if err := writeString(body, clientID); err != nil {
 		panic(err)
 	}
@@ -504,9 +508,11 @@ func buildSubscribePacket(packetID uint16, topic string, qos byte) []byte {
 	if err := binary.Write(body, binary.BigEndian, packetID); err != nil {
 		panic(err)
 	}
+
 	if err := writeString(body, topic); err != nil {
 		panic(err)
 	}
+
 	body.WriteByte(qos)
 
 	header := make([]byte, 0, 1+4)

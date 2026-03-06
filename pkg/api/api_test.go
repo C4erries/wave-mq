@@ -60,7 +60,6 @@ func TestBrokerConfigValidate(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -137,7 +136,6 @@ func TestTopicConfigValidate(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -175,7 +173,6 @@ func TestIsValidControllerMode(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.mode, func(t *testing.T) {
 			t.Parallel()
 

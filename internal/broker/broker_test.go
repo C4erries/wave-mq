@@ -10,11 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/c4erries/wave-mq/internal/metadata"
 	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func assertClose(t *testing.T, target string, err error) {
@@ -693,6 +694,7 @@ func TestProduceFetchConcurrentWithMetadataUpdates(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
+
 	errCh := make(chan error, 2)
 
 	wg.Add(1)
@@ -770,6 +772,7 @@ func TestProduceFetchNotLeaderDoesNotBlockOnClusterMetadata(t *testing.T) {
 	b.cluster = &blockingClusterStore{wait: make(chan struct{})}
 
 	produceDone := make(chan error, 1)
+
 	go func() {
 		_, err := b.Produce(ctx, "blocked", 0, []api.Record{{Value: []byte("v")}})
 		produceDone <- err
@@ -790,6 +793,7 @@ func TestProduceFetchNotLeaderDoesNotBlockOnClusterMetadata(t *testing.T) {
 	}
 
 	fetchDone := make(chan error, 1)
+
 	go func() {
 		_, err := b.Fetch(ctx, "blocked", 0, 0, 1024)
 		fetchDone <- err
@@ -921,6 +925,7 @@ func TestProducedMetricRestoredFromDurableStateOnRestart(t *testing.T) {
 	observability.MessagesProduced.Reset()
 
 	b2, s2, o2, m2 := newBrokerWithDataDir()
+
 	defer func() {
 		assertClose(t, "broker", b2.Close())
 		assertClose(t, "storage", s2.Close())

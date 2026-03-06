@@ -221,7 +221,6 @@ func (m *Manager) startReplicator(
 			case <-timer.C:
 			}
 		}
-
 	}(key, assign, leader)
 
 	m.running[key] = runningReplicator{cancel: cancel, assignment: assign}

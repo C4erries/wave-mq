@@ -850,6 +850,7 @@ func (b *Broker) Produce(ctx context.Context, topic string, partition int, recor
 	if b.isClustered() && p.Metadata.Replica.Role != api.RoleLeader {
 		leader := p.Metadata.Leader
 		p.mu.Unlock()
+
 		if leader == 0 {
 			leader = b.leaderFor(topic, partition)
 		}
@@ -870,6 +871,7 @@ func (b *Broker) Produce(ctx context.Context, topic string, partition int, recor
 	if err != nil {
 		p.mu.Unlock()
 		observability.RequestErrors.WithLabelValues("broker", "produce").Inc()
+
 		return -1, err
 	}
 
@@ -931,6 +933,7 @@ func (b *Broker) Fetch(ctx context.Context, topic string, partition int, offset 
 	if b.isClustered() && p.Metadata.Replica.Role != api.RoleLeader {
 		leader := p.Metadata.Leader
 		p.mu.RUnlock()
+
 		if leader == 0 {
 			leader = b.leaderFor(topic, partition)
 		}
@@ -947,6 +950,7 @@ func (b *Broker) Fetch(ctx context.Context, topic string, partition int, offset 
 
 	recs, err := p.Log.Read(ctx, offset, maxBytes)
 	p.mu.RUnlock()
+
 	if err != nil {
 		observability.RequestErrors.WithLabelValues("broker", "fetch").Inc()
 		return nil, err
@@ -1605,10 +1609,12 @@ func (b *Broker) ConsumerGroupsSnapshot(ctx context.Context) []ConsumerGroupInfo
 	hwm := b.consumerGroupHighWatermarks(ctx)
 
 	b.mu.RLock()
+
 	groupsSnapshot := make(map[string]*ConsumerGroup, len(b.groups))
 	for name, group := range b.groups {
 		groupsSnapshot[name] = group
 	}
+
 	b.mu.RUnlock()
 
 	groups := make([]ConsumerGroupInfo, 0, len(groupsSnapshot))

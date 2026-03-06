@@ -265,6 +265,7 @@ func (s *Server) handleFetch(ctx context.Context, payload []byte) ([]byte, error
 			// Keep fetch successful even if latest-offset lookup failed, but avoid
 			// returning the zero-value HWM that can regress follower progress.
 			resp.HighWatermark = fallbackFetchHighWatermark(req.Offset, recs)
+
 			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
 		}
 	}

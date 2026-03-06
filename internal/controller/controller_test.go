@@ -538,6 +538,7 @@ func TestSingleNodeControllerAssignTopicRejectsDuplicate(t *testing.T) {
 	t.Parallel()
 
 	cfg := api.BrokerConfig{BrokerID: 1, ClusterID: "dup-1"}
+
 	ctrl, err := NewSingleNodeController(cfg, map[string]metadata.TopicState{})
 	if err != nil {
 		t.Fatalf("controller: %v", err)
@@ -601,6 +602,7 @@ func TestSingleNodeControllerRegisterBrokerUpdatesMetadata(t *testing.T) {
 	}
 
 	var broker2 *api.BrokerInfo
+
 	for i := range updated.Brokers {
 		if updated.Brokers[i].BrokerID == 2 {
 			broker2 = &updated.Brokers[i]

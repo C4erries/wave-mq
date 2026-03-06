@@ -19,6 +19,7 @@ func TestWALSinkApplyBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+
 	defer func() {
 		if err := store.Close(); err != nil {
 			t.Errorf("close storage: %v", err)
@@ -66,6 +67,7 @@ func TestWALSinkMaintainsOffsetsWhenLeaderBehind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+
 	defer func() {
 		if err := store.Close(); err != nil {
 			t.Errorf("close storage: %v", err)

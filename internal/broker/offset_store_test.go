@@ -43,6 +43,7 @@ func TestOffsetStoreRecover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
+
 	defer func() {
 		if err := store.Close(); err != nil {
 			t.Errorf("close store: %v", err)
@@ -104,6 +105,7 @@ func TestOffsetStoreRecoverTruncatesTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
+
 	defer func() {
 		if err := store.Close(); err != nil {
 			t.Errorf("close store: %v", err)
@@ -157,6 +159,7 @@ func TestOffsetStoreCompact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
+
 	defer func() {
 		if err := store.Close(); err != nil {
 			t.Errorf("close store: %v", err)
@@ -215,6 +218,7 @@ func TestOffsetStoreRecoverKeepsWriterAtEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen store second time: %v", err)
 	}
+
 	defer func() {
 		if err := store.Close(); err != nil {
 			t.Errorf("close store: %v", err)
@@ -247,6 +251,7 @@ func TestOffsetStoreAppendAfterCompactKeepsRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
+
 	defer func() {
 		if err := store.Close(); err != nil {
 			t.Errorf("close store: %v", err)

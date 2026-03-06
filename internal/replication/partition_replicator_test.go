@@ -86,9 +86,11 @@ func TestPartitionReplicatorFetchesBatches(t *testing.T) {
 	defer cancel()
 
 	serverErr := make(chan error, 1)
+
 	go func() {
 		serverErr <- server.ListenAndServe(ctx)
 	}()
+
 	defer assertAsyncError(t, serverErr, context.Canceled)
 
 	addr := waitForAddr(t, server)
@@ -163,6 +165,7 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("leader storage: %v", err)
 	}
+
 	defer func() {
 		closeExpectNoErr(t, "leader storage", leaderStore.Close())
 	}()
@@ -175,6 +178,7 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("leader offset store: %v", err)
 	}
+
 	defer func() {
 		closeExpectNoErr(t, "leader offset store", leaderOffset.Close())
 	}()
@@ -183,6 +187,7 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("leader metadata store: %v", err)
 	}
+
 	defer func() {
 		closeExpectNoErr(t, "leader metadata store", leaderMeta.Close())
 	}()
@@ -195,6 +200,7 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
+
 	defer func() {
 		closeExpectNoErr(t, "leader broker", b.Close())
 	}()
@@ -214,6 +220,7 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 
 	ctxSrv, cancelSrv := context.WithCancel(ctx)
 	defer cancelSrv()
+
 	serverErr := make(chan error, 1)
 
 	go func() {
@@ -226,6 +233,7 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("follower storage: %v", err)
 	}
+
 	defer func() {
 		closeExpectNoErr(t, "follower storage", followerStore.Close())
 	}()
@@ -266,6 +274,7 @@ func TestPartitionReplicatorWritesToWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open leader log: %v", err)
 	}
+
 	defer func() {
 		closeExpectNoErr(t, "leader log", leaderLog.Close())
 	}()
@@ -373,6 +382,7 @@ func TestPartitionReplicatorResumesFromNextOffset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("follower storage: %v", err)
 	}
+
 	defer func() {
 		closeExpectNoErr(t, "follower storage", followerStore.Close())
 	}()
@@ -448,6 +458,7 @@ func TestPartitionReplicatorDoesNotDuplicateAfterCatchUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("follower storage: %v", err)
 	}
+
 	defer func() {
 		closeExpectNoErr(t, "follower storage", followerStore.Close())
 	}()
@@ -578,6 +589,7 @@ func readLogValues(ctx context.Context, t *testing.T, store *storage.Manager) []
 	if err != nil {
 		t.Fatalf("open log: %v", err)
 	}
+
 	defer func() {
 		closeExpectNoErr(t, "alpha log", log.Close())
 	}()

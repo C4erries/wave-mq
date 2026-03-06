@@ -12,12 +12,14 @@ func TestMetadataPublisherPublishDoesNotBlockOnSlowWatcher(t *testing.T) {
 	t.Parallel()
 
 	var pub metadataPublisher
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	ch := pub.watch(ctx, 0, api.ClusterMetadata{Version: 1})
 
 	done := make(chan struct{})
+
 	go func() {
 		pub.publish(api.ClusterMetadata{Version: 2})
 		close(done)
@@ -43,6 +45,7 @@ func TestMetadataPublisherClosesWatcherOnCancel(t *testing.T) {
 	t.Parallel()
 
 	var pub metadataPublisher
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	ch := pub.watch(ctx, 0, api.ClusterMetadata{Version: 1})

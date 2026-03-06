@@ -16,22 +16,28 @@ func TestConnectRoundTrip(t *testing.T) {
 	buf := &bytes.Buffer{}
 	header := make([]byte, 0, 1+4)
 	header = append(header, packetTypeCONNECT<<4)
+
 	body := &bytes.Buffer{}
 	if err := writeString(body, "MQTT"); err != nil {
 		t.Fatalf("write protocol name: %v", err)
 	}
+
 	body.WriteByte(4) // protocol level
 	body.WriteByte(0b11000010)
 	body.Write([]byte{0, 10})
+
 	if err := writeString(body, orig.ClientID); err != nil {
 		t.Fatalf("write client id: %v", err)
 	}
+
 	if err := writeString(body, orig.Username); err != nil {
 		t.Fatalf("write username: %v", err)
 	}
+
 	if err := writeString(body, string(orig.AuthData)); err != nil {
 		t.Fatalf("write auth data: %v", err)
 	}
+
 	header = append(header, encodeRemainingLength(body.Len())...)
 	buf.Write(header)
 	buf.Write(body.Bytes())
@@ -54,13 +60,17 @@ func TestConnectRoundTrip(t *testing.T) {
 func TestSubscribeRoundTrip(t *testing.T) {
 	body := &bytes.Buffer{}
 	body.Write([]byte{0, 42})
+
 	if err := writeString(body, "a/b"); err != nil {
 		t.Fatalf("write first topic: %v", err)
 	}
+
 	body.WriteByte(0)
+
 	if err := writeString(body, "c/d"); err != nil {
 		t.Fatalf("write second topic: %v", err)
 	}
+
 	body.WriteByte(1)
 
 	header := make([]byte, 0, 1+4)
@@ -86,10 +96,12 @@ func TestSubscribeRoundTrip(t *testing.T) {
 
 func TestPublishRoundTripQoS1(t *testing.T) {
 	orig := &PublishPacket{Topic: "t", QoS: 1, PacketID: 5, Payload: []byte("hi")}
+
 	body := &bytes.Buffer{}
 	if err := writeString(body, orig.Topic); err != nil {
 		t.Fatalf("write topic: %v", err)
 	}
+
 	body.Write([]byte{0, 5})
 	body.Write(orig.Payload)
 

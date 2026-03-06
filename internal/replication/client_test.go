@@ -166,9 +166,11 @@ func TestBinaryReplicatorFetchSuccess(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	serverErr := make(chan error, 1)
+
 	go func() {
 		serverErr <- srv.ListenAndServe(ctx)
 	}()
+
 	defer func() {
 		cancel()
 		assertAsyncError(t, serverErr, context.Canceled)
@@ -232,15 +234,18 @@ func TestBinaryReplicatorBuildsAddressFromHostAndPort(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	serverErr := make(chan error, 1)
+
 	go func() {
 		serverErr <- srv.ListenAndServe(ctx)
 	}()
+
 	defer func() {
 		cancel()
 		assertAsyncError(t, serverErr, context.Canceled)
 	}()
 
 	addr := waitForAddr(t, srv)
+
 	host, port, err := net.SplitHostPort(addr.String())
 	if err != nil {
 		t.Fatalf("split addr: %v", err)
@@ -252,6 +257,7 @@ func TestBinaryReplicatorBuildsAddressFromHostAndPort(t *testing.T) {
 	}
 
 	rep := NewBinaryReplicator()
+
 	res, err := rep.FetchFromLeader(context.Background(), api.BrokerInfo{Host: host, Port: portNum}, FetchRequest{
 		Topic:     "alpha",
 		Partition: 0,

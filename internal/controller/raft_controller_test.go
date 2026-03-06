@@ -291,6 +291,7 @@ func TestRaftControllerRegisterBrokerSingleNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get metadata: %v", err)
 	}
+
 	if len(meta.Brokers) != 1 {
 		t.Fatalf("expected 1 broker, got %d", len(meta.Brokers))
 	}
@@ -306,6 +307,7 @@ func TestRaftControllerRegisterBrokerSingleNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get metadata after idempotent register: %v", err)
 	}
+
 	if meta.Version != firstVersion {
 		t.Fatalf("version should not change on identical re-register: got %d want %d", meta.Version, firstVersion)
 	}
@@ -318,6 +320,7 @@ func TestRaftControllerRegisterBrokerSingleNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get metadata after second broker register: %v", err)
 	}
+
 	if len(meta.Brokers) != 2 {
 		t.Fatalf("expected 2 brokers, got %d", len(meta.Brokers))
 	}
@@ -378,6 +381,7 @@ func TestRaftControllerRestartsWithPersistentState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get restored metadata: %v", err)
 	}
+
 	if restored.ClusterID != meta.ClusterID {
 		t.Fatalf("cluster id mismatch after restart: got %s want %s", restored.ClusterID, meta.ClusterID)
 	}
@@ -441,6 +445,7 @@ func TestRaftControllerMultiPeerAssignTopic(t *testing.T) {
 
 	if err := waitForMetadata(func() bool {
 		m1, err1 := rc1.GetClusterMetadata(ctx)
+
 		m2, err2 := rc2.GetClusterMetadata(ctx)
 		if err1 != nil || err2 != nil {
 			return false
@@ -628,6 +633,7 @@ func TestRaftControllerMultiPeerRegisterBrokerReplicates(t *testing.T) {
 
 	if err := waitForMetadata(func() bool {
 		m1, err1 := rc1.GetClusterMetadata(ctx)
+
 		m2, err2 := rc2.GetClusterMetadata(ctx)
 		if err1 != nil || err2 != nil {
 			return false

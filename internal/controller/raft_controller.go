@@ -279,7 +279,9 @@ func NewRaftController(cfg api.BrokerConfig, initialMeta api.ClusterMetadata, ra
 	if err != nil {
 		return nil, err
 	}
+
 	initOK := false
+
 	defer func() {
 		if initOK {
 			return

@@ -337,6 +337,7 @@ func run(parentCtx context.Context, logger *slog.Logger, opts startupOptions, fa
 
 func waitForSignal() {
 	sigCh := make(chan os.Signal, 1)
+
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
@@ -440,6 +441,7 @@ func postRegisterBrokerToLeader(
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
 			logger.Warn("failed to close leader register response body", "leader", leaderAddr, "err", closeErr)

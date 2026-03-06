@@ -178,6 +178,7 @@ func TestRecoverTruncatesCorruptTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open log: %v", err)
 	}
+
 	defer func() {
 		if err := m.Close(); err != nil {
 			t.Errorf("close manager: %v", err)
@@ -218,6 +219,7 @@ func TestRecoverTruncatesCorruptTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen log: %v", err)
 	}
+
 	defer func() {
 		if err := log.Close(); err != nil {
 			t.Errorf("close reopened log: %v", err)
@@ -279,6 +281,7 @@ func TestAppendAfterReopenPreservesExistingSegmentData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second manager: %v", err)
 	}
+
 	defer func() {
 		if err := second.Close(); err != nil {
 			t.Errorf("close second manager: %v", err)
@@ -289,6 +292,7 @@ func TestAppendAfterReopenPreservesExistingSegmentData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen log: %v", err)
 	}
+
 	defer func() {
 		if err := log.Close(); err != nil {
 			t.Errorf("close second log: %v", err)
@@ -399,6 +403,7 @@ func TestIndexRebuildAndSeek(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen log: %v", err)
 	}
+
 	defer func() {
 		if err := log.Close(); err != nil {
 			t.Errorf("close reopened log: %v", err)
@@ -453,6 +458,7 @@ func TestRetentionBySize(t *testing.T) {
 	}
 
 	logDir := filepath.Join(dir, "t", "0")
+
 	entries, err := os.ReadDir(logDir)
 	if err != nil {
 		t.Fatalf("readdir: %v", err)
@@ -673,6 +679,7 @@ func TestCorruptedIndexIsRebuiltOnOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen log after index corruption: %v", err)
 	}
+
 	defer func() {
 		if err := log.Close(); err != nil {
 			t.Errorf("close log: %v", err)

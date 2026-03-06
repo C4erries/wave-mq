@@ -70,6 +70,7 @@ func (s *OffsetStore) Recover(ctx context.Context) (map[string]map[string]map[in
 	}
 
 	size := info.Size()
+
 	var pos int64
 
 	header := make([]byte, 4)

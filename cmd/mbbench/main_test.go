@@ -29,7 +29,6 @@ func TestValidateBenchConfig(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -67,18 +66,23 @@ func TestParseFlags(t *testing.T) {
 	if cfg.brokerAddr != "10.0.0.1:7912" {
 		t.Fatalf("brokerAddr = %q", cfg.brokerAddr)
 	}
+
 	if cfg.topic != "topic-a" {
 		t.Fatalf("topic = %q", cfg.topic)
 	}
+
 	if cfg.partition != 3 {
 		t.Fatalf("partition = %d", cfg.partition)
 	}
+
 	if cfg.messages != 50 {
 		t.Fatalf("messages = %d", cfg.messages)
 	}
+
 	if cfg.valueSize != 256 {
 		t.Fatalf("valueSize = %d", cfg.valueSize)
 	}
+
 	if cfg.concurrency != 8 {
 		t.Fatalf("concurrency = %d", cfg.concurrency)
 	}
@@ -90,6 +94,7 @@ func TestBuildWorkQueueCount(t *testing.T) {
 	const want = 7
 
 	queue := buildWorkQueue(want)
+
 	got := 0
 	for range queue {
 		got++

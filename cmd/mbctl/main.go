@@ -473,6 +473,7 @@ func sendRequest(addr string, apiKey api.APIKey, payloadFn func() ([]byte, error
 	if err != nil {
 		return nil, err
 	}
+
 	defer func() {
 		if closeErr := conn.Close(); err == nil && closeErr != nil {
 			err = closeErr
