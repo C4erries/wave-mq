@@ -210,6 +210,65 @@ func TestMQTTQoS1IncomingDuplicateIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestMQTTQoS1CommitAfterPubackOnImmediateDisconnect(t *testing.T) {
+	b := newFakeBroker()
+	b.commitDelay = 80 * time.Millisecond
+	b.records["topic"] = map[int][]api.Record{
+		0: {},
+	}
+
+	srv, err := NewServerWithOptions("localhost:0", b, ServerOptions{
+		CommitFinalTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	client, server := net.Pipe()
+	defer mustCloseConn(t, client, "client")
+	defer mustCloseConn(t, server, "server")
+
+	go srv.handleConnection(server)
+
+	mustWritePacket(t, client, buildConnectPacket("client-fast-disconnect", false))
+	mustReadConnack(t, client)
+
+	mustWritePacket(t, client, buildSubscribePacket(1, "topic", qos1))
+	suback := mustReadSuback(t, client)
+	if len(suback.Granted) != 1 || suback.Granted[0] != qos1 {
+		t.Fatalf("unexpected SUBACK: %#v", suback.Granted)
+	}
+
+	b.appendRecord("topic", 0, 0, []byte("event-1"))
+
+	pub := mustReadPublish(t, client)
+	if pub.PacketID == 0 {
+		t.Fatalf("expected qos1 packet id")
+	}
+
+	if err := writePuback(client, &PubackPacket{PacketID: pub.PacketID}); err != nil {
+		t.Fatalf("write PUBACK: %v", err)
+	}
+
+	mustWritePacket(t, client, []byte{packetTypeDISCONNECT << 4, 0})
+
+	waitForCondition(
+		t,
+		2*time.Second,
+		func() bool { return b.commitCount() == 1 },
+		"expected commit after PUBACK even if client disconnects immediately",
+	)
+
+	off, ok := b.committedOffset("client-fast-disconnect", "topic", 0)
+	if !ok {
+		t.Fatalf("expected committed offset")
+	}
+
+	if off != 0 {
+		t.Fatalf("unexpected committed offset: %d", off)
+	}
+}
+
 func mustWritePacket(t *testing.T, conn net.Conn, payload []byte) {
 	t.Helper()
 

@@ -43,6 +43,7 @@ type ServerOptions struct {
 	FetchErrorBackoff  time.Duration
 	QoS1RetryInterval  time.Duration
 	CommitRetryBackoff time.Duration
+	CommitFinalTimeout time.Duration
 }
 
 func defaultServerOptions() ServerOptions {
@@ -51,6 +52,7 @@ func defaultServerOptions() ServerOptions {
 		FetchErrorBackoff:  100 * time.Millisecond,
 		QoS1RetryInterval:  300 * time.Millisecond,
 		CommitRetryBackoff: 100 * time.Millisecond,
+		CommitFinalTimeout: 5 * time.Second,
 	}
 }
 
@@ -83,6 +85,10 @@ func NewServerWithOptions(addr string, broker BrokerAPI, options ServerOptions) 
 
 	if options.CommitRetryBackoff <= 0 {
 		options.CommitRetryBackoff = defaultServerOptions().CommitRetryBackoff
+	}
+
+	if options.CommitFinalTimeout <= 0 {
+		options.CommitFinalTimeout = defaultServerOptions().CommitFinalTimeout
 	}
 
 	return &Server{addr: addr, broker: broker, options: options}, nil
@@ -496,7 +502,10 @@ func (state *clientState) sendQoS1AndWaitAck(
 
 			return ctx.Err()
 		case <-acked:
-			return state.commitWithRetry(ctx, sub.topic, sub.partition, offset)
+			commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), state.opts.CommitFinalTimeout)
+			defer commitCancel()
+
+			return state.commitWithRetry(commitCtx, sub.topic, sub.partition, offset)
 		case <-retryTimer.C:
 			pkt.Duplicate = true
 			if err := state.writePublish(pkt); err != nil {

@@ -15,13 +15,14 @@ import (
 )
 
 type fakeBroker struct {
-	mu        sync.Mutex
-	records   map[string]map[int][]api.Record
-	fetches   int
-	fetchErr  error
-	produced  int
-	committed map[string]map[string]map[int]api.Offset
-	commits   []api.Offset
+	mu          sync.Mutex
+	records     map[string]map[int][]api.Record
+	fetches     int
+	fetchErr    error
+	commitDelay time.Duration
+	produced    int
+	committed   map[string]map[string]map[int]api.Offset
+	commits     []api.Offset
 }
 
 func newFakeBroker() *fakeBroker {
@@ -144,7 +145,20 @@ func (b *fakeBroker) LeaveGroup(ctx context.Context, group, memberID string) err
 }
 
 func (b *fakeBroker) CommitOffset(ctx context.Context, group, topic string, partition int, offset api.Offset) error {
-	_ = ctx
+	if b.commitDelay > 0 {
+		timer := time.NewTimer(b.commitDelay)
+		defer timer.Stop()
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
