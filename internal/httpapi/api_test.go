@@ -14,6 +14,7 @@ import (
 	"github.com/c4erries/wave-mq/internal/broker"
 	"github.com/c4erries/wave-mq/internal/controller"
 	"github.com/c4erries/wave-mq/internal/metadata"
+	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
 )
@@ -499,6 +500,260 @@ func TestHTTPFetchNotLeader(t *testing.T) {
 
 	if out["error"] != "not_leader" || int(out["leaderBrokerID"].(float64)) != 2 {
 		t.Fatalf("unexpected response: %+v", out)
+	}
+}
+
+func TestHTTPProduceNotLeaderDoesNotForwardPartitionEndpoint(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1 << 20,
+		IndexInterval:   1,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+
+	offsetStore, err := broker.NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
+
+	ev := metadata.CreateTopicEvent{
+		Name:              "alpha",
+		NumPartitions:     1,
+		ReplicationFactor: 2,
+		Partitions: []metadata.PartitionSpec{
+			{ID: 0, Replicas: []metadata.ReplicaSpec{
+				{BrokerID: 1, Role: api.RoleFollower, LeaderEpoch: 0},
+				{BrokerID: 2, Role: api.RoleLeader, LeaderEpoch: 0},
+			}},
+		},
+	}
+	if err := metaStore.AppendCreateTopic(context.Background(), ev); err != nil {
+		t.Fatalf("append create topic: %v", err)
+	}
+
+	meta := api.ClusterMetadata{
+		Brokers: []api.BrokerInfo{
+			{BrokerID: 1, Host: "b1", HTTPAddr: "127.0.0.1:18091"},
+			{BrokerID: 2, Host: "b2", HTTPAddr: "127.0.0.1:18092"},
+		},
+		Partitions: []api.PartitionAssignment{
+			{Topic: "alpha", Partition: 0, Replicas: []int{1, 2}, Leader: 2, ISR: []int{2}},
+		},
+	}
+	ctrl := &followerCtrl{meta: meta}
+	cfg := api.BrokerConfig{
+		BrokerID:          1,
+		BinaryAddr:        ":7912",
+		MQTTAddr:          ":1883",
+		HTTPAddr:          ":8090",
+		ReplicationFactor: 2,
+		ControllerMode:    "raft",
+	}
+
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+
+	doer := &recordingDoer{
+		status: http.StatusOK,
+		body:   `{"partition":0,"baseOffset":123}`,
+	}
+
+	handler := NewWithHTTPClient(b, cfg, ctrl, doer)
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+
+	defer func() {
+		server.Close()
+		b.Close()
+		store.Close()
+		offsetStore.Close()
+		metaStore.Close()
+	}()
+
+	body := []byte(`{"value":"hello"}`)
+
+	resp, err := http.Post(server.URL+"/api/topics/alpha/partitions/0/messages", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+
+	var out map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if out["error"] != "not_leader" || int(out["leaderBrokerID"].(float64)) != 2 {
+		t.Fatalf("unexpected response: %+v", out)
+	}
+
+	if len(doer.requests) != 0 {
+		t.Fatalf("partition produce should not be forwarded, got %d forwarded request(s)", len(doer.requests))
+	}
+}
+
+func TestHTTPFetchNotLeaderDoesNotForwardPartitionEndpoint(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 1 << 20,
+		IndexInterval:   1,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+
+	offsetStore, err := broker.NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
+
+	ev := metadata.CreateTopicEvent{
+		Name:              "alpha",
+		NumPartitions:     1,
+		ReplicationFactor: 2,
+		Partitions: []metadata.PartitionSpec{
+			{ID: 0, Replicas: []metadata.ReplicaSpec{
+				{BrokerID: 1, Role: api.RoleFollower, LeaderEpoch: 0},
+				{BrokerID: 2, Role: api.RoleLeader, LeaderEpoch: 0},
+			}},
+		},
+	}
+	if err := metaStore.AppendCreateTopic(context.Background(), ev); err != nil {
+		t.Fatalf("append create topic: %v", err)
+	}
+
+	meta := api.ClusterMetadata{
+		Brokers: []api.BrokerInfo{
+			{BrokerID: 1, Host: "b1", HTTPAddr: "127.0.0.1:18091"},
+			{BrokerID: 2, Host: "b2", HTTPAddr: "127.0.0.1:18092"},
+		},
+		Partitions: []api.PartitionAssignment{
+			{Topic: "alpha", Partition: 0, Replicas: []int{1, 2}, Leader: 2, ISR: []int{2}},
+		},
+	}
+	ctrl := &followerCtrl{meta: meta}
+	cfg := api.BrokerConfig{
+		BrokerID:          1,
+		BinaryAddr:        ":7912",
+		MQTTAddr:          ":1883",
+		HTTPAddr:          ":8090",
+		ReplicationFactor: 2,
+		ControllerMode:    "raft",
+	}
+
+	b, err := broker.NewBroker(cfg, store, offsetStore, metaStore, ctrl, nil)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+
+	doer := &recordingDoer{
+		status: http.StatusOK,
+		body:   `[]`,
+	}
+
+	handler := NewWithHTTPClient(b, cfg, ctrl, doer)
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+
+	defer func() {
+		server.Close()
+		b.Close()
+		store.Close()
+		offsetStore.Close()
+		metaStore.Close()
+	}()
+
+	resp, err := http.Get(server.URL + "/api/topics/alpha/partitions/0/messages")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+
+	var out map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if out["error"] != "not_leader" || int(out["leaderBrokerID"].(float64)) != 2 {
+		t.Fatalf("unexpected response: %+v", out)
+	}
+
+	if len(doer.requests) != 0 {
+		t.Fatalf("partition fetch should not be forwarded, got %d forwarded request(s)", len(doer.requests))
+	}
+}
+
+func TestSummaryProducedUsesDurableLogCount(t *testing.T) {
+	observability.MessagesProduced.Reset()
+	t.Cleanup(observability.MessagesProduced.Reset)
+
+	server, b, store, offsetStore, metaStore := setupTestServer(t)
+	defer server.Close()
+	defer b.Close()
+	defer store.Close()
+	defer offsetStore.Close()
+	defer metaStore.Close()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "summary", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	if _, err := b.Produce(ctx, "summary", 0, []api.Record{
+		{Value: []byte("one")},
+		{Value: []byte("two")},
+	}); err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+
+	// Simulate metrics reset after restart: summary should still use durable log state.
+	observability.MessagesProduced.Reset()
+
+	resp, err := http.Get(server.URL + "/api/summary")
+	if err != nil {
+		t.Fatalf("summary request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var payload map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+
+	if got := payload["produced"]; got != float64(2) {
+		t.Fatalf("expected produced=2 from durable log, got %v", got)
 	}
 }
 

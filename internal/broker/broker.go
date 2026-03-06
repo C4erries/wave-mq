@@ -189,6 +189,8 @@ func NewBroker(cfg api.BrokerConfig, storage Storage, offsets *OffsetStore, meta
 		return nil, err
 	}
 
+	b.syncProducedMetricFromDurableState()
+
 	return b, nil
 }
 
@@ -581,6 +583,7 @@ func (b *Broker) handleClusterMetadataUpdate(ctx context.Context, meta api.Clust
 	}
 
 	b.updatePartitionMetadata(assignments)
+	b.syncProducedMetricFromDurableState()
 	atomic.StoreInt64(&b.metaVersion, meta.Version)
 
 	return nil
@@ -1261,6 +1264,29 @@ func (b *Broker) TopicAndPartitionCounts() (int, int) {
 	return topics, partitions
 }
 
+// ProducedMessagesCount returns the durable produced total for local leader partitions.
+func (b *Broker) ProducedMessagesCount() float64 {
+	assignments := b.clusterAssignmentsBestEffort(context.Background())
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	var total float64
+
+	for topicName, topic := range b.topics {
+		topicAssignments := assignments[topicName]
+		for pid, partition := range topic.Partitions {
+			if !b.isLeaderPartition(topicAssignments, pid, partition) {
+				continue
+			}
+
+			total += partitionDurableMessageCount(partition.Log)
+		}
+	}
+
+	return total
+}
+
 // LocalPartitionsSnapshot returns partition assignments this broker should serve.
 // If no cluster metadata provider is configured, it derives assignments from local topics.
 func (b *Broker) LocalPartitionsSnapshot(ctx context.Context) ([]api.PartitionAssignment, error) {
@@ -1436,18 +1462,57 @@ func (b *Broker) leaderPartitionCount(topic *Topic, topicAssignments map[int]api
 	leaderParts := 0
 
 	for pid, p := range topic.Partitions {
-		if topicAssignments != nil {
-			if assign, ok := topicAssignments[pid]; ok && assign.Leader != b.cfg.BrokerID {
-				continue
-			}
-		}
-
-		if !b.isClustered() || p.metadataSnapshot().Replica.Role == api.RoleLeader {
+		if b.isLeaderPartition(topicAssignments, pid, p) {
 			leaderParts++
 		}
 	}
 
 	return leaderParts
+}
+
+func (b *Broker) isLeaderPartition(
+	topicAssignments map[int]api.PartitionAssignment,
+	pid int,
+	partition *Partition,
+) bool {
+	if topicAssignments != nil {
+		if assign, ok := topicAssignments[pid]; ok && assign.Leader != b.cfg.BrokerID {
+			return false
+		}
+	}
+
+	return !b.isClustered() || partition.metadataSnapshot().Replica.Role == api.RoleLeader
+}
+
+func partitionDurableMessageCount(log storage.Log) float64 {
+	start := log.StartOffset()
+	high := log.HighWatermark()
+
+	if high < start || high < 0 {
+		return 0
+	}
+
+	return float64(high-start) + 1
+}
+
+func (b *Broker) syncProducedMetricFromDurableState() {
+	assignments := b.clusterAssignmentsBestEffort(context.Background())
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	for topicName, topic := range b.topics {
+		topicAssignments := assignments[topicName]
+		for pid, partition := range topic.Partitions {
+			if !b.isLeaderPartition(topicAssignments, pid, partition) {
+				continue
+			}
+
+			value := partitionDurableMessageCount(partition.Log)
+			labels := []string{topicName, strconv.Itoa(pid)}
+			observability.EnsureCounterAtLeast(observability.MessagesProduced, value, labels...)
+		}
+	}
 }
 
 func (b *Broker) clusterAssignmentsBestEffort(ctx context.Context) map[string]map[int]api.PartitionAssignment {

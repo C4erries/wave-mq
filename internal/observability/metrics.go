@@ -1,6 +1,9 @@
 package observability
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+)
 
 var (
 	MessagesProduced = prometheus.NewCounterVec(
@@ -77,4 +80,37 @@ func registerMetrics() struct{} {
 	)
 
 	return struct{}{}
+}
+
+// CounterValue returns the current value for a counter series.
+// Missing series and write errors are treated as zero.
+func CounterValue(counter *prometheus.CounterVec, labels ...string) float64 {
+	if counter == nil {
+		return 0
+	}
+
+	m := &dto.Metric{}
+	if err := counter.WithLabelValues(labels...).Write(m); err != nil {
+		return 0
+	}
+
+	if m.Counter == nil {
+		return 0
+	}
+
+	return m.Counter.GetValue()
+}
+
+// EnsureCounterAtLeast bumps a counter series to at least value.
+func EnsureCounterAtLeast(counter *prometheus.CounterVec, value float64, labels ...string) {
+	if counter == nil || value <= 0 {
+		return
+	}
+
+	current := CounterValue(counter, labels...)
+	if value <= current {
+		return
+	}
+
+	counter.WithLabelValues(labels...).Add(value - current)
 }

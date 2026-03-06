@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/c4erries/wave-mq/internal/metadata"
+	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func assertClose(t *testing.T, target string, err error) {
@@ -847,5 +849,87 @@ func TestConsumerGroupsSnapshotFallsBackToLocalHighWatermarks(t *testing.T) {
 
 	if assignments[0].Lag != 1 {
 		t.Fatalf("expected lag 1, got %d", assignments[0].Lag)
+	}
+}
+
+func TestProducedMetricRestoredFromDurableStateOnRestart(t *testing.T) {
+	observability.MessagesProduced.Reset()
+	t.Cleanup(observability.MessagesProduced.Reset)
+
+	dir := t.TempDir()
+	cfg := api.BrokerConfig{
+		BrokerID:          1,
+		ReplicationFactor: 1,
+		DataDir:           dir,
+	}
+	newBrokerWithDataDir := func() (*Broker, *storage.Manager, *OffsetStore, *metadata.Store) {
+		t.Helper()
+
+		store, err := storage.NewManager(storage.Config{
+			DataDir:         dir,
+			MaxSegmentBytes: 1024,
+			SyncOnAppend:    true,
+		})
+		if err != nil {
+			t.Fatalf("storage: %v", err)
+		}
+
+		offsetStore, err := NewOffsetStore(dir)
+		if err != nil {
+			t.Fatalf("offset store: %v", err)
+		}
+
+		metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+		if err != nil {
+			t.Fatalf("metadata store: %v", err)
+		}
+
+		b, err := NewBroker(cfg, store, offsetStore, metaStore, nil, nil)
+		if err != nil {
+			t.Fatalf("broker: %v", err)
+		}
+
+		return b, store, offsetStore, metaStore
+	}
+
+	ctx := context.Background()
+
+	b1, s1, o1, m1 := newBrokerWithDataDir()
+	if err := b1.CreateTopic(ctx, "restore", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	if _, err := b1.Produce(ctx, "restore", 0, []api.Record{
+		{Value: []byte("one")},
+		{Value: []byte("two")},
+		{Value: []byte("three")},
+	}); err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+
+	initial := testutil.ToFloat64(observability.MessagesProduced.WithLabelValues("restore", "0"))
+	if initial != 3 {
+		t.Fatalf("expected produced metric 3 before restart, got %.0f", initial)
+	}
+
+	requireClose(t, "broker", b1.Close())
+	requireClose(t, "storage", s1.Close())
+	requireClose(t, "offset store", o1.Close())
+	requireClose(t, "metadata store", m1.Close())
+
+	// Simulate process restart: in-memory counters are reset to zero.
+	observability.MessagesProduced.Reset()
+
+	b2, s2, o2, m2 := newBrokerWithDataDir()
+	defer func() {
+		assertClose(t, "broker", b2.Close())
+		assertClose(t, "storage", s2.Close())
+		assertClose(t, "offset store", o2.Close())
+		assertClose(t, "metadata store", m2.Close())
+	}()
+
+	restored := testutil.ToFloat64(observability.MessagesProduced.WithLabelValues("restore", "0"))
+	if restored != 3 {
+		t.Fatalf("expected produced metric restored to 3 after restart, got %.0f", restored)
 	}
 }

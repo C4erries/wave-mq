@@ -211,7 +211,7 @@ func (h *Handler) handleSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	topics, partitions := h.b.TopicAndPartitionCounts()
-	produced := sumCounter("wavemq_messages_produced_total")
+	produced := h.b.ProducedMessagesCount()
 	consumed := sumCounter("wavemq_messages_consumed_total")
 	reqErrors := sumCounter("wavemq_request_errors_total")
 	resp := map[string]interface{}{
@@ -507,14 +507,6 @@ func (h *Handler) partitionMessages(w http.ResponseWriter, r *http.Request, topi
 		var nle broker.NotLeaderError
 		switch {
 		case errors.As(err, &nle):
-			if status, payload, ok := h.forwardPartitionMessagesToLeader(r, topic, partition, nle.Leader); ok {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(status)
-				_, _ = w.Write(payload) // #nosec G705 -- payload is trusted JSON response from peer broker.
-
-				return
-			}
-
 			w.WriteHeader(http.StatusConflict)
 			writeJSON(w, map[string]interface{}{
 				"error":          "not_leader",
@@ -856,14 +848,6 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 
 			_ = errors.As(err, &nle)
 
-			if status, payload, ok := h.forwardPartitionProduceToLeader(r, topic, partition, req.Key, req.Value, nle.Leader); ok {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(status)
-				_, _ = w.Write(payload) // #nosec G705 -- payload is trusted JSON response from peer broker.
-
-				return
-			}
-
 			w.WriteHeader(http.StatusConflict)
 			writeJSON(w, map[string]interface{}{
 				"error":          "not_leader",
@@ -942,41 +926,6 @@ func (h *Handler) forwardPartitionMessagesToLeader(
 	}
 
 	return h.forwardRequest(req)
-}
-
-func (h *Handler) forwardPartitionProduceToLeader(
-	r *http.Request,
-	topic string,
-	partition int,
-	key *string,
-	value string,
-	leaderBrokerID int,
-) (int, []byte, bool) {
-	if r.Header.Get(forwardedCreateTopicHeader) != "" {
-		return 0, nil, false
-	}
-
-	baseURL, ok := h.resolveTopicsAPIByBrokerID(r.Context(), leaderBrokerID)
-	if !ok {
-		return 0, nil, false
-	}
-
-	payload := struct {
-		Key   *string `json:"key"`
-		Value string  `json:"value"`
-	}{
-		Key:   key,
-		Value: value,
-	}
-
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return 0, nil, false
-	}
-
-	u := baseURL + "/" + url.PathEscape(topic) + "/partitions/" + strconv.Itoa(partition) + "/messages"
-
-	return h.forwardToURL(r, http.MethodPost, u, data)
 }
 
 func (h *Handler) forwardTopicProduceToLeader(
