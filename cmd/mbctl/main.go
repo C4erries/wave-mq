@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -31,6 +32,77 @@ type commandContext struct {
 	stdout io.Writer
 	stderr io.Writer
 	now    func() time.Time
+
+	createTopic    func(string, *netproto.CreateTopicRequest) (*netproto.CreateTopicResponse, error)
+	produce        func(string, *netproto.ProduceRequest) (*netproto.ProduceResponse, error)
+	fetch          func(string, *netproto.FetchRequest) (*netproto.FetchResponse, error)
+	metadata       func(string, *netproto.MetadataRequest) (*netproto.MetadataResponse, error)
+	listOffsets    func(string, *netproto.ListOffsetsRequest) (*netproto.ListOffsetsResponse, error)
+	commitOffset   func(string, *netproto.CommitOffsetRequest) (*netproto.CommitOffsetResponse, error)
+	fetchCommitted func(string, *netproto.FetchCommittedRequest) (*netproto.FetchCommittedResponse, error)
+	ping           func(string) (*netproto.PingResponse, error)
+}
+
+type okJSONResponse struct {
+	OK bool `json:"ok"`
+}
+
+type pingJSONResponse struct {
+	OK    bool  `json:"ok"`
+	RTTMs int64 `json:"rttMs"`
+}
+
+type createTopicJSONResponse struct {
+	OK                bool   `json:"ok"`
+	Topic             string `json:"topic"`
+	Partitions        int    `json:"partitions"`
+	ReplicationFactor int    `json:"replicationFactor"`
+}
+
+type produceJSONResponse struct {
+	OK         bool       `json:"ok"`
+	BaseOffset api.Offset `json:"baseOffset"`
+}
+
+type fetchRecordJSON struct {
+	Offset api.Offset `json:"offset"`
+	Key    string     `json:"key"`
+	Value  string     `json:"value"`
+}
+
+type fetchJSONResponse struct {
+	OK            bool              `json:"ok"`
+	HighWatermark api.Offset        `json:"highWatermark"`
+	Records       []fetchRecordJSON `json:"records"`
+}
+
+type metadataPartitionJSON struct {
+	Topic         string     `json:"topic"`
+	Partition     int        `json:"partition"`
+	BrokerID      int        `json:"brokerId"`
+	Role          string     `json:"role"`
+	LeaderEpoch   int32      `json:"leaderEpoch"`
+	StartOffset   api.Offset `json:"startOffset"`
+	HighWatermark api.Offset `json:"highWatermark"`
+	Leader        int        `json:"leader"`
+	Replicas      []int      `json:"replicas"`
+	ISR           []int      `json:"isr"`
+}
+
+type metadataJSONResponse struct {
+	OK         bool                    `json:"ok"`
+	Partitions []metadataPartitionJSON `json:"partitions"`
+}
+
+type listOffsetsJSONResponse struct {
+	OK       bool       `json:"ok"`
+	Earliest api.Offset `json:"earliest"`
+	Latest   api.Offset `json:"latest"`
+}
+
+type fetchCommittedJSONResponse struct {
+	OK     bool       `json:"ok"`
+	Offset api.Offset `json:"offset"`
 }
 
 var commandList = []command{
@@ -51,22 +123,41 @@ func main() {
 	}
 }
 
+func newCommandContext(stdout, stderr io.Writer) *commandContext {
+	return &commandContext{
+		stdout:         stdout,
+		stderr:         stderr,
+		now:            time.Now,
+		createTopic:    sendCreateTopic,
+		produce:        sendProduce,
+		fetch:          sendFetch,
+		metadata:       sendMetadata,
+		listOffsets:    sendListOffsets,
+		commitOffset:   sendCommitOffset,
+		fetchCommitted: sendFetchCommitted,
+		ping:           sendPing,
+	}
+}
+
 func runCLI(args []string, stdout, stderr io.Writer) error {
-	ctx := &commandContext{stdout: stdout, stderr: stderr, now: time.Now}
+	return runCLIWithContext(args, newCommandContext(stdout, stderr))
+}
+
+func runCLIWithContext(args []string, ctx *commandContext) error {
 	if len(args) == 0 {
-		usage(stderr)
+		usage(ctx.stderr)
 		return nil
 	}
 
 	switch args[0] {
 	case "help", "-h", "--help":
-		usage(stderr)
+		usage(ctx.stderr)
 		return nil
 	}
 
 	cmd, ok := findCommand(args[0])
 	if !ok {
-		usage(stderr)
+		usage(ctx.stderr)
 		return fmt.Errorf("unknown command: %q", args[0])
 	}
 
@@ -106,12 +197,33 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	return fs
 }
 
+func addJSONFlag(fs *flag.FlagSet) *bool {
+	return fs.Bool("json", false, "emit machine-readable JSON output")
+}
+
+func writeJSON(w io.Writer, value any) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(value)
+}
+
+func partitionRoleName(role api.PartitionRole) string {
+	switch role {
+	case api.RoleLeader:
+		return "leader"
+	case api.RoleFollower:
+		return "follower"
+	default:
+		return fmt.Sprintf("unknown(%d)", role)
+	}
+}
+
 func runCreateTopic(ctx *commandContext, args []string) error {
 	fs := newFlagSet("create-topic", ctx.stderr)
+	jsonOutput := addJSONFlag(fs)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name")
 	partitions := fs.Int("partitions", 1, "number of partitions")
-
 	replication := fs.Int("replication-factor", 1, "replication factor")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -126,7 +238,7 @@ func runCreateTopic(ctx *commandContext, args []string) error {
 		return errors.New("topic is required")
 	}
 
-	resp, err := sendCreateTopic(*brokerAddr, req)
+	resp, err := ctx.createTopic(*brokerAddr, req)
 	if err != nil {
 		return err
 	}
@@ -135,18 +247,26 @@ func runCreateTopic(ctx *commandContext, args []string) error {
 		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	fmt.Fprintf(ctx.stdout, "topic %s created (partitions=%d rf=%d)\n", req.Topic, req.Partitions, req.ReplicationFactor)
+	if *jsonOutput {
+		return writeJSON(ctx.stdout, createTopicJSONResponse{
+			OK:                true,
+			Topic:             req.Topic,
+			Partitions:        req.Partitions,
+			ReplicationFactor: req.ReplicationFactor,
+		})
+	}
 
+	fmt.Fprintf(ctx.stdout, "topic %s created (partitions=%d rf=%d)\n", req.Topic, req.Partitions, req.ReplicationFactor)
 	return nil
 }
 
 func runProduce(ctx *commandContext, args []string) error {
 	fs := newFlagSet("produce", ctx.stderr)
+	jsonOutput := addJSONFlag(fs)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
 	key := fs.String("key", "", "record key (optional)")
-
 	value := fs.String("value", "", "record value")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -165,7 +285,7 @@ func runProduce(ctx *commandContext, args []string) error {
 		return errors.New("topic is required")
 	}
 
-	resp, err := sendProduce(*brokerAddr, req)
+	resp, err := ctx.produce(*brokerAddr, req)
 	if err != nil {
 		return err
 	}
@@ -174,18 +294,24 @@ func runProduce(ctx *commandContext, args []string) error {
 		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	fmt.Fprintf(ctx.stdout, "produced baseOffset=%d\n", resp.BaseOffset)
+	if *jsonOutput {
+		return writeJSON(ctx.stdout, produceJSONResponse{
+			OK:         true,
+			BaseOffset: resp.BaseOffset,
+		})
+	}
 
+	fmt.Fprintf(ctx.stdout, "produced baseOffset=%d\n", resp.BaseOffset)
 	return nil
 }
 
 func runFetch(ctx *commandContext, args []string) error {
 	fs := newFlagSet("fetch", ctx.stderr)
+	jsonOutput := addJSONFlag(fs)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
 	offset := fs.Int64("offset", 0, "starting offset")
-
 	maxBytes := fs.Int("max-bytes", 1<<20, "max bytes to fetch")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -207,7 +333,7 @@ func runFetch(ctx *commandContext, args []string) error {
 		MaxBytes:  maxFetchBytes,
 	}
 
-	resp, err := sendFetch(*brokerAddr, req)
+	resp, err := ctx.fetch(*brokerAddr, req)
 	if err != nil {
 		return err
 	}
@@ -216,8 +342,24 @@ func runFetch(ctx *commandContext, args []string) error {
 		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	for _, r := range resp.Records {
-		fmt.Fprintf(ctx.stdout, "offset=%d key=%s value=%s\n", r.Offset, string(r.Key), string(r.Value))
+	if *jsonOutput {
+		records := make([]fetchRecordJSON, 0, len(resp.Records))
+		for _, record := range resp.Records {
+			records = append(records, fetchRecordJSON{
+				Offset: record.Offset,
+				Key:    string(record.Key),
+				Value:  string(record.Value),
+			})
+		}
+		return writeJSON(ctx.stdout, fetchJSONResponse{
+			OK:            true,
+			HighWatermark: resp.HighWatermark,
+			Records:       records,
+		})
+	}
+
+	for _, record := range resp.Records {
+		fmt.Fprintf(ctx.stdout, "offset=%d key=%s value=%s\n", record.Offset, string(record.Key), string(record.Value))
 	}
 
 	return nil
@@ -225,8 +367,8 @@ func runFetch(ctx *commandContext, args []string) error {
 
 func runMetadata(ctx *commandContext, args []string) error {
 	fs := newFlagSet("metadata", ctx.stderr)
+	jsonOutput := addJSONFlag(fs)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
-
 	topic := fs.String("topic", "", "topic name (optional)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -237,7 +379,7 @@ func runMetadata(ctx *commandContext, args []string) error {
 		req.Topics = []string{*topic}
 	}
 
-	resp, err := sendMetadata(*brokerAddr, req)
+	resp, err := ctx.metadata(*brokerAddr, req)
 	if err != nil {
 		return err
 	}
@@ -246,9 +388,40 @@ func runMetadata(ctx *commandContext, args []string) error {
 		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	for _, p := range resp.Partitions {
-		fmt.Fprintf(ctx.stdout, "topic=%s partition=%d broker=%d role=%d epoch=%d start=%d hwm=%d\n",
-			p.Replica.Topic, p.Replica.Partition, p.Replica.BrokerID, p.Replica.Role, p.Replica.LeaderEpoch, p.StartOffset, p.HighWatermark)
+	if *jsonOutput {
+		partitions := make([]metadataPartitionJSON, 0, len(resp.Partitions))
+		for _, partitionMeta := range resp.Partitions {
+			partitions = append(partitions, metadataPartitionJSON{
+				Topic:         partitionMeta.Replica.Topic,
+				Partition:     partitionMeta.Replica.Partition,
+				BrokerID:      partitionMeta.Replica.BrokerID,
+				Role:          partitionRoleName(partitionMeta.Replica.Role),
+				LeaderEpoch:   partitionMeta.Replica.LeaderEpoch,
+				StartOffset:   partitionMeta.StartOffset,
+				HighWatermark: partitionMeta.HighWatermark,
+				Leader:        partitionMeta.Leader,
+				Replicas:      append([]int(nil), partitionMeta.Replicas...),
+				ISR:           append([]int(nil), partitionMeta.ISR...),
+			})
+		}
+		return writeJSON(ctx.stdout, metadataJSONResponse{
+			OK:         true,
+			Partitions: partitions,
+		})
+	}
+
+	for _, partitionMeta := range resp.Partitions {
+		fmt.Fprintf(
+			ctx.stdout,
+			"topic=%s partition=%d broker=%d role=%d epoch=%d start=%d hwm=%d\n",
+			partitionMeta.Replica.Topic,
+			partitionMeta.Replica.Partition,
+			partitionMeta.Replica.BrokerID,
+			partitionMeta.Replica.Role,
+			partitionMeta.Replica.LeaderEpoch,
+			partitionMeta.StartOffset,
+			partitionMeta.HighWatermark,
+		)
 	}
 
 	return nil
@@ -256,9 +429,9 @@ func runMetadata(ctx *commandContext, args []string) error {
 
 func runListOffsets(ctx *commandContext, args []string) error {
 	fs := newFlagSet("list-offsets", ctx.stderr)
+	jsonOutput := addJSONFlag(fs)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name")
-
 	partition := fs.Int("partition", 0, "partition id")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -269,8 +442,7 @@ func runListOffsets(ctx *commandContext, args []string) error {
 	}
 
 	req := &netproto.ListOffsetsRequest{Topic: *topic, Partition: *partition}
-
-	resp, err := sendListOffsets(*brokerAddr, req)
+	resp, err := ctx.listOffsets(*brokerAddr, req)
 	if err != nil {
 		return err
 	}
@@ -279,18 +451,25 @@ func runListOffsets(ctx *commandContext, args []string) error {
 		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	fmt.Fprintf(ctx.stdout, "earliest=%d latest=%d\n", resp.Earliest, resp.Latest)
+	if *jsonOutput {
+		return writeJSON(ctx.stdout, listOffsetsJSONResponse{
+			OK:       true,
+			Earliest: resp.Earliest,
+			Latest:   resp.Latest,
+		})
+	}
 
+	fmt.Fprintf(ctx.stdout, "earliest=%d latest=%d\n", resp.Earliest, resp.Latest)
 	return nil
 }
 
 func runCommitOffset(ctx *commandContext, args []string) error {
 	fs := newFlagSet("commit-offset", ctx.stderr)
+	jsonOutput := addJSONFlag(fs)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	group := fs.String("group", "", "consumer group")
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
-
 	offset := fs.Int64("offset", 0, "offset to commit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -307,7 +486,7 @@ func runCommitOffset(ctx *commandContext, args []string) error {
 		Offset:    api.Offset(*offset),
 	}
 
-	resp, err := sendCommitOffset(*brokerAddr, req)
+	resp, err := ctx.commitOffset(*brokerAddr, req)
 	if err != nil {
 		return err
 	}
@@ -316,17 +495,20 @@ func runCommitOffset(ctx *commandContext, args []string) error {
 		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	fmt.Fprintln(ctx.stdout, "commit-offset ok")
+	if *jsonOutput {
+		return writeJSON(ctx.stdout, okJSONResponse{OK: true})
+	}
 
+	fmt.Fprintln(ctx.stdout, "commit-offset ok")
 	return nil
 }
 
 func runFetchCommitted(ctx *commandContext, args []string) error {
 	fs := newFlagSet("fetch-committed", ctx.stderr)
+	jsonOutput := addJSONFlag(fs)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	group := fs.String("group", "", "consumer group")
 	topic := fs.String("topic", "", "topic name")
-
 	partition := fs.Int("partition", 0, "partition id")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -342,7 +524,7 @@ func runFetchCommitted(ctx *commandContext, args []string) error {
 		Partition: *partition,
 	}
 
-	resp, err := sendFetchCommitted(*brokerAddr, req)
+	resp, err := ctx.fetchCommitted(*brokerAddr, req)
 	if err != nil {
 		return err
 	}
@@ -351,22 +533,27 @@ func runFetchCommitted(ctx *commandContext, args []string) error {
 		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	fmt.Fprintf(ctx.stdout, "committed offset=%d\n", resp.Offset)
+	if *jsonOutput {
+		return writeJSON(ctx.stdout, fetchCommittedJSONResponse{
+			OK:     true,
+			Offset: resp.Offset,
+		})
+	}
 
+	fmt.Fprintf(ctx.stdout, "committed offset=%d\n", resp.Offset)
 	return nil
 }
 
 func runPing(ctx *commandContext, args []string) error {
 	fs := newFlagSet("ping", ctx.stderr)
-
+	jsonOutput := addJSONFlag(fs)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	start := ctx.now()
-
-	resp, err := sendPing(*brokerAddr)
+	resp, err := ctx.ping(*brokerAddr)
 	if err != nil {
 		return err
 	}
@@ -375,8 +562,15 @@ func runPing(ctx *commandContext, args []string) error {
 		return fmt.Errorf("request failed: %v", resp.Error)
 	}
 
-	fmt.Fprintf(ctx.stdout, "pong rtt=%s\n", ctx.now().Sub(start))
+	rtt := ctx.now().Sub(start)
+	if *jsonOutput {
+		return writeJSON(ctx.stdout, pingJSONResponse{
+			OK:    true,
+			RTTMs: rtt.Milliseconds(),
+		})
+	}
 
+	fmt.Fprintf(ctx.stdout, "pong rtt=%s\n", rtt)
 	return nil
 }
 
@@ -499,7 +693,6 @@ func sendRequest(addr string, apiKey api.APIKey, payloadFn func() ([]byte, error
 	}
 
 	_, _, respPayload, err = netproto.DecodeResponseFrame(conn)
-
 	return respPayload, err
 }
 

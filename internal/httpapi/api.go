@@ -58,6 +58,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/api/summary", withCORS(http.HandlerFunc(h.handleSummary)))
 	mux.Handle("/api/topics", withCORS(http.HandlerFunc(h.handleTopics)))
 	mux.Handle("/api/consumers", withCORS(http.HandlerFunc(h.handleConsumers)))
+	mux.Handle("/api/consumers/", withCORS(http.HandlerFunc(h.handleConsumerPaths)))
 	mux.Handle("/api/cluster", withCORS(http.HandlerFunc(h.handleClusterMetadata)))
 	mux.Handle("/api/controller", withCORS(http.HandlerFunc(h.handleControllerStatus)))
 	mux.Handle("/api/controller/brokers", withCORS(http.HandlerFunc(h.handleControllerRegisterBroker)))
@@ -538,6 +539,139 @@ func (h *Handler) handleConsumers(w http.ResponseWriter, r *http.Request) {
 
 	groups := h.b.ConsumerGroupsSnapshot(r.Context())
 	writeJSON(w, groups)
+}
+
+func (h *Handler) handleConsumerPaths(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/consumers/"), "/")
+	if len(parts) != 6 || parts[1] != "topics" || parts[3] != "partitions" || parts[5] != "offset" {
+		http.NotFound(w, r)
+		return
+	}
+
+	group := parts[0]
+	topic := parts[2]
+	if group == "" || topic == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	partition, err := strconv.Atoi(parts[4])
+	if err != nil {
+		http.Error(w, "invalid partition id", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.handleConsumerCommittedOffset(w, r, group, topic, partition)
+	case http.MethodPost:
+		h.handleConsumerCommitOffset(w, r, group, topic, partition)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Handler) handleConsumerCommittedOffset(w http.ResponseWriter, r *http.Request, group, topic string, partition int) {
+	if !h.consumerGroupExists(r.Context(), group) {
+		http.NotFound(w, r)
+		return
+	}
+
+	if !h.topicPartitionExists(topic, partition) {
+		http.NotFound(w, r)
+		return
+	}
+
+	offset, err := h.b.FetchCommitted(r.Context(), group, topic, partition)
+	if err != nil {
+		if h.consumerOffsetNotFound(err) {
+			http.NotFound(w, r)
+			return
+		}
+
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	writeJSON(w, consumerOffsetResponse{
+		Group:     group,
+		Topic:     topic,
+		Partition: partition,
+		Offset:    offset,
+	})
+}
+
+func (h *Handler) handleConsumerCommitOffset(w http.ResponseWriter, r *http.Request, group, topic string, partition int) {
+	if !h.topicPartitionExists(topic, partition) {
+		http.NotFound(w, r)
+		return
+	}
+
+	var req struct {
+		Offset api.Offset `json:"offset"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.b.CommitOffset(r.Context(), group, topic, partition, req.Offset); err != nil {
+		if h.consumerOffsetNotFound(err) {
+			http.NotFound(w, r)
+			return
+		}
+
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	writeJSON(w, consumerOffsetResponse{
+		Group:     group,
+		Topic:     topic,
+		Partition: partition,
+		Offset:    req.Offset,
+	})
+}
+
+type consumerOffsetResponse struct {
+	Group     string     `json:"group"`
+	Topic     string     `json:"topic"`
+	Partition int        `json:"partition"`
+	Offset    api.Offset `json:"offset"`
+}
+
+func (h *Handler) consumerGroupExists(ctx context.Context, group string) bool {
+	for _, info := range h.b.ConsumerGroupsSnapshot(ctx) {
+		if info.Name == group {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (h *Handler) topicPartitionExists(topic string, partition int) bool {
+	detail, ok := h.b.TopicDetail(topic)
+	if !ok {
+		return false
+	}
+
+	for _, p := range detail.Partitions {
+		if p.ID == partition {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (h *Handler) consumerOffsetNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "group not found") || strings.Contains(msg, "topic not found") || strings.Contains(msg, "partition not found")
 }
 
 func (h *Handler) handleCreateTopic(w http.ResponseWriter, r *http.Request) {

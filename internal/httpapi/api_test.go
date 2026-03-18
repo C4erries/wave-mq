@@ -1854,3 +1854,215 @@ func TestForwardToURLUsesInjectedHTTPClient(t *testing.T) {
 		t.Fatalf("content type not set, got %q", got.Header.Get("Content-Type"))
 	}
 }
+
+func TestConsumerOffsetsEndpoint(t *testing.T) {
+	server, b, store, offsetStore, metaStore := setupTestServer(t)
+	defer func() {
+		server.Close()
+		_ = b.Close()
+		_ = store.Close()
+		_ = offsetStore.Close()
+		_ = metaStore.Close()
+	}()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "alpha", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	if err := b.CommitOffset(ctx, "g1", "alpha", 0, 0); err != nil {
+		t.Fatalf("seed committed offset: %v", err)
+	}
+
+	commitURL := server.URL + "/api/consumers/g1/topics/alpha/partitions/0/offset"
+
+	t.Run("post happy path", func(t *testing.T) {
+		body := []byte(`{"offset":7}`)
+		req, err := http.NewRequest(http.MethodPost, commitURL, bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("post offset: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusOK)
+		}
+
+		var out consumerOffsetResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+
+		if out.Group != "g1" || out.Topic != "alpha" || out.Partition != 0 || out.Offset != 7 {
+			t.Fatalf("unexpected response: %+v", out)
+		}
+	})
+
+	t.Run("post creates new group on first commit", func(t *testing.T) {
+		body := []byte(`{"offset":2}`)
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/api/consumers/new-group/topics/alpha/partitions/0/offset", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("post first commit: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusOK)
+		}
+
+		var out consumerOffsetResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+
+		if out.Group != "new-group" || out.Topic != "alpha" || out.Partition != 0 || out.Offset != 2 {
+			t.Fatalf("unexpected response: %+v", out)
+		}
+	})
+
+	t.Run("get happy path", func(t *testing.T) {
+		resp, err := http.Get(commitURL)
+		if err != nil {
+			t.Fatalf("get offset: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusOK)
+		}
+
+		var out consumerOffsetResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+
+		if out.Group != "g1" || out.Topic != "alpha" || out.Partition != 0 || out.Offset != 7 {
+			t.Fatalf("unexpected response: %+v", out)
+		}
+	})
+
+	t.Run("snapshot unchanged", func(t *testing.T) {
+		resp, err := http.Get(server.URL + "/api/consumers")
+		if err != nil {
+			t.Fatalf("get consumers snapshot: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusOK)
+		}
+
+		var groups []struct {
+			Name        string `json:"name"`
+			Members     int    `json:"members"`
+			Assignments []struct {
+				Topic           string     `json:"topic"`
+				Partition       int        `json:"partition"`
+				CommittedOffset api.Offset `json:"committedOffset"`
+			} `json:"assignments"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&groups); err != nil {
+			t.Fatalf("decode snapshot: %v", err)
+		}
+
+		var found bool
+		for _, group := range groups {
+			if group.Name != "g1" {
+				continue
+			}
+			found = true
+		}
+		if !found {
+			t.Fatalf("group g1 not found in snapshot: %+v", groups)
+		}
+	})
+
+	t.Run("invalid partition", func(t *testing.T) {
+		resp, err := http.Get(server.URL + "/api/consumers/g1/topics/alpha/partitions/nope/offset")
+		if err != nil {
+			t.Fatalf("get invalid partition: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("invalid json", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodPost, commitURL, bytes.NewReader([]byte(`{"offset":`)))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("post invalid json: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("missing group", func(t *testing.T) {
+		resp, err := http.Get(server.URL + "/api/consumers/missing/topics/alpha/partitions/0/offset")
+		if err != nil {
+			t.Fatalf("get missing group: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusNotFound)
+		}
+	})
+
+	t.Run("missing topic", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/api/consumers/g1/topics/missing/partitions/0/offset", bytes.NewReader([]byte(`{"offset":1}`)))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("post missing topic: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusNotFound)
+		}
+	})
+
+	t.Run("method not allowed", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodPut, commitURL, http.NoBody)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put offset: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusMethodNotAllowed)
+		}
+	})
+}
