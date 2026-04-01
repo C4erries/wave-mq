@@ -50,7 +50,7 @@ func defaultServerOptions() ServerOptions {
 	return ServerOptions{
 		EmptyPollInterval:  50 * time.Millisecond,
 		FetchErrorBackoff:  100 * time.Millisecond,
-		QoS1RetryInterval:  300 * time.Millisecond,
+		QoS1RetryInterval:  1 * time.Second,
 		CommitRetryBackoff: 100 * time.Millisecond,
 		CommitFinalTimeout: 5 * time.Second,
 	}
@@ -496,6 +496,13 @@ func (state *clientState) sendQoS1AndWaitAck(
 	retryTimer := time.NewTimer(state.opts.QoS1RetryInterval)
 	defer retryTimer.Stop()
 
+	commitAfterAck := func() error {
+		commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), state.opts.CommitFinalTimeout)
+		defer commitCancel()
+
+		return state.commitWithRetry(commitCtx, sub.topic, sub.partition, offset)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -503,11 +510,15 @@ func (state *clientState) sendQoS1AndWaitAck(
 
 			return ctx.Err()
 		case <-acked:
-			commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), state.opts.CommitFinalTimeout)
-			defer commitCancel()
-
-			return state.commitWithRetry(commitCtx, sub.topic, sub.partition, offset)
+			return commitAfterAck()
 		case <-retryTimer.C:
+			// Prefer a late ACK over an unnecessary duplicate resend.
+			select {
+			case <-acked:
+				return commitAfterAck()
+			default:
+			}
+
 			pkt.Duplicate = true
 			if err := state.writePublish(pkt); err != nil {
 				state.cancelOutgoing(packetID)
