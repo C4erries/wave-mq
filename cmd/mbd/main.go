@@ -34,6 +34,11 @@ type replicationRunner interface {
 	Run(ctx context.Context) error
 }
 
+const (
+	defaultRetentionBytes = int64(-1)
+	defaultRetentionHours = 0
+)
+
 type appFactory struct {
 	newStorageManager    func(cfg storage.Config) (*storage.Manager, error)
 	newMetadataStore     func(cfg api.BrokerConfig) (*metadata.Store, error)
@@ -107,8 +112,8 @@ func parseStartupOptions(args []string) (startupOptions, error) {
 		replicationFactor = fs.Int("replication-factor", 1, "default replication factor for new topics")
 		segmentBytes      = fs.Int64("segment-bytes", 64<<20, "max segment size before rotation")
 		syncOnAppend      = fs.Bool("sync-on-append", true, "fsync log segment on append for durability")
-		retentionBytes    = fs.Int64("retention-bytes", -1, "total retention budget in bytes (-1 for unlimited)")
-		retentionHours    = fs.Int("retention-hours", 0, "retention by age in hours (0 disables time-based retention)")
+		retentionBytes    = fs.Int64("retention-bytes", defaultRetentionBytes, "total retention budget in bytes (-1 disables deletion; >0 enables size-based retention)")
+		retentionHours    = fs.Int("retention-hours", defaultRetentionHours, "retention by age in hours (0 disables deletion; >0 enables time-based retention)")
 		controllerMode    = fs.String("controller", "single", "controller mode: single or raft")
 		raftDir           = fs.String("raft-dir", "", "directory for Raft state (empty = in-memory)")
 		raftBind          = fs.String("raft-bind", "", "raft bind address for controller (host:port)")

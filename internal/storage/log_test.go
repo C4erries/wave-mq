@@ -420,6 +420,76 @@ func TestIndexRebuildAndSeek(t *testing.T) {
 	}
 }
 
+func TestRetentionDisabledByDefaultDoesNotDeleteSegments(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	m, err := NewManager(Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 128,
+		IndexInterval:   1,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+
+	log, err := m.OpenLog(LogOptions{Topic: "t", Partition: 0})
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+
+	defer func() {
+		if err := log.Close(); err != nil {
+			t.Errorf("close log: %v", err)
+		}
+
+		if err := m.Close(); err != nil {
+			t.Errorf("close manager: %v", err)
+		}
+	}()
+
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		if _, err := log.Append(ctx, api.Record{Value: []byte(strings.Repeat("d", 64))}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	recs, err := log.Read(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	if len(recs) != 20 {
+		t.Fatalf("expected 20 records, got %d", len(recs))
+	}
+
+	if recs[0].Offset != 0 {
+		t.Fatalf("expected first offset 0, got %d", recs[0].Offset)
+	}
+
+	if recs[len(recs)-1].Offset != 19 {
+		t.Fatalf("expected last offset 19, got %d", recs[len(recs)-1].Offset)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(dir, "t", "0"))
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+
+	logFiles := 0
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".log" {
+			logFiles++
+		}
+	}
+
+	if logFiles < 3 {
+		t.Fatalf("expected multiple retained segments with default retention disabled, got %d", logFiles)
+	}
+}
+
 func TestRetentionBySize(t *testing.T) {
 	t.Parallel()
 

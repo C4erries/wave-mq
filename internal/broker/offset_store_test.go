@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -293,5 +294,64 @@ func TestOffsetStoreAppendAfterCompactKeepsRecords(t *testing.T) {
 
 	if offsets["g3"]["t3"][2] != 9 {
 		t.Fatalf("expected g3/t3 offset 9, got %d", offsets["g3"]["t3"][2])
+	}
+}
+
+func TestOffsetStoreCompactRenameFailureKeepsWriterUsable(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	store, err := NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+
+	if err := store.AppendCommit(ctx, "g1", "t1", 0, 10); err != nil {
+		t.Fatalf("append g1/t1: %v", err)
+	}
+
+	snapshot := map[string]map[string]map[int]api.Offset{
+		"g1": {"t1": {0: 10}},
+	}
+
+	injectedErr := errors.New("rename failed")
+	oldRename := renameOffsetsLogFile
+	renameOffsetsLogFile = func(_, _ string) error {
+		return injectedErr
+	}
+	t.Cleanup(func() {
+		renameOffsetsLogFile = oldRename
+	})
+
+	err = store.Compact(ctx, snapshot)
+	if err == nil {
+		t.Fatalf("compact expected error")
+	}
+
+	if !errors.Is(err, injectedErr) {
+		t.Fatalf("compact error = %v, want wrapped %v", err, injectedErr)
+	}
+
+	if err := store.AppendCommit(ctx, "g2", "t2", 1, 20); err != nil {
+		t.Fatalf("append after failed compact: %v", err)
+	}
+
+	offsets, err := store.Recover(ctx)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+
+	if offsets["g1"]["t1"][0] != 10 {
+		t.Fatalf("expected g1/t1 offset 10, got %d", offsets["g1"]["t1"][0])
+	}
+
+	if offsets["g2"]["t2"][1] != 20 {
+		t.Fatalf("expected g2/t2 offset 20, got %d", offsets["g2"]["t2"][1])
 	}
 }

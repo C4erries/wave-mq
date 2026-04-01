@@ -29,6 +29,8 @@ const (
 	maxUint32 = uint64(^uint32(0))
 )
 
+var renameOffsetsLogFile = os.Rename
+
 type OffsetStore struct {
 	mu   sync.Mutex
 	f    *os.File
@@ -371,6 +373,9 @@ func (s *OffsetStore) Compact(ctx context.Context, offsets map[string]map[string
 		removeTempFile(tmpPath)
 		return err
 	}
+	// Persist temp file directory entry where supported. Some platforms/filesystems
+	// do not support directory fsync; keep this as best-effort.
+	syncDirBestEffort(dir)
 	// Swap files.
 	if s.f != nil {
 		if err := s.f.Close(); err != nil {
@@ -381,24 +386,17 @@ func (s *OffsetStore) Compact(ctx context.Context, offsets map[string]map[string
 		s.f = nil
 	}
 
-	if err := os.Rename(tmpPath, s.path); err != nil { // #nosec G703 -- tmpPath and target path are controlled local filesystem paths.
+	if err := renameOffsetsLogFile(tmpPath, s.path); err != nil { // #nosec G703 -- temp/target paths are controlled local filesystem paths.
+		removeTempFile(tmpPath)
+		if reopenErr := s.reopenWriterLocked(); reopenErr != nil {
+			return fmt.Errorf("rename compacted offsets log: %w (reopen writer failed: %v)", err, reopenErr)
+		}
 		return err
 	}
+	// Persist rename where supported.
+	syncDirBestEffort(dir)
 
-	newFile, err := os.OpenFile(s.path, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return err
-	}
-
-	if _, err := newFile.Seek(0, io.SeekEnd); err != nil {
-		_ = newFile.Close()
-
-		return err
-	}
-
-	s.f = newFile
-
-	return nil
+	return s.reopenWriterLocked()
 }
 
 func (s *OffsetStore) truncateTail(pos int64) error {
@@ -445,4 +443,29 @@ func toInt32(n int, field string) (int32, error) {
 
 func removeTempFile(path string) {
 	_ = os.Remove(path) // #nosec G703 -- path is created by os.CreateTemp in Compact.
+}
+
+func (s *OffsetStore) reopenWriterLocked() error {
+	newFile, err := os.OpenFile(s.path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+
+	if _, err := newFile.Seek(0, io.SeekEnd); err != nil {
+		_ = newFile.Close()
+		return err
+	}
+
+	s.f = newFile
+	return nil
+}
+
+func syncDirBestEffort(path string) {
+	dir, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer dir.Close()
+
+	_ = dir.Sync()
 }

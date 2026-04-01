@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -936,5 +937,92 @@ func TestProducedMetricRestoredFromDurableStateOnRestart(t *testing.T) {
 	restored := testutil.ToFloat64(observability.MessagesProduced.WithLabelValues("restore", "0"))
 	if restored != 3 {
 		t.Fatalf("expected produced metric restored to 3 after restart, got %.0f", restored)
+	}
+}
+
+func TestCreateTopicDefaultRetentionDisabledDoesNotDelete(t *testing.T) {
+	dir := t.TempDir()
+
+	store, err := storage.NewManager(storage.Config{
+		DataDir:         dir,
+		MaxSegmentBytes: 128,
+		SyncOnAppend:    true,
+		MaxLogBytes:     -1,
+	})
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+
+	offsetStore, err := NewOffsetStore(dir)
+	if err != nil {
+		t.Fatalf("offset store: %v", err)
+	}
+
+	metaStore, err := metadata.NewStore(api.BrokerConfig{DataDir: dir})
+	if err != nil {
+		t.Fatalf("metadata store: %v", err)
+	}
+
+	b, err := NewBroker(api.BrokerConfig{
+		BrokerID:          1,
+		ReplicationFactor: 1,
+		DataDir:           dir,
+		RetentionBytes:    -1,
+		RetentionTime:     0,
+	}, store, offsetStore, metaStore, nil, nil)
+	if err != nil {
+		t.Fatalf("broker: %v", err)
+	}
+
+	defer func() {
+		assertClose(t, "broker", b.Close())
+		assertClose(t, "storage", store.Close())
+		assertClose(t, "offset store", offsetStore.Close())
+		assertClose(t, "metadata store", metaStore.Close())
+	}()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "default-retention", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	payload := []byte(strings.Repeat("n", 64))
+	for i := 0; i < 60; i++ {
+		if _, err := b.Produce(ctx, "default-retention", 0, []api.Record{{Value: payload}}); err != nil {
+			t.Fatalf("produce %d: %v", i, err)
+		}
+	}
+
+	records, err := b.Fetch(ctx, "default-retention", 0, 0, 0)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+
+	if len(records) != 60 {
+		t.Fatalf("expected 60 records, got %d", len(records))
+	}
+
+	if records[0].Offset != 0 {
+		t.Fatalf("expected first offset 0, got %d", records[0].Offset)
+	}
+
+	if records[len(records)-1].Offset != 59 {
+		t.Fatalf("expected last offset 59, got %d", records[len(records)-1].Offset)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(dir, "default-retention", "0"))
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+
+	logFiles := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".log") {
+			logFiles++
+		}
+	}
+
+	if logFiles < 3 {
+		t.Fatalf("expected multiple retained log segments with default retention disabled, got %d", logFiles)
 	}
 }

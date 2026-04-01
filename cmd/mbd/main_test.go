@@ -221,6 +221,21 @@ func TestParseStartupOptions(t *testing.T) {
 	}
 }
 
+func TestParseStartupOptionsRetentionDefaultsAreDisabled(t *testing.T) {
+	opts, err := parseStartupOptions(nil)
+	if err != nil {
+		t.Fatalf("parseStartupOptions: %v", err)
+	}
+
+	if opts.cfg.RetentionBytes != defaultRetentionBytes {
+		t.Fatalf("retention bytes = %d, want %d", opts.cfg.RetentionBytes, defaultRetentionBytes)
+	}
+
+	if opts.cfg.RetentionTime != 0 {
+		t.Fatalf("retention time = %s, want 0", opts.cfg.RetentionTime)
+	}
+}
+
 func TestValidateBrokerConfig(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 

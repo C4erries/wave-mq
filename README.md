@@ -19,6 +19,7 @@ For a detailed architectural overview (in Russian) see: `docs/architecture.md`.
 ### 1. Core (current state)
 
 - Single-node broker with segmented WAL, sparse index, retention by size/age and crash-recovery.
+- Default retention deletion is disabled for single-node safety (`-retention-bytes=-1`, `-retention-hours=0`). Log cleanup is opt-in only.
 - Binary protocol server (`internal/netproto`), minimal MQTT frontend (`internal/mqtt`), CLI client (`cmd/mbctl`), HTTP admin API + React UI (`wave-ui`).
 - Persistent topic metadata via `metadata.log`; broker and HTTP API recover topics/partitions after restart.
 - Cluster metadata controller:

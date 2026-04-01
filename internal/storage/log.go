@@ -294,7 +294,7 @@ func (l *segmentedLog) bootstrap() error {
 		l.segments = append(l.segments, seg)
 
 		l.nextOffset = seg.nextOffset
-		if l.startOffset == 0 || base < l.startOffset {
+		if len(l.segments) == 1 || base < l.startOffset {
 			l.startOffset = base
 		}
 	}
@@ -354,7 +354,7 @@ func (l *segmentedLog) createSegment(base api.Offset) error {
 	}
 
 	l.segments = append(l.segments, seg)
-	if l.startOffset == 0 || base < l.startOffset {
+	if len(l.segments) == 1 || base < l.startOffset {
 		l.startOffset = base
 	}
 
