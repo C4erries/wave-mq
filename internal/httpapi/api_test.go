@@ -3,13 +3,18 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/c4erries/wave-mq/internal/broker"
 	"github.com/c4erries/wave-mq/internal/controller"
@@ -1444,6 +1449,91 @@ func TestProduceEndpoint(t *testing.T) {
 	}
 }
 
+func TestProduceEndpointRoundTripWithContentType(t *testing.T) {
+	server, b, store, offsetStore, metaStore := setupTestServer(t)
+	defer server.Close()
+	defer b.Close()
+	defer store.Close()
+	defer offsetStore.Close()
+	defer metaStore.Close()
+
+	ctx := context.Background()
+	if err := b.CreateTopic(ctx, "typed", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, math.Float64bits(12.5))
+	encoded := "base64:" + base64.StdEncoding.EncodeToString(buf)
+
+	body := []byte(`{"value":"` + encoded + `","contentType":"application/x.float64"}`)
+
+	resp, err := http.Post(server.URL+"/api/topics/typed/partitions/0/messages", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	fetchResp, err := http.Get(server.URL + "/api/topics/typed/partitions/0/messages?limit=1")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	defer fetchResp.Body.Close()
+
+	if fetchResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected fetch 200, got %d", fetchResp.StatusCode)
+	}
+
+	var out []map[string]interface{}
+	if err := json.NewDecoder(fetchResp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode fetch: %v", err)
+	}
+
+	if len(out) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(out))
+	}
+
+	if got := out[0]["contentType"]; got != "application/x.float64" {
+		t.Fatalf("unexpected content type: %v", got)
+	}
+
+	if got := out[0]["value"]; got != encoded {
+		t.Fatalf("unexpected encoded value: %v", got)
+	}
+}
+
+func TestRecordsResponseLegacyEncodingWithoutContentType(t *testing.T) {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, math.Float64bits(12.5))
+
+	resp := recordsResponse(0, []api.Record{{
+		Offset:    0,
+		Timestamp: mustTime(t, "2026-04-01T10:00:00Z"),
+		Value:     buf,
+	}})
+
+	if len(resp) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(resp))
+	}
+
+	value, ok := resp[0]["value"].(string)
+	if !ok {
+		t.Fatalf("expected string value, got %T", resp[0]["value"])
+	}
+
+	if strings.HasPrefix(value, "base64:") {
+		t.Fatalf("legacy response unexpectedly forced base64: %q", value)
+	}
+
+	if _, ok := resp[0]["contentType"]; ok {
+		t.Fatalf("legacy response unexpectedly included contentType")
+	}
+}
+
 func TestTopicProduceByKeyEndpoint(t *testing.T) {
 	server, b, store, offsetStore, metaStore := setupTestServer(t)
 	defer server.Close()
@@ -1818,6 +1908,17 @@ func (d *recordingDoer) Do(req *http.Request) (*http.Response, error) {
 		Body:       io.NopCloser(bytes.NewBufferString(d.body)),
 		Header:     make(http.Header),
 	}, nil
+}
+
+func mustTime(t *testing.T, value string) time.Time {
+	t.Helper()
+
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		t.Fatalf("parse time %q: %v", value, err)
+	}
+
+	return parsed
 }
 
 func TestForwardToURLUsesInjectedHTTPClient(t *testing.T) {

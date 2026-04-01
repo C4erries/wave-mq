@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -34,6 +35,19 @@ type Handler struct {
 }
 
 const forwardedCreateTopicHeader = "X-WaveMQ-Forwarded"
+const recordContentTypeHeader = "content-type"
+
+type topicProduceByKeyRequest struct {
+	Key         string `json:"key"`
+	Value       string `json:"value"`
+	ContentType string `json:"contentType,omitempty"`
+}
+
+type partitionProduceRequest struct {
+	Key         *string `json:"key"`
+	Value       string  `json:"value"`
+	ContentType string  `json:"contentType,omitempty"`
+}
 
 type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
@@ -304,10 +318,7 @@ func (h *Handler) topicMessages(w http.ResponseWriter, r *http.Request, topic st
 }
 
 func (h *Handler) topicProduceByKey(w http.ResponseWriter, r *http.Request, topic string) {
-	var req struct {
-		Key   string `json:"key"`
-		Value string `json:"value"`
-	}
+	var req topicProduceByKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
@@ -324,18 +335,25 @@ func (h *Handler) topicProduceByKey(w http.ResponseWriter, r *http.Request, topi
 		return
 	}
 
+	value, err := decodeMaybeBase64(req.Value)
+	if err != nil {
+		http.Error(w, "invalid value encoding", http.StatusBadRequest)
+		return
+	}
+
 	rec := api.Record{
 		Timestamp: time.Now().UTC(),
 		Key:       []byte(key),
-		Value:     []byte(req.Value),
+		Value:     value,
 	}
+	applyContentType(&rec, req.ContentType)
 
 	partition, base, err := h.b.ProduceByKey(r.Context(), topic, []byte(key), []api.Record{rec})
 	if err != nil {
 		var nle broker.NotLeaderError
 		switch {
 		case errors.As(err, &nle):
-			if status, payload, ok := h.forwardTopicProduceToLeader(r, topic, key, req.Value, nle.Leader); ok {
+			if status, payload, ok := h.forwardTopicProduceToLeader(r, topic, req, nle.Leader); ok {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
 				_, _ = w.Write(payload) // #nosec G705 -- payload is trusted JSON response from peer broker.
@@ -956,10 +974,7 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 		return
 	}
 
-	var req struct {
-		Key   *string `json:"key"`
-		Value string  `json:"value"`
-	}
+	var req partitionProduceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
@@ -970,13 +985,25 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 		return
 	}
 
+	value, err := decodeMaybeBase64(req.Value)
+	if err != nil {
+		http.Error(w, "invalid value encoding", http.StatusBadRequest)
+		return
+	}
+
 	rec := api.Record{
 		Timestamp: time.Now().UTC(),
-		Value:     []byte(req.Value),
+		Value:     value,
 	}
 	if req.Key != nil {
-		rec.Key = []byte(*req.Key)
+		key, err := decodeMaybeBase64(*req.Key)
+		if err != nil {
+			http.Error(w, "invalid key encoding", http.StatusBadRequest)
+			return
+		}
+		rec.Key = key
 	}
+	applyContentType(&rec, req.ContentType)
 
 	base, err := h.b.Produce(r.Context(), topic, partition, []api.Record{rec})
 	if err != nil {
@@ -1013,13 +1040,18 @@ func (h *Handler) partitionProduce(w http.ResponseWriter, r *http.Request, topic
 func recordsResponse(partition int, msgs []api.Record) []map[string]interface{} {
 	resp := make([]map[string]interface{}, 0, len(msgs))
 	for _, m := range msgs {
-		resp = append(resp, map[string]interface{}{
+		record := map[string]interface{}{
 			"partition": partition,
 			"offset":    int64(m.Offset),
 			"key":       encodeMaybeBase64(m.Key),
-			"value":     encodeMaybeBase64(m.Value),
+			"value":     encodeRecordValue(m.Value, m.Headers),
 			"timestamp": m.Timestamp.UTC().Format(time.RFC3339),
-		})
+		}
+		if contentType, ok := recordContentType(m.Headers); ok {
+			record["contentType"] = contentType
+		}
+
+		resp = append(resp, record)
 	}
 
 	return resp
@@ -1066,13 +1098,7 @@ func (h *Handler) forwardPartitionMessagesToLeader(
 	return h.forwardRequest(req)
 }
 
-func (h *Handler) forwardTopicProduceToLeader(
-	r *http.Request,
-	topic string,
-	key string,
-	value string,
-	leaderBrokerID int,
-) (int, []byte, bool) {
+func (h *Handler) forwardTopicProduceToLeader(r *http.Request, topic string, payload topicProduceByKeyRequest, leaderBrokerID int) (int, []byte, bool) {
 	if r.Header.Get(forwardedCreateTopicHeader) != "" {
 		return 0, nil, false
 	}
@@ -1080,14 +1106,6 @@ func (h *Handler) forwardTopicProduceToLeader(
 	baseURL, ok := h.resolveTopicsAPIByBrokerID(r.Context(), leaderBrokerID)
 	if !ok {
 		return 0, nil, false
-	}
-
-	payload := struct {
-		Key   string `json:"key"`
-		Value string `json:"value"`
-	}{
-		Key:   key,
-		Value: value,
 	}
 
 	data, err := json.Marshal(payload)
@@ -1136,6 +1154,78 @@ func encodeMaybeBase64(b []byte) interface{} {
 	}
 
 	return "base64:" + base64.StdEncoding.EncodeToString(b)
+}
+
+func encodeRecordValue(b []byte, headers []api.Header) interface{} {
+	contentType, ok := recordContentType(headers)
+	if !ok {
+		return encodeMaybeBase64(b)
+	}
+
+	if len(b) == 0 {
+		return ""
+	}
+
+	if isTextContentType(contentType) && utf8.Valid(b) {
+		return string(b)
+	}
+
+	return "base64:" + base64.StdEncoding.EncodeToString(b)
+}
+
+func recordContentType(headers []api.Header) (string, bool) {
+	for _, header := range headers {
+		if strings.EqualFold(header.Key, recordContentTypeHeader) {
+			value := strings.TrimSpace(string(header.Value))
+			if value == "" {
+				return "", false
+			}
+			return value, true
+		}
+	}
+
+	return "", false
+}
+
+func applyContentType(rec *api.Record, contentType string) {
+	value := strings.TrimSpace(contentType)
+	if value == "" {
+		return
+	}
+
+	rec.Headers = append(rec.Headers, api.Header{
+		Key:   recordContentTypeHeader,
+		Value: []byte(value),
+	})
+}
+
+func decodeMaybeBase64(raw string) ([]byte, error) {
+	if strings.HasPrefix(raw, "base64:") {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(raw, "base64:"))
+		if err != nil {
+			return nil, err
+		}
+		return decoded, nil
+	}
+
+	return []byte(raw), nil
+}
+
+func isTextContentType(contentType string) bool {
+	trimmed := strings.TrimSpace(contentType)
+	if trimmed == "" {
+		return false
+	}
+
+	mediaType, _, err := mime.ParseMediaType(trimmed)
+	if err != nil {
+		mediaType = trimmed
+	}
+
+	mediaType = strings.ToLower(mediaType)
+	return strings.HasPrefix(mediaType, "text/") ||
+		mediaType == "application/json" ||
+		strings.HasSuffix(mediaType, "+json")
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
