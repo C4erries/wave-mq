@@ -551,6 +551,149 @@ func decodeProduceResponse(payload []byte) (*ProduceResponse, error) {
 	return &ProduceResponse{BaseOffset: api.Offset(base), Error: api.ErrorCode(ec)}, nil
 }
 
+func encodeProduceByKeyRequest(req *ProduceByKeyRequest) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	if err := putString(buf, req.Topic); err != nil {
+		return nil, err
+	}
+
+	if err := putBytes(buf, req.Key); err != nil {
+		return nil, err
+	}
+
+	recordCount, err := toInt32Checked(len(req.Records), "record count")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, recordCount); err != nil {
+		return nil, err
+	}
+
+	for _, r := range req.Records {
+		if r.Timestamp.IsZero() {
+			r.Timestamp = time.Now()
+		}
+
+		recBytes, err := encodeRecord(r)
+		if err != nil {
+			return nil, err
+		}
+
+		recordLen, err := toInt32Checked(len(recBytes), "record bytes length")
+		if err != nil {
+			return nil, err
+		}
+
+		if err := binary.Write(buf, binary.BigEndian, recordLen); err != nil {
+			return nil, err
+		}
+
+		if _, err := buf.Write(recBytes); err != nil {
+			return nil, err
+		}
+	}
+
+	return buf.Bytes(), nil
+}
+
+func decodeProduceByKeyRequest(payload []byte) (*ProduceByKeyRequest, error) {
+	buf := bytes.NewBuffer(payload)
+
+	topic, err := readString(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	key, err := readBytes(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	var n int32
+	if err := binary.Read(buf, binary.BigEndian, &n); err != nil {
+		return nil, err
+	}
+
+	if n < 0 {
+		return nil, fmt.Errorf("negative record count")
+	}
+
+	if n > maxItemCount {
+		return nil, fmt.Errorf("record count %d exceeds max %d", n, maxItemCount)
+	}
+
+	recs := make([]api.Record, 0, int(n))
+	for i := int32(0); i < n; i++ {
+		var l int32
+		if err := binary.Read(buf, binary.BigEndian, &l); err != nil {
+			return nil, err
+		}
+
+		if l < 0 || int(l) > buf.Len() {
+			return nil, fmt.Errorf("invalid record length")
+		}
+
+		rBytes := buf.Next(int(l))
+		rbuf := bytes.NewBuffer(rBytes)
+
+		rec, err := decodeRecord(rbuf)
+		if err != nil {
+			return nil, err
+		}
+
+		recs = append(recs, rec)
+	}
+
+	return &ProduceByKeyRequest{
+		Topic:   topic,
+		Key:     key,
+		Records: recs,
+	}, nil
+}
+
+func encodeProduceByKeyResponse(resp *ProduceByKeyResponse) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	if resp.Partition < -1 || resp.Partition > maxInt32 {
+		return nil, fmt.Errorf("partition out of int32 range: %d", resp.Partition)
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int32(resp.Partition)); err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int64(resp.BaseOffset)); err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, int16(resp.Error)); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+func decodeProduceByKeyResponse(payload []byte) (*ProduceByKeyResponse, error) {
+	buf := bytes.NewBuffer(payload)
+
+	var partition int32
+	if err := binary.Read(buf, binary.BigEndian, &partition); err != nil {
+		return nil, err
+	}
+
+	var base int64
+	if err := binary.Read(buf, binary.BigEndian, &base); err != nil {
+		return nil, err
+	}
+
+	var ec int16
+	if err := binary.Read(buf, binary.BigEndian, &ec); err != nil {
+		return nil, err
+	}
+
+	return &ProduceByKeyResponse{Partition: int(partition), BaseOffset: api.Offset(base), Error: api.ErrorCode(ec)}, nil
+}
+
 func encodeFetchRequest(req *FetchRequest) ([]byte, error) {
 	buf := &bytes.Buffer{}
 	if err := putString(buf, req.Topic); err != nil {
@@ -1275,6 +1418,18 @@ func DecodeCreateTopicResponse(p []byte) (*CreateTopicResponse, error) {
 func EncodeProduceRequest(req *ProduceRequest) ([]byte, error)    { return encodeProduceRequest(req) }
 func EncodeProduceResponse(resp *ProduceResponse) ([]byte, error) { return encodeProduceResponse(resp) }
 func DecodeProduceResponse(p []byte) (*ProduceResponse, error)    { return decodeProduceResponse(p) }
+
+func EncodeProduceByKeyRequest(req *ProduceByKeyRequest) ([]byte, error) {
+	return encodeProduceByKeyRequest(req)
+}
+
+func EncodeProduceByKeyResponse(resp *ProduceByKeyResponse) ([]byte, error) {
+	return encodeProduceByKeyResponse(resp)
+}
+
+func DecodeProduceByKeyResponse(p []byte) (*ProduceByKeyResponse, error) {
+	return decodeProduceByKeyResponse(p)
+}
 
 func EncodeFetchRequest(req *FetchRequest) ([]byte, error)    { return encodeFetchRequest(req) }
 func EncodeFetchResponse(resp *FetchResponse) ([]byte, error) { return encodeFetchResponse(resp) }

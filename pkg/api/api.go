@@ -202,6 +202,7 @@ const (
 	APIKeyFetchCommitted
 	APIKeyMetadata
 	APIKeyPing
+	APIKeyProduceByKey
 )
 
 // ErrorCode is a lightweight numeric error for the binary protocol.

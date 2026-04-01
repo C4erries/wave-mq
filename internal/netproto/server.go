@@ -17,6 +17,7 @@ import (
 type BrokerAPI interface {
 	CreateTopic(ctx context.Context, name string, cfg api.TopicConfig) error
 	Produce(ctx context.Context, topic string, partition int, records []api.Record) (api.Offset, error)
+	ProduceByKey(ctx context.Context, topic string, key []byte, records []api.Record) (int, api.Offset, error)
 	Fetch(ctx context.Context, topic string, partition int, offset api.Offset, maxBytes int32) ([]api.Record, error)
 	ListOffsets(ctx context.Context, topic string, partition int) (api.Offset, api.Offset, error)
 	CommitOffset(ctx context.Context, group, topic string, partition int, offset api.Offset) error
@@ -193,6 +194,7 @@ func (s *Server) buildHandlers() map[api.APIKey]requestHandler {
 	return map[api.APIKey]requestHandler{
 		api.APIKeyCreateTopic:    s.handleCreateTopic,
 		api.APIKeyProduce:        s.handleProduce,
+		api.APIKeyProduceByKey:   s.handleProduceByKey,
 		api.APIKeyFetch:          s.handleFetch,
 		api.APIKeyMetadata:       s.handleMetadata,
 		api.APIKeyPing:           s.handlePing,
@@ -240,6 +242,26 @@ func (s *Server) handleProduce(ctx context.Context, payload []byte) ([]byte, err
 	}
 
 	return encodeProduceResponse(resp)
+}
+
+func (s *Server) handleProduceByKey(ctx context.Context, payload []byte) ([]byte, error) {
+	decoded, earlyResp, err := decodeRequest(api.APIKeyProduceByKey, payload, decodeProduceByKeyRequest, s.errorResponseForKey)
+	if decoded == nil || err != nil {
+		return earlyResp, err
+	}
+
+	req := decoded.(*ProduceByKeyRequest)
+
+	partition, base, err := s.broker.ProduceByKey(ctx, req.Topic, req.Key, req.Records)
+
+	resp := &ProduceByKeyResponse{Partition: partition, BaseOffset: base}
+	if err != nil {
+		resp.Error = mapError(err)
+
+		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
+	}
+
+	return encodeProduceByKeyResponse(resp)
 }
 
 func (s *Server) handleFetch(ctx context.Context, payload []byte) ([]byte, error) {
@@ -396,6 +418,8 @@ func (s *Server) errorResponseForKey(apiKey api.APIKey, code api.ErrorCode) ([]b
 		return encodeCreateTopicResponse(&CreateTopicResponse{Error: code})
 	case api.APIKeyProduce:
 		return encodeProduceResponse(&ProduceResponse{BaseOffset: -1, Error: code})
+	case api.APIKeyProduceByKey:
+		return encodeProduceByKeyResponse(&ProduceByKeyResponse{Partition: -1, BaseOffset: -1, Error: code})
 	case api.APIKeyFetch:
 		return encodeFetchResponse(&FetchResponse{Records: nil, Error: code})
 	case api.APIKeyMetadata:

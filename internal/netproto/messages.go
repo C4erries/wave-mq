@@ -27,6 +27,20 @@ type ProduceResponse struct {
 	Error      api.ErrorCode
 }
 
+// ProduceByKeyRequest carries a batch of records routed by the broker using key hashing.
+type ProduceByKeyRequest struct {
+	Topic   string
+	Key     []byte
+	Records []api.Record
+}
+
+// ProduceByKeyResponse contains the chosen partition and the first offset assigned to the batch.
+type ProduceByKeyResponse struct {
+	Partition  int
+	BaseOffset api.Offset
+	Error      api.ErrorCode
+}
+
 // FetchRequest pulls messages starting from Offset up to MaxBytes.
 type FetchRequest struct {
 	Topic     string

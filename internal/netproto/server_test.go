@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"hash/fnv"
 	"net"
+	"sort"
 	"testing"
 	"time"
 
@@ -86,6 +88,40 @@ func (b *fakeBroker) Produce(ctx context.Context, topic string, partition int, r
 	t[partition] = recs
 
 	return base, nil
+}
+
+func (b *fakeBroker) ProduceByKey(ctx context.Context, topic string, key []byte, records []api.Record) (int, api.Offset, error) {
+	t, ok := b.topics[topic]
+	if !ok {
+		return -1, -1, errTopicNotFound
+	}
+
+	if len(key) == 0 {
+		return -1, -1, fmt.Errorf("key required")
+	}
+
+	partitions := make([]int, 0, len(t))
+	for pid := range t {
+		partitions = append(partitions, pid)
+	}
+	sort.Ints(partitions)
+
+	hash := fnv.New32a()
+	_, _ = hash.Write(key)
+	partition := partitions[int(hash.Sum32()%uint32(len(partitions)))] // #nosec G115
+
+	for i := range records {
+		if len(records[i].Key) == 0 {
+			records[i].Key = append([]byte(nil), key...)
+		}
+	}
+
+	base, err := b.Produce(ctx, topic, partition, records)
+	if err != nil {
+		return partition, -1, err
+	}
+
+	return partition, base, nil
 }
 
 func (b *fakeBroker) Fetch(ctx context.Context, topic string, partition int, offset api.Offset, maxBytes int32) ([]api.Record, error) {
@@ -260,6 +296,24 @@ func TestServerHandlers(t *testing.T) {
 		t.Fatalf("produce resp: %+v err=%v", pResp, err)
 	}
 
+	// ProduceByKey
+	pbkReq := &ProduceByKeyRequest{Topic: "a", Key: []byte("sensor-42"), Records: []api.Record{{Value: []byte("vkey")}}}
+	pbkPayload, _ := encodeProduceByKeyRequest(pbkReq)
+
+	pbkRespPayload, err := send(api.APIKeyProduceByKey, 21, pbkPayload)
+	if err != nil {
+		t.Fatalf("produce-by-key send: %v", err)
+	}
+
+	pbkResp, err := decodeProduceByKeyResponse(pbkRespPayload)
+	if err != nil || pbkResp.Error != api.ErrNone || pbkResp.BaseOffset != 1 {
+		t.Fatalf("produce-by-key resp: %+v err=%v", pbkResp, err)
+	}
+
+	if pbkResp.Partition != 0 {
+		t.Fatalf("expected partition 0 for fake keyed route, got %d", pbkResp.Partition)
+	}
+
 	// Fetch
 	fReq := &FetchRequest{Topic: "a", Partition: 0, Offset: 0, MaxBytes: 0}
 	fPayload, _ := encodeFetchRequest(fReq)
@@ -270,7 +324,7 @@ func TestServerHandlers(t *testing.T) {
 	}
 
 	fResp, err := decodeFetchResponse(fRespPayload)
-	if err != nil || fResp.Error != api.ErrNone || len(fResp.Records) != 1 || !bytes.Equal(fResp.Records[0].Value, []byte("v1")) {
+	if err != nil || fResp.Error != api.ErrNone || len(fResp.Records) != 2 || !bytes.Equal(fResp.Records[0].Value, []byte("v1")) || !bytes.Equal(fResp.Records[1].Value, []byte("vkey")) {
 		t.Fatalf("fetch resp: %+v err=%v", fResp, err)
 	}
 
