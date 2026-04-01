@@ -479,6 +479,7 @@ func TestRetentionDisabledByDefaultDoesNotDeleteSegments(t *testing.T) {
 	}
 
 	logFiles := 0
+
 	for _, entry := range entries {
 		if filepath.Ext(entry.Name()) == ".log" {
 			logFiles++

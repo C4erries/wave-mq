@@ -388,9 +388,11 @@ func (s *OffsetStore) Compact(ctx context.Context, offsets map[string]map[string
 
 	if err := renameOffsetsLogFile(tmpPath, s.path); err != nil { // #nosec G703 -- temp/target paths are controlled local filesystem paths.
 		removeTempFile(tmpPath)
+
 		if reopenErr := s.reopenWriterLocked(); reopenErr != nil {
 			return fmt.Errorf("rename compacted offsets log: %w (reopen writer failed: %v)", err, reopenErr)
 		}
+
 		return err
 	}
 	// Persist rename where supported.
@@ -457,6 +459,7 @@ func (s *OffsetStore) reopenWriterLocked() error {
 	}
 
 	s.f = newFile
+
 	return nil
 }
 

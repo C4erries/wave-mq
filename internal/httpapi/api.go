@@ -549,6 +549,7 @@ func (h *Handler) handleConsumerPaths(w http.ResponseWriter, r *http.Request) {
 	}
 
 	group := parts[0]
+
 	topic := parts[2]
 	if group == "" || topic == "" {
 		http.NotFound(w, r)
@@ -590,6 +591,7 @@ func (h *Handler) handleConsumerCommittedOffset(w http.ResponseWriter, r *http.R
 		}
 
 		http.Error(w, err.Error(), http.StatusBadRequest)
+
 		return
 	}
 
@@ -622,6 +624,7 @@ func (h *Handler) handleConsumerCommitOffset(w http.ResponseWriter, r *http.Requ
 		}
 
 		http.Error(w, err.Error(), http.StatusBadRequest)
+
 		return
 	}
 
@@ -671,6 +674,7 @@ func (h *Handler) consumerOffsetNotFound(err error) bool {
 	}
 
 	msg := strings.ToLower(err.Error())
+
 	return strings.Contains(msg, "group not found") || strings.Contains(msg, "topic not found") || strings.Contains(msg, "partition not found")
 }
 

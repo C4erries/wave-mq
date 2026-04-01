@@ -1016,6 +1016,7 @@ func TestCreateTopicDefaultRetentionDisabledDoesNotDelete(t *testing.T) {
 	}
 
 	logFiles := 0
+
 	for _, entry := range entries {
 		if strings.HasSuffix(entry.Name(), ".log") {
 			logFiles++

@@ -1857,6 +1857,7 @@ func TestForwardToURLUsesInjectedHTTPClient(t *testing.T) {
 
 func TestConsumerOffsetsEndpoint(t *testing.T) {
 	server, b, store, offsetStore, metaStore := setupTestServer(t)
+
 	defer func() {
 		server.Close()
 		_ = b.Close()
@@ -1878,10 +1879,12 @@ func TestConsumerOffsetsEndpoint(t *testing.T) {
 
 	t.Run("post happy path", func(t *testing.T) {
 		body := []byte(`{"offset":7}`)
+
 		req, err := http.NewRequest(http.MethodPost, commitURL, bytes.NewReader(body))
 		if err != nil {
 			t.Fatalf("new request: %v", err)
 		}
+
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := http.DefaultClient.Do(req)
@@ -1906,10 +1909,12 @@ func TestConsumerOffsetsEndpoint(t *testing.T) {
 
 	t.Run("post creates new group on first commit", func(t *testing.T) {
 		body := []byte(`{"offset":2}`)
+
 		req, err := http.NewRequest(http.MethodPost, server.URL+"/api/consumers/new-group/topics/alpha/partitions/0/offset", bytes.NewReader(body))
 		if err != nil {
 			t.Fatalf("new request: %v", err)
 		}
+
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := http.DefaultClient.Do(req)
@@ -1978,12 +1983,15 @@ func TestConsumerOffsetsEndpoint(t *testing.T) {
 		}
 
 		var found bool
+
 		for _, group := range groups {
 			if group.Name != "g1" {
 				continue
 			}
+
 			found = true
 		}
+
 		if !found {
 			t.Fatalf("group g1 not found in snapshot: %+v", groups)
 		}
@@ -2006,6 +2014,7 @@ func TestConsumerOffsetsEndpoint(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new request: %v", err)
 		}
+
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := http.DefaultClient.Do(req)
@@ -2036,6 +2045,7 @@ func TestConsumerOffsetsEndpoint(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new request: %v", err)
 		}
+
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := http.DefaultClient.Do(req)

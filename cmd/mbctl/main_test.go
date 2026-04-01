@@ -94,6 +94,7 @@ func TestRunCLIPingTextOutputUnchanged(t *testing.T) {
 		if addr != "127.0.0.1:7912" {
 			t.Fatalf("unexpected broker addr: %s", addr)
 		}
+
 		return &netproto.PingResponse{Error: api.ErrNone}, nil
 	}
 
@@ -124,6 +125,7 @@ func TestRunCLIPingJSON(t *testing.T) {
 
 	var got pingJSONResponse
 	decodeJSON(t, out.String(), &got)
+
 	if !got.OK || got.RTTMs != 0 {
 		t.Fatalf("unexpected ping json: %+v", got)
 	}
@@ -140,9 +142,11 @@ func TestRunCLICreateTopicJSON(t *testing.T) {
 		if addr != "broker:7912" {
 			t.Fatalf("unexpected broker addr: %s", addr)
 		}
+
 		if req.Topic != "demo" || req.Partitions != 2 || req.ReplicationFactor != 1 {
 			t.Fatalf("unexpected request: %+v", req)
 		}
+
 		return &netproto.CreateTopicResponse{Error: api.ErrNone}, nil
 	}
 
@@ -155,6 +159,7 @@ func TestRunCLICreateTopicJSON(t *testing.T) {
 
 	var got createTopicJSONResponse
 	decodeJSON(t, out.String(), &got)
+
 	if !got.OK || got.Topic != "demo" || got.Partitions != 2 || got.ReplicationFactor != 1 {
 		t.Fatalf("unexpected create-topic json: %+v", got)
 	}
@@ -173,15 +178,19 @@ func TestRunCLIProduceJSON(t *testing.T) {
 		if addr != "broker:7912" {
 			t.Fatalf("unexpected broker addr: %s", addr)
 		}
+
 		if req.Topic != "demo" || req.Partition != 1 || len(req.Records) != 1 {
 			t.Fatalf("unexpected request: %+v", req)
 		}
+
 		if string(req.Records[0].Key) != "k" || string(req.Records[0].Value) != "v" {
 			t.Fatalf("unexpected record payload: %+v", req.Records[0])
 		}
+
 		if !req.Records[0].Timestamp.Equal(now) {
 			t.Fatalf("unexpected record timestamp: %v", req.Records[0].Timestamp)
 		}
+
 		return &netproto.ProduceResponse{BaseOffset: 7, Error: api.ErrNone}, nil
 	}
 
@@ -194,6 +203,7 @@ func TestRunCLIProduceJSON(t *testing.T) {
 
 	var got produceJSONResponse
 	decodeJSON(t, out.String(), &got)
+
 	if !got.OK || got.BaseOffset != 7 {
 		t.Fatalf("unexpected produce json: %+v", got)
 	}
@@ -236,9 +246,11 @@ func TestRunCLIFetchJSON(t *testing.T) {
 		if addr != "broker:7912" {
 			t.Fatalf("unexpected broker addr: %s", addr)
 		}
+
 		if req.Topic != "demo" || req.Partition != 0 || req.Offset != 3 || req.MaxBytes != 1024 {
 			t.Fatalf("unexpected request: %+v", req)
 		}
+
 		return &netproto.FetchResponse{
 			Error:         api.ErrNone,
 			HighWatermark: 9,
@@ -258,9 +270,11 @@ func TestRunCLIFetchJSON(t *testing.T) {
 
 	var got fetchJSONResponse
 	decodeJSON(t, out.String(), &got)
+
 	if !got.OK || got.HighWatermark != 9 || len(got.Records) != 2 {
 		t.Fatalf("unexpected fetch json: %+v", got)
 	}
+
 	if got.Records[0].Offset != 3 || got.Records[0].Key != "k1" || got.Records[0].Value != "v1" {
 		t.Fatalf("unexpected first record: %+v", got.Records[0])
 	}
@@ -277,9 +291,11 @@ func TestRunCLIMetadataJSON(t *testing.T) {
 		if addr != "broker:7912" {
 			t.Fatalf("unexpected broker addr: %s", addr)
 		}
+
 		if len(req.Topics) != 1 || req.Topics[0] != "demo" {
 			t.Fatalf("unexpected request topics: %+v", req.Topics)
 		}
+
 		return &netproto.MetadataResponse{
 			Error: api.ErrNone,
 			Partitions: []api.PartitionMetadata{{
@@ -306,13 +322,16 @@ func TestRunCLIMetadataJSON(t *testing.T) {
 
 	var got metadataJSONResponse
 	decodeJSON(t, out.String(), &got)
+
 	if !got.OK || len(got.Partitions) != 1 {
 		t.Fatalf("unexpected metadata json: %+v", got)
 	}
+
 	part := got.Partitions[0]
 	if part.Topic != "demo" || part.Role != "leader" || part.LeaderEpoch != 4 || part.HighWatermark != 8 {
 		t.Fatalf("unexpected partition json: %+v", part)
 	}
+
 	if len(part.Replicas) != 2 || part.Replicas[1] != 2 || len(part.ISR) != 1 || part.ISR[0] != 1 {
 		t.Fatalf("unexpected replica/isr json: %+v", part)
 	}
@@ -329,9 +348,11 @@ func TestRunCLIListOffsetsJSON(t *testing.T) {
 		if addr != "broker:7912" {
 			t.Fatalf("unexpected broker addr: %s", addr)
 		}
+
 		if req.Topic != "demo" || req.Partition != 1 {
 			t.Fatalf("unexpected request: %+v", req)
 		}
+
 		return &netproto.ListOffsetsResponse{Error: api.ErrNone, Earliest: 3, Latest: 11}, nil
 	}
 
@@ -342,6 +363,7 @@ func TestRunCLIListOffsetsJSON(t *testing.T) {
 
 	var got listOffsetsJSONResponse
 	decodeJSON(t, out.String(), &got)
+
 	if !got.OK || got.Earliest != 3 || got.Latest != 11 {
 		t.Fatalf("unexpected list-offsets json: %+v", got)
 	}
@@ -358,9 +380,11 @@ func TestRunCLICommitOffsetJSON(t *testing.T) {
 		if addr != "broker:7912" {
 			t.Fatalf("unexpected broker addr: %s", addr)
 		}
+
 		if req.Group != "g" || req.Topic != "demo" || req.Partition != 1 || req.Offset != 15 {
 			t.Fatalf("unexpected request: %+v", req)
 		}
+
 		return &netproto.CommitOffsetResponse{Error: api.ErrNone}, nil
 	}
 
@@ -373,6 +397,7 @@ func TestRunCLICommitOffsetJSON(t *testing.T) {
 
 	var got okJSONResponse
 	decodeJSON(t, out.String(), &got)
+
 	if !got.OK {
 		t.Fatalf("unexpected commit-offset json: %+v", got)
 	}
@@ -389,9 +414,11 @@ func TestRunCLIFetchCommittedJSON(t *testing.T) {
 		if addr != "broker:7912" {
 			t.Fatalf("unexpected broker addr: %s", addr)
 		}
+
 		if req.Group != "g" || req.Topic != "demo" || req.Partition != 0 {
 			t.Fatalf("unexpected request: %+v", req)
 		}
+
 		return &netproto.FetchCommittedResponse{Error: api.ErrNone, Offset: 22}, nil
 	}
 
@@ -402,6 +429,7 @@ func TestRunCLIFetchCommittedJSON(t *testing.T) {
 
 	var got fetchCommittedJSONResponse
 	decodeJSON(t, out.String(), &got)
+
 	if !got.OK || got.Offset != 22 {
 		t.Fatalf("unexpected fetch-committed json: %+v", got)
 	}
@@ -426,6 +454,7 @@ func TestRunCLIPingErrorLeavesStdoutEmpty(t *testing.T) {
 	if got := out.String(); got != "" {
 		t.Fatalf("stdout must stay empty on error, got %q", got)
 	}
+
 	if !strings.Contains(err.Error(), "dial failed") {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -473,6 +502,7 @@ func TestToInt32(t *testing.T) {
 func newStubCommandContext(stdout, stderr io.Writer) *commandContext {
 	ctx := newCommandContext(stdout, stderr)
 	ctx.now = stubNow(time.Unix(0, 0))
+
 	return ctx
 }
 
@@ -482,12 +512,15 @@ func stubNow(values ...time.Time) func() time.Time {
 	}
 
 	index := 0
+
 	return func() time.Time {
 		if index >= len(values) {
 			return values[len(values)-1]
 		}
+
 		value := values[index]
 		index++
+
 		return value
 	}
 }

@@ -204,6 +204,7 @@ func addJSONFlag(fs *flag.FlagSet) *bool {
 func writeJSON(w io.Writer, value any) error {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
+
 	return enc.Encode(value)
 }
 
@@ -224,6 +225,7 @@ func runCreateTopic(ctx *commandContext, args []string) error {
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name")
 	partitions := fs.Int("partitions", 1, "number of partitions")
+
 	replication := fs.Int("replication-factor", 1, "replication factor")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -257,6 +259,7 @@ func runCreateTopic(ctx *commandContext, args []string) error {
 	}
 
 	fmt.Fprintf(ctx.stdout, "topic %s created (partitions=%d rf=%d)\n", req.Topic, req.Partitions, req.ReplicationFactor)
+
 	return nil
 }
 
@@ -267,6 +270,7 @@ func runProduce(ctx *commandContext, args []string) error {
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
 	key := fs.String("key", "", "record key (optional)")
+
 	value := fs.String("value", "", "record value")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -302,6 +306,7 @@ func runProduce(ctx *commandContext, args []string) error {
 	}
 
 	fmt.Fprintf(ctx.stdout, "produced baseOffset=%d\n", resp.BaseOffset)
+
 	return nil
 }
 
@@ -312,6 +317,7 @@ func runFetch(ctx *commandContext, args []string) error {
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
 	offset := fs.Int64("offset", 0, "starting offset")
+
 	maxBytes := fs.Int("max-bytes", 1<<20, "max bytes to fetch")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -351,6 +357,7 @@ func runFetch(ctx *commandContext, args []string) error {
 				Value:  string(record.Value),
 			})
 		}
+
 		return writeJSON(ctx.stdout, fetchJSONResponse{
 			OK:            true,
 			HighWatermark: resp.HighWatermark,
@@ -369,6 +376,7 @@ func runMetadata(ctx *commandContext, args []string) error {
 	fs := newFlagSet("metadata", ctx.stderr)
 	jsonOutput := addJSONFlag(fs)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
+
 	topic := fs.String("topic", "", "topic name (optional)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -404,6 +412,7 @@ func runMetadata(ctx *commandContext, args []string) error {
 				ISR:           append([]int(nil), partitionMeta.ISR...),
 			})
 		}
+
 		return writeJSON(ctx.stdout, metadataJSONResponse{
 			OK:         true,
 			Partitions: partitions,
@@ -432,6 +441,7 @@ func runListOffsets(ctx *commandContext, args []string) error {
 	jsonOutput := addJSONFlag(fs)
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	topic := fs.String("topic", "", "topic name")
+
 	partition := fs.Int("partition", 0, "partition id")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -442,6 +452,7 @@ func runListOffsets(ctx *commandContext, args []string) error {
 	}
 
 	req := &netproto.ListOffsetsRequest{Topic: *topic, Partition: *partition}
+
 	resp, err := ctx.listOffsets(*brokerAddr, req)
 	if err != nil {
 		return err
@@ -460,6 +471,7 @@ func runListOffsets(ctx *commandContext, args []string) error {
 	}
 
 	fmt.Fprintf(ctx.stdout, "earliest=%d latest=%d\n", resp.Earliest, resp.Latest)
+
 	return nil
 }
 
@@ -470,6 +482,7 @@ func runCommitOffset(ctx *commandContext, args []string) error {
 	group := fs.String("group", "", "consumer group")
 	topic := fs.String("topic", "", "topic name")
 	partition := fs.Int("partition", 0, "partition id")
+
 	offset := fs.Int64("offset", 0, "offset to commit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -500,6 +513,7 @@ func runCommitOffset(ctx *commandContext, args []string) error {
 	}
 
 	fmt.Fprintln(ctx.stdout, "commit-offset ok")
+
 	return nil
 }
 
@@ -509,6 +523,7 @@ func runFetchCommitted(ctx *commandContext, args []string) error {
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	group := fs.String("group", "", "consumer group")
 	topic := fs.String("topic", "", "topic name")
+
 	partition := fs.Int("partition", 0, "partition id")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -541,18 +556,21 @@ func runFetchCommitted(ctx *commandContext, args []string) error {
 	}
 
 	fmt.Fprintf(ctx.stdout, "committed offset=%d\n", resp.Offset)
+
 	return nil
 }
 
 func runPing(ctx *commandContext, args []string) error {
 	fs := newFlagSet("ping", ctx.stderr)
 	jsonOutput := addJSONFlag(fs)
+
 	brokerAddr := fs.String("broker", "127.0.0.1:7912", "binary protocol address of broker")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	start := ctx.now()
+
 	resp, err := ctx.ping(*brokerAddr)
 	if err != nil {
 		return err
@@ -571,6 +589,7 @@ func runPing(ctx *commandContext, args []string) error {
 	}
 
 	fmt.Fprintf(ctx.stdout, "pong rtt=%s\n", rtt)
+
 	return nil
 }
 
@@ -693,6 +712,7 @@ func sendRequest(addr string, apiKey api.APIKey, payloadFn func() ([]byte, error
 	}
 
 	_, _, respPayload, err = netproto.DecodeResponseFrame(conn)
+
 	return respPayload, err
 }
 

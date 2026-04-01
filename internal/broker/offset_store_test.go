@@ -325,6 +325,7 @@ func TestOffsetStoreCompactRenameFailureKeepsWriterUsable(t *testing.T) {
 	renameOffsetsLogFile = func(_, _ string) error {
 		return injectedErr
 	}
+
 	t.Cleanup(func() {
 		renameOffsetsLogFile = oldRename
 	})
