@@ -21,96 +21,128 @@ func newFakeBroker() *fakeBroker {
 
 func (f *fakeBroker) CreateTopic(ctx context.Context, name string, cfg api.TopicConfig) error {
 	_ = ctx
+
 	if _, ok := f.data[name]; ok {
 		return nil
 	}
+
 	f.data[name] = make(map[int][]api.Record, cfg.Partitions)
 	for p := 0; p < cfg.Partitions; p++ {
 		f.data[name][p] = []api.Record{}
 	}
+
 	return nil
 }
 
 func (f *fakeBroker) Produce(ctx context.Context, topic string, partition int, records []api.Record) (api.Offset, error) {
 	_ = ctx
+
 	topicParts, ok := f.data[topic]
 	if !ok {
 		return -1, errors.New("topic not found")
 	}
+
 	recs, ok := topicParts[partition]
 	if !ok {
 		return -1, errors.New("partition not found")
 	}
+
 	base := api.Offset(len(recs))
 	for i := range records {
 		records[i].Offset = base + api.Offset(i)
 		recs = append(recs, records[i])
 	}
+
 	topicParts[partition] = recs
+
 	return base, nil
 }
 
 func (f *fakeBroker) Fetch(ctx context.Context, topic string, partition int, offset api.Offset, maxBytes int32) ([]api.Record, error) {
 	_ = ctx
+
 	topicParts, ok := f.data[topic]
 	if !ok {
 		return nil, errors.New("topic not found")
 	}
+
 	recs, ok := topicParts[partition]
 	if !ok {
 		return nil, errors.New("partition not found")
 	}
+
 	if offset < 0 || int(offset) > len(recs) {
 		return []api.Record{}, nil
 	}
+
 	res := recs[offset:]
+
 	if maxBytes > 0 {
-		var total int32
-		var trimmed []api.Record
+		var (
+			total   int
+			trimmed []api.Record
+		)
+
+		limit := int(maxBytes)
+
 		for _, r := range res {
-			total += int32(len(r.Value))
+			total += len(r.Value)
 			trimmed = append(trimmed, r)
-			if total >= maxBytes {
+
+			if total >= limit {
 				break
 			}
 		}
+
 		res = trimmed
 	}
+
 	return res, nil
 }
 
 func (f *fakeBroker) ListOffsets(ctx context.Context, topic string, partition int) (api.Offset, api.Offset, error) {
 	_ = ctx
+
 	topicParts, ok := f.data[topic]
 	if !ok {
 		return -1, -1, errors.New("topic not found")
 	}
+
 	recs, ok := topicParts[partition]
 	if !ok {
 		return -1, -1, errors.New("partition not found")
 	}
+
 	if len(recs) == 0 {
 		return 0, -1, nil
 	}
+
 	return 0, api.Offset(len(recs) - 1), nil
 }
 
-func (f *fakeBroker) CommitOffset(ctx context.Context, group string, topic string, partition int, offset api.Offset) error {
+func (f *fakeBroker) CommitOffset(ctx context.Context, group, topic string, partition int, offset api.Offset) error {
 	_ = ctx
 	_ = group
 	_ = topic
 	_ = partition
 	_ = offset
+
 	return nil
 }
 
-func (f *fakeBroker) FetchCommitted(ctx context.Context, group string, topic string, partition int) (api.Offset, error) {
+func (f *fakeBroker) FetchCommitted(ctx context.Context, group, topic string, partition int) (api.Offset, error) {
+	_ = ctx
+	_ = group
+	_ = topic
+	_ = partition
+
 	return -1, errors.New("not implemented")
 }
 
 func (f *fakeBroker) Metadata(ctx context.Context, topics []string) ([]api.PartitionMetadata, error) {
 	_ = ctx
 	_ = topics
+
 	return nil, nil
 }
 
@@ -119,23 +151,35 @@ func TestBinaryReplicatorFetchSuccess(t *testing.T) {
 	if err := b.CreateTopic(context.Background(), "alpha", api.TopicConfig{Partitions: 1}); err != nil {
 		t.Fatalf("create topic: %v", err)
 	}
-	_, _ = b.Produce(context.Background(), "alpha", 0, []api.Record{
+
+	if _, err := b.Produce(context.Background(), "alpha", 0, []api.Record{
 		{Value: []byte("one")},
 		{Value: []byte("two")},
-	})
+	}); err != nil {
+		t.Fatalf("produce: %v", err)
+	}
 
 	srv, err := netproto.NewServer("127.0.0.1:0", b)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
+
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	serverErr := make(chan error, 1)
+
 	go func() {
-		_ = srv.ListenAndServe(ctx)
+		serverErr <- srv.ListenAndServe(ctx)
 	}()
+
+	defer func() {
+		cancel()
+		assertAsyncError(t, serverErr, context.Canceled)
+	}()
+
 	addr := waitForAddr(t, srv)
 
 	rep := NewBinaryReplicator()
+
 	res, err := rep.FetchFromLeader(context.Background(), api.BrokerInfo{Host: addr.String()}, FetchRequest{
 		Topic:     "alpha",
 		Partition: 0,
@@ -145,12 +189,15 @@ func TestBinaryReplicatorFetchSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
+
 	if len(res.Records) != 2 {
 		t.Fatalf("expected 2 records, got %d", len(res.Records))
 	}
+
 	if string(res.Records[0].Value) != "one" || string(res.Records[1].Value) != "two" {
 		t.Fatalf("unexpected payloads: %+v", res.Records)
 	}
+
 	if res.HighWatermark != 1 {
 		t.Fatalf("expected hwm 1, got %d", res.HighWatermark)
 	}
@@ -158,6 +205,7 @@ func TestBinaryReplicatorFetchSuccess(t *testing.T) {
 
 func TestBinaryReplicatorConnectionFailure(t *testing.T) {
 	rep := NewBinaryReplicator()
+
 	_, err := rep.FetchFromLeader(context.Background(), api.BrokerInfo{Host: "127.0.0.1:1"}, FetchRequest{
 		Topic:     "missing",
 		Partition: 0,
@@ -169,15 +217,108 @@ func TestBinaryReplicatorConnectionFailure(t *testing.T) {
 	}
 }
 
+func TestBinaryReplicatorBuildsAddressFromHostAndPort(t *testing.T) {
+	b := newFakeBroker()
+	if err := b.CreateTopic(context.Background(), "alpha", api.TopicConfig{Partitions: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+
+	if _, err := b.Produce(context.Background(), "alpha", 0, []api.Record{{Value: []byte("one")}}); err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+
+	srv, err := netproto.NewServer("127.0.0.1:0", b)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serverErr := make(chan error, 1)
+
+	go func() {
+		serverErr <- srv.ListenAndServe(ctx)
+	}()
+
+	defer func() {
+		cancel()
+		assertAsyncError(t, serverErr, context.Canceled)
+	}()
+
+	addr := waitForAddr(t, srv)
+
+	host, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		t.Fatalf("split addr: %v", err)
+	}
+
+	portNum, err := net.LookupPort("tcp", port)
+	if err != nil {
+		t.Fatalf("lookup port: %v", err)
+	}
+
+	rep := NewBinaryReplicator()
+
+	res, err := rep.FetchFromLeader(context.Background(), api.BrokerInfo{Host: host, Port: portNum}, FetchRequest{
+		Topic:     "alpha",
+		Partition: 0,
+		Offset:    0,
+		MaxBytes:  1024,
+	})
+	if err != nil {
+		t.Fatalf("fetch with host+port: %v", err)
+	}
+
+	if len(res.Records) != 1 || string(res.Records[0].Value) != "one" {
+		t.Fatalf("unexpected response: %+v", res.Records)
+	}
+}
+
+func TestBinaryReplicatorRejectsEmptyLeaderHost(t *testing.T) {
+	rep := NewBinaryReplicator()
+
+	_, err := rep.FetchFromLeader(context.Background(), api.BrokerInfo{}, FetchRequest{
+		Topic:     "alpha",
+		Partition: 0,
+		Offset:    0,
+		MaxBytes:  1,
+	})
+	if err == nil {
+		t.Fatalf("expected error for empty leader host")
+	}
+}
+
 // waitForAddr waits until server listener is available.
 func waitForAddr(t *testing.T, srv *netproto.Server) net.Addr {
 	t.Helper()
-	for i := 0; i < 50; i++ {
+
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
 		if addr := srv.Addr(); addr != nil {
 			return addr
 		}
-		time.Sleep(20 * time.Millisecond)
+
+		select {
+		case <-timer.C:
+			t.Fatalf("server did not start listening in time")
+		case <-ticker.C:
+		}
 	}
-	t.Fatalf("server did not start listening in time")
-	return nil
+}
+
+func assertAsyncError(t *testing.T, errCh <-chan error, expected error) {
+	t.Helper()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, expected) {
+			t.Fatalf("unexpected async error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("async operation did not stop in time")
+	}
 }

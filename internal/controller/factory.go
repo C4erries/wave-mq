@@ -12,21 +12,24 @@ import (
 func NewController(cfg api.BrokerConfig, topics map[string]metadata.TopicState) (MetadataStore, error) {
 	mode := cfg.ControllerMode
 	if mode == "" {
-		mode = "single"
+		mode = api.ControllerModeSingle
 	}
+
 	switch mode {
-	case "single":
+	case api.ControllerModeSingle:
 		return NewSingleNodeController(cfg, topics)
-	case "raft":
+	case api.ControllerModeRaft:
 		brokers, clusterID, err := resolveBrokers(cfg)
 		if err != nil {
 			return nil, err
 		}
+
 		initial := api.ClusterMetadata{
 			ClusterID: clusterID,
 			Version:   1,
 			Brokers:   brokers,
 		}
+
 		return NewRaftController(cfg, initial, cfg.RaftDir)
 	default:
 		return nil, fmt.Errorf("unknown controller mode: %s", cfg.ControllerMode)

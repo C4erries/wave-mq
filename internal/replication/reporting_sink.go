@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/c4erries/wave-mq/internal/controller"
@@ -18,7 +19,7 @@ type reportingSink struct {
 }
 
 // NewReportingSink wraps a sink to report progress to the controller.
-func NewReportingSink(inner Sink, ctrl controller.MetadataStore, topic string, part int, brokerID int) Sink {
+func NewReportingSink(inner Sink, ctrl controller.MetadataStore, topic string, part, brokerID int) Sink {
 	return &reportingSink{
 		inner:    inner,
 		ctrl:     ctrl,
@@ -33,19 +34,31 @@ func (s *reportingSink) ApplyBatch(ctx context.Context, records []api.Record, hi
 	if err != nil {
 		return last, err
 	}
+
 	if len(records) > 0 {
-		observability.ReplicationApplied.WithLabelValues(s.topic, fmt.Sprintf("%d", s.part), fmt.Sprintf("%d", s.brokerID)).Add(float64(len(records)))
+		observability.ReplicationApplied.
+			WithLabelValues(s.topic, fmt.Sprintf("%d", s.part), fmt.Sprintf("%d", s.brokerID)).
+			Add(float64(len(records)))
 	}
+
 	lag := highWatermark - last
 	if lag < 0 {
 		lag = 0
 	}
+
 	observability.ReplicationLag.WithLabelValues(s.topic, fmt.Sprintf("%d", s.part), fmt.Sprintf("%d", s.brokerID)).Set(float64(lag))
+
 	if s.ctrl != nil {
 		if _, err := s.ctrl.ReportReplicaProgress(ctx, s.topic, s.part, s.brokerID, last, highWatermark); err != nil {
+			var nle controller.NotLeaderError
+			if errors.As(err, &nle) || errors.Is(err, controller.ErrNotLeader) || errors.Is(err, controller.ErrLeaderNotElected) {
+				return last, nil
+			}
+
 			return last, err
 		}
 	}
+
 	return last, nil
 }
 
@@ -54,6 +67,7 @@ func (s *reportingSink) NextOffset() (api.Offset, error) {
 	if prov, ok := s.inner.(OffsetProvider); ok {
 		return prov.NextOffset()
 	}
+
 	return 0, nil
 }
 
@@ -62,8 +76,10 @@ func (s *reportingSink) EnsureLeaderHighWatermark(ctx context.Context, leaderHig
 	if align, ok := s.inner.(HighWatermarkAligner); ok {
 		return align.EnsureLeaderHighWatermark(ctx, leaderHighWatermark)
 	}
+
 	if prov, ok := s.inner.(OffsetProvider); ok {
 		return prov.NextOffset()
 	}
+
 	return 0, nil
 }

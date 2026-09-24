@@ -1,0 +1,121 @@
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - copyloopvar
+    - depguard
+    - dogsled
+    - dupl
+    - errcheck
+    - exhaustive
+    - funlen
+    - gochecknoinits
+    - gocognit
+    - goconst
+    - gocritic
+    - gocyclo
+    - godot
+    - goprintffuncname
+    - gosec
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - nestif
+    - nolintlint
+    - paralleltest
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+    - whitespace
+    - wsl_v5
+  settings:
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: github.com/go-playground/assert/v2
+              desc: Use github.com/stretchr/testify/assert instead, which we already depend on.
+    dupl:
+      threshold: 300
+    funlen:
+      lines: 75
+      statements: 50
+    gocritic:
+      disabled-checks:
+        - unnamedResult
+      enabled-tags:
+        - style
+        - experimental
+        - performance
+        - diagnostic
+        - opinionated
+    lll:
+      line-length: 140
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - dupl
+          - funlen
+          - gocognit
+          - goconst
+        path: _test.go
+      - linters:
+          - gocritic
+        path: test/(.+)
+        text: 'hugeParam\: \S+ is heavy \(\d+ bytes\)\; consider passing it by pointer'
+      - linters:
+          - paralleltest
+        path-except: test/(.+)
+      - linters:
+          - staticcheck
+        text: "SA1019"
+      - linters:
+          - revive
+        text: "avoid meaningless package names"
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+    goimports:
+      local-prefixes:
+        - github.com/c4erries/wave-mq
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -2,16 +2,20 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/c4erries/wave-mq/internal/controller"
 	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/internal/storage"
 	"github.com/c4erries/wave-mq/pkg/api"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 type fakeController struct {
-	calls []struct {
+	reportErr error
+	calls     []struct {
 		topic string
 		part  int
 		bid   int
@@ -21,20 +25,37 @@ type fakeController struct {
 }
 
 func (f *fakeController) GetClusterMetadata(ctx context.Context) (api.ClusterMetadata, error) {
+	_ = ctx
+
 	return api.ClusterMetadata{}, nil
 }
 
 func (f *fakeController) WatchClusterMetadata(ctx context.Context, sinceVersion int64) (<-chan api.ClusterMetadata, error) {
+	_ = ctx
+	_ = sinceVersion
+
 	ch := make(chan api.ClusterMetadata)
 	close(ch)
+
 	return ch, nil
 }
 
 func (f *fakeController) AssignTopic(ctx context.Context, name string, cfg api.TopicConfig) (api.ClusterMetadata, error) {
+	_ = ctx
+	_ = name
+	_ = cfg
+
 	return api.ClusterMetadata{}, nil
 }
 
-func (f *fakeController) ReportReplicaProgress(ctx context.Context, topic string, partition int, brokerID int, lastOffset api.Offset, leaderHighWatermark api.Offset) (api.ClusterMetadata, error) {
+func (f *fakeController) ReportReplicaProgress(
+	ctx context.Context,
+	topic string,
+	partition, brokerID int,
+	lastOffset, leaderHighWatermark api.Offset,
+) (api.ClusterMetadata, error) {
+	_ = ctx
+
 	f.calls = append(f.calls, struct {
 		topic string
 		part  int
@@ -42,12 +63,14 @@ func (f *fakeController) ReportReplicaProgress(ctx context.Context, topic string
 		last  api.Offset
 		hwm   api.Offset
 	}{topic: topic, part: partition, bid: brokerID, last: lastOffset, hwm: leaderHighWatermark})
-	return api.ClusterMetadata{}, nil
+
+	return api.ClusterMetadata{}, f.reportErr
 }
 
 func (f *fakeController) RegisterBroker(ctx context.Context, info api.BrokerInfo) error {
 	_ = ctx
 	_ = info
+
 	return nil
 }
 
@@ -59,6 +82,7 @@ func (s *stubSink) ApplyBatch(ctx context.Context, records []api.Record, highWat
 	_ = ctx
 	_ = records
 	_ = highWatermark
+
 	return s.last, nil
 }
 
@@ -69,35 +93,56 @@ func (s *stubSink) NextOffset() (api.Offset, error) {
 func TestReportingSinkReportsProgress(t *testing.T) {
 	observability.ReplicationApplied.Reset()
 	observability.ReplicationLag.Reset()
+
 	dir := t.TempDir()
+
 	store, err := storage.NewManager(storage.Config{DataDir: dir})
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
+
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close storage: %v", err)
+		}
+	}()
+
 	inner := NewWALSink(store, "alpha", 0)
 	ctrl := &fakeController{}
 	sink := NewReportingSink(inner, ctrl, "alpha", 0, 2)
+
 	last, err := sink.ApplyBatch(context.Background(), []api.Record{{Value: []byte("x")}}, 5)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
+
 	if last != 0 {
 		t.Fatalf("expected last offset 0, got %d", last)
 	}
+
 	if len(ctrl.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(ctrl.calls))
 	}
+
 	call := ctrl.calls[0]
 	if call.topic != "alpha" || call.part != 0 || call.bid != 2 || call.last != 0 || call.hwm != 5 {
 		t.Fatalf("unexpected call: %+v", call)
 	}
-	log, _ := store.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
-	_ = log.Close()
+
+	log, err := store.OpenLog(storage.LogOptions{Topic: "alpha", Partition: 0})
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+
+	if err := log.Close(); err != nil {
+		t.Fatalf("close log: %v", err)
+	}
 
 	applied := testutil.ToFloat64(observability.ReplicationApplied.WithLabelValues("alpha", "0", "2"))
 	if applied != 1 {
 		t.Fatalf("expected applied counter 1, got %f", applied)
 	}
+
 	lag := testutil.ToFloat64(observability.ReplicationLag.WithLabelValues("alpha", "0", "2"))
 	if lag != 5 {
 		t.Fatalf("expected lag 5, got %f", lag)
@@ -107,20 +152,54 @@ func TestReportingSinkReportsProgress(t *testing.T) {
 func TestReportingSinkUpdatesLagWithoutRecords(t *testing.T) {
 	observability.ReplicationApplied.Reset()
 	observability.ReplicationLag.Reset()
+
 	sink := NewReportingSink(&stubSink{last: 2}, nil, "beta", 1, 3)
+
 	last, err := sink.ApplyBatch(context.Background(), nil, 7)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
+
 	if last != 2 {
 		t.Fatalf("unexpected last offset %d", last)
 	}
+
 	lag := testutil.ToFloat64(observability.ReplicationLag.WithLabelValues("beta", "1", "3"))
 	if lag != 5 {
 		t.Fatalf("expected lag 5, got %f", lag)
 	}
+
 	applied := testutil.ToFloat64(observability.ReplicationApplied.WithLabelValues("beta", "1", "3"))
 	if applied != 0 {
 		t.Fatalf("expected no applied records, got %f", applied)
+	}
+}
+
+func TestReportingSinkIgnoresControllerLeaderTransitions(t *testing.T) {
+	observability.ReplicationApplied.Reset()
+	observability.ReplicationLag.Reset()
+
+	ctrl := &fakeController{
+		reportErr: controller.NotLeaderError{Leader: "leader:9001"},
+	}
+	sink := NewReportingSink(&stubSink{last: 4}, ctrl, "gamma", 2, 3)
+
+	last, err := sink.ApplyBatch(context.Background(), []api.Record{{Value: []byte("x")}}, 6)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	if last != 4 {
+		t.Fatalf("expected last offset 4, got %d", last)
+	}
+
+	if len(ctrl.calls) != 1 {
+		t.Fatalf("expected 1 progress call, got %d", len(ctrl.calls))
+	}
+
+	ctrl.reportErr = errors.New("controller failed")
+
+	if _, err := sink.ApplyBatch(context.Background(), []api.Record{{Value: []byte("y")}}, 7); err == nil {
+		t.Fatalf("expected non-leader controller error to be returned")
 	}
 }

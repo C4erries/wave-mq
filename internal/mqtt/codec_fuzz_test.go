@@ -14,22 +14,36 @@ func FuzzReadPacketDoesNotPanic(f *testing.F) {
 				t.Fatalf("panic in readPacket: %v", r)
 			}
 		}()
-		_, _ = readPacket(bytes.NewReader(data))
+
+		if _, err := readPacket(bytes.NewReader(data)); err != nil {
+			return
+		}
 	})
 }
 
 func makeConnectPacket(cleanStart bool) []byte {
 	body := &bytes.Buffer{}
-	_ = writeString(body, "MQTT")
+	if err := writeString(body, "MQTT"); err != nil {
+		panic(err)
+	}
+
 	body.WriteByte(4)
+
 	flags := byte(0)
 	if cleanStart {
 		flags = 0b00000010
 	}
+
 	body.WriteByte(flags)
 	body.Write([]byte{0, 10})
-	_ = writeString(body, "fuzz-client")
-	header := []byte{packetTypeCONNECT << 4}
+
+	if err := writeString(body, "fuzz-client"); err != nil {
+		panic(err)
+	}
+
+	header := make([]byte, 0, 1+4)
+	header = append(header, packetTypeCONNECT<<4)
 	header = append(header, encodeRemainingLength(body.Len())...)
+
 	return append(header, body.Bytes()...)
 }

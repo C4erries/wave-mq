@@ -2,15 +2,15 @@ package mqtt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
+	"log/slog"
 	"net"
 	"sort"
 	"sync"
 	"time"
-
-	"log/slog"
 
 	"github.com/c4erries/wave-mq/internal/observability"
 	"github.com/c4erries/wave-mq/pkg/api"
@@ -30,32 +30,107 @@ type BrokerAPI interface {
 
 // Server hosts the MQTT TCP listener and packet loop.
 type Server struct {
-	addr   string
-	broker BrokerAPI
-	ln     net.Listener
+	mu      sync.RWMutex
+	addr    string
+	broker  BrokerAPI
+	options ServerOptions
+	ln      net.Listener
+	started bool
+}
+
+type ServerOptions struct {
+	EmptyPollInterval  time.Duration
+	FetchErrorBackoff  time.Duration
+	QoS1RetryInterval  time.Duration
+	CommitRetryBackoff time.Duration
+	CommitFinalTimeout time.Duration
+}
+
+func defaultServerOptions() ServerOptions {
+	return ServerOptions{
+		EmptyPollInterval:  50 * time.Millisecond,
+		FetchErrorBackoff:  100 * time.Millisecond,
+		QoS1RetryInterval:  1 * time.Second,
+		CommitRetryBackoff: 100 * time.Millisecond,
+		CommitFinalTimeout: 5 * time.Second,
+	}
 }
 
 // NewServer constructs an MQTT server.
 func NewServer(addr string, broker BrokerAPI) (*Server, error) {
+	return NewServerWithOptions(addr, broker, defaultServerOptions())
+}
+
+// NewServerWithOptions constructs an MQTT server with explicit runtime options.
+func NewServerWithOptions(addr string, broker BrokerAPI, options ServerOptions) (*Server, error) {
 	if broker == nil {
 		return nil, fmt.Errorf("broker is required")
 	}
+
 	if addr == "" {
 		return nil, fmt.Errorf("addr is required")
 	}
-	return &Server{addr: addr, broker: broker}, nil
+
+	if options.EmptyPollInterval <= 0 {
+		options.EmptyPollInterval = defaultServerOptions().EmptyPollInterval
+	}
+
+	if options.FetchErrorBackoff <= 0 {
+		options.FetchErrorBackoff = defaultServerOptions().FetchErrorBackoff
+	}
+
+	if options.QoS1RetryInterval <= 0 {
+		options.QoS1RetryInterval = defaultServerOptions().QoS1RetryInterval
+	}
+
+	if options.CommitRetryBackoff <= 0 {
+		options.CommitRetryBackoff = defaultServerOptions().CommitRetryBackoff
+	}
+
+	if options.CommitFinalTimeout <= 0 {
+		options.CommitFinalTimeout = defaultServerOptions().CommitFinalTimeout
+	}
+
+	return &Server{addr: addr, broker: broker, options: options}, nil
 }
 
 // ListenAndServe accepts MQTT clients until ctx is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
+	s.mu.Lock()
+	if s.started {
+		s.mu.Unlock()
+		return fmt.Errorf("server already started")
+	}
+
+	s.started = true
+	s.mu.Unlock()
+
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
+		s.mu.Lock()
+		s.started = false
+		s.mu.Unlock()
+
 		return err
 	}
+
+	s.mu.Lock()
 	s.ln = ln
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.ln = nil
+		s.started = false
+		s.mu.Unlock()
+	}()
+
 	go func() {
 		<-ctx.Done()
-		_ = ln.Close()
+
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			slog.Error("mqtt listener close failed", "err", err)
+		}
 	}()
 
 	for {
@@ -66,30 +141,50 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 				return nil
 			default:
 			}
+
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+
 			return err
 		}
+
 		go s.handleConnection(conn)
 	}
 }
 
 // Close stops the listener.
 func (s *Server) Close() error {
-	if s.ln != nil {
-		return s.ln.Close()
+	s.mu.RLock()
+	ln := s.ln
+	s.mu.RUnlock()
+
+	if ln == nil {
+		return nil
 	}
+
+	if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+
 	return nil
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
 	state := &clientState{
-		conn:   conn,
-		ctx:    ctx,
-		cancel: cancel,
-		subs:   make(map[string]subscriptionState),
-		broker: s.broker,
+		conn:             conn,
+		ctx:              ctx,
+		cancel:           cancel,
+		subs:             make(map[string]subscriptionState),
+		broker:           s.broker,
+		opts:             s.options,
+		outboundQoS1Acks: make(map[uint16]outboundQoS1),
+		inboundQoS1Seen:  make(map[uint16]uint64),
 	}
 	for {
 		pkt, err := readPacket(conn)
@@ -97,8 +192,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 			if err != io.EOF {
 				observability.RequestErrors.WithLabelValues("mqtt", "decode_packet").Inc()
 			}
+
 			return
 		}
+
 		switch v := pkt.(type) {
 		case *ConnectPacket:
 			if err := s.handleConnect(state, v); err != nil {
@@ -115,10 +212,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 				observability.RequestErrors.WithLabelValues("mqtt", "publish").Inc()
 				return
 			}
+		case *PubackPacket:
+			state.ackOutgoing(v.PacketID)
+			continue
 		case *PingreqPacket:
 			state.writeMu.Lock()
-			_ = writePingresp(conn, &PingrespPacket{})
+			err := writePingresp(conn, &PingrespPacket{})
 			state.writeMu.Unlock()
+
+			if err != nil {
+				observability.RequestErrors.WithLabelValues("mqtt", "pingresp").Inc()
+				return
+			}
 		case *DisconnectPacket:
 			s.handleDisconnect(state)
 			return
@@ -139,9 +244,14 @@ type clientState struct {
 	group      string
 
 	broker BrokerAPI
+	opts   ServerOptions
 
 	mu   sync.Mutex
 	subs map[string]subscriptionState // mqtt topic -> state
+
+	nextPacketID     uint16
+	outboundQoS1Acks map[uint16]outboundQoS1
+	inboundQoS1Seen  map[uint16]uint64
 
 	writeMu sync.Mutex
 }
@@ -154,58 +264,75 @@ type subscriptionState struct {
 	stop      context.CancelFunc
 }
 
+type outboundQoS1 struct {
+	acked chan struct{}
+}
+
 func (s *Server) handleConnect(state *clientState, pkt *ConnectPacket) error {
 	if pkt.ClientID == "" {
 		return fmt.Errorf("client id required")
 	}
+
 	state.clientID = pkt.ClientID
 	state.group = pkt.ClientID // group == clientID for MQTT clients
 	state.cleanStart = pkt.CleanStart
 	state.keepAlive = time.Duration(pkt.KeepAliveSec) * time.Second
 	resp := &ConnackPacket{SessionPresent: false, ReturnCode: 0}
+
 	state.writeMu.Lock()
 	defer state.writeMu.Unlock()
+
 	return writeConnack(state.conn, resp)
 }
 
 func (s *Server) handleSubscribe(state *clientState, pkt *SubscribePacket) error {
 	ack := &SubackPacket{PacketID: pkt.PacketID}
+
 	granted := make([]byte, len(pkt.Topics))
 	for i, sub := range pkt.Topics {
 		if sub.QoS > qos1 {
 			granted[i] = 0x80
 			continue
 		}
+
 		assignments, err := s.broker.JoinGroup(state.ctx, state.group, state.clientID, []string{sub.Filter})
 		if err != nil {
 			granted[i] = 0x80
 			continue
 		}
+
 		partitions := assignments[sub.Filter]
 		if len(partitions) == 0 {
 			granted[i] = 0x80
 			continue
 		}
+
 		granted[i] = sub.QoS
 		for _, p := range partitions {
 			state.trackSubscription(sub.Filter, sub.Filter, p, sub.QoS)
 		}
 	}
+
 	ack.Granted = granted
+
 	state.writeMu.Lock()
 	defer state.writeMu.Unlock()
+
 	if err := writeSuback(state.conn, ack); err != nil {
 		return err
 	}
+
 	return nil
 }
 
 func (state *clientState) trackSubscription(mqttTopic, topic string, partition int, qos byte) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
+
 	if old, ok := state.subs[mqttTopic]; ok && old.stop != nil {
 		old.stop()
 	}
+
 	ctx, cancel := context.WithCancel(state.ctx)
 	sub := subscriptionState{
 		topic:     topic,
@@ -214,6 +341,7 @@ func (state *clientState) trackSubscription(mqttTopic, topic string, partition i
 		stop:      cancel,
 	}
 	sub.offset = state.initialOffsetForSub(ctx, topic, partition)
+
 	state.subs[mqttTopic] = sub
 	go state.consumeLoop(ctx, mqttTopic, sub)
 }
@@ -225,80 +353,123 @@ func (state *clientState) initialOffsetForSub(ctx context.Context, topic string,
 		if err != nil {
 			return 0
 		}
+
 		return latest + 1
 	}
 	// Resume mode: start from max(earliest, committed+1).
 	earliest, _, errEarliest := state.broker.ListOffsets(ctx, topic, partition)
 	committed, errCommitted := state.broker.FetchCommitted(ctx, state.group, topic, partition)
+
 	start := earliest
 	if errCommitted == nil && committed+1 > start {
 		start = committed + 1
 	}
+
 	if errEarliest != nil {
 		return 0
 	}
+
 	return start
 }
 
 func (state *clientState) consumeLoop(ctx context.Context, mqttTopic string, sub subscriptionState) {
 	offset := sub.offset
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
+
 		recs, err := state.broker.Fetch(ctx, sub.topic, sub.partition, offset, 64<<10)
 		if err != nil {
 			observability.RequestErrors.WithLabelValues("mqtt", "fetch").Inc()
-			time.Sleep(100 * time.Millisecond)
+
+			if !waitForDuration(ctx, state.opts.FetchErrorBackoff) {
+				return
+			}
+
 			continue
 		}
+
 		if len(recs) == 0 {
-			time.Sleep(50 * time.Millisecond)
+			if !waitForDuration(ctx, state.opts.EmptyPollInterval) {
+				return
+			}
+
 			continue
 		}
+
 		for _, r := range recs {
 			pkt := &PublishPacket{
 				Topic:   mqttTopic,
 				QoS:     sub.qos,
 				Payload: r.Value,
 			}
-			state.writeMu.Lock()
-			_ = writePublish(state.conn, pkt)
-			state.writeMu.Unlock()
-			// Commit offset after sending to client.
-			if err := state.broker.CommitOffset(ctx, state.group, sub.topic, sub.partition, r.Offset); err != nil {
-				observability.RequestErrors.WithLabelValues("mqtt", "commit").Inc()
-				slog.Error("mqtt commit failed", "topic", sub.topic, "partition", sub.partition, "offset", r.Offset, "err", err)
+
+			if sub.qos == qos1 {
+				if err := state.sendQoS1AndWaitAck(ctx, pkt, sub, r.Offset); err != nil {
+					return
+				}
+			} else {
+				if err := state.writePublish(pkt); err != nil {
+					return
+				}
+
+				if err := state.commitWithRetry(ctx, sub.topic, sub.partition, r.Offset); err != nil {
+					return
+				}
 			}
+
 			offset = r.Offset + 1
 		}
 	}
 }
 
 func (s *Server) handlePublish(state *clientState, pkt *PublishPacket) error {
+	if pkt.QoS == qos1 && pkt.Duplicate && state.isDuplicateIncomingQoS1(pkt) {
+		state.writeMu.Lock()
+		defer state.writeMu.Unlock()
+
+		return writePuback(state.conn, &PubackPacket{PacketID: pkt.PacketID})
+	}
+
 	internalTopic, partition, err := s.mapTopic(state.ctx, pkt.Topic, state.clientID)
 	if err != nil {
 		return err
 	}
+
 	record := api.Record{Value: pkt.Payload}
 	if _, err := s.broker.Produce(state.ctx, internalTopic, partition, []api.Record{record}); err != nil {
 		return err
 	}
+
 	if pkt.QoS == qos1 {
+		state.markIncomingQoS1(pkt)
+
 		state.writeMu.Lock()
 		defer state.writeMu.Unlock()
+
 		return writePuback(state.conn, &PubackPacket{PacketID: pkt.PacketID})
 	}
+
 	return nil
 }
 
 func (s *Server) handleDisconnect(state *clientState) {
 	if state.group != "" && state.clientID != "" {
-		_ = s.broker.LeaveGroup(context.Background(), state.group, state.clientID)
+		if err := s.broker.LeaveGroup(state.ctx, state.group, state.clientID); err != nil {
+			observability.RequestErrors.WithLabelValues("mqtt", "leave_group").Inc()
+			slog.Error("mqtt leave group failed", "group", state.group, "member_id", state.clientID, "err", err)
+		}
 	}
+
 	state.cancel()
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
 	for _, sub := range state.subs {
 		if sub.stop != nil {
 			sub.stop()
@@ -306,24 +477,209 @@ func (s *Server) handleDisconnect(state *clientState) {
 	}
 }
 
+func (state *clientState) sendQoS1AndWaitAck(
+	ctx context.Context,
+	pkt *PublishPacket,
+	sub subscriptionState,
+	offset api.Offset,
+) error {
+	packetID, acked := state.registerOutgoing()
+	pkt.PacketID = packetID
+	pkt.Duplicate = false
+
+	if err := state.writePublish(pkt); err != nil {
+		state.cancelOutgoing(packetID)
+
+		return err
+	}
+
+	retryTimer := time.NewTimer(state.opts.QoS1RetryInterval)
+	defer retryTimer.Stop()
+
+	commitAfterAck := func() error {
+		commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), state.opts.CommitFinalTimeout)
+		defer commitCancel()
+
+		return state.commitWithRetry(commitCtx, sub.topic, sub.partition, offset)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			state.cancelOutgoing(packetID)
+
+			return ctx.Err()
+		case <-acked:
+			return commitAfterAck()
+		case <-retryTimer.C:
+			// Prefer a late ACK over an unnecessary duplicate resend.
+			select {
+			case <-acked:
+				return commitAfterAck()
+			default:
+			}
+
+			pkt.Duplicate = true
+			if err := state.writePublish(pkt); err != nil {
+				state.cancelOutgoing(packetID)
+
+				return err
+			}
+
+			retryTimer.Reset(state.opts.QoS1RetryInterval)
+		}
+	}
+}
+
+func (state *clientState) writePublish(pkt *PublishPacket) error {
+	state.writeMu.Lock()
+	defer state.writeMu.Unlock()
+
+	return writePublish(state.conn, pkt)
+}
+
+func (state *clientState) commitWithRetry(ctx context.Context, topic string, partition int, offset api.Offset) error {
+	for {
+		if err := state.broker.CommitOffset(ctx, state.group, topic, partition, offset); err != nil {
+			observability.RequestErrors.WithLabelValues("mqtt", "commit").Inc()
+			slog.Error("mqtt commit failed", "topic", topic, "partition", partition, "offset", offset, "err", err)
+
+			if !waitForDuration(ctx, state.opts.CommitRetryBackoff) {
+				return ctx.Err()
+			}
+
+			continue
+		}
+
+		return nil
+	}
+}
+
+func (state *clientState) registerOutgoing() (uint16, <-chan struct{}) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	for {
+		state.nextPacketID++
+		if state.nextPacketID == 0 {
+			continue
+		}
+
+		if _, exists := state.outboundQoS1Acks[state.nextPacketID]; exists {
+			continue
+		}
+
+		ackCh := make(chan struct{})
+		state.outboundQoS1Acks[state.nextPacketID] = outboundQoS1{
+			acked: ackCh,
+		}
+
+		return state.nextPacketID, ackCh
+	}
+}
+
+func (state *clientState) ackOutgoing(packetID uint16) {
+	state.mu.Lock()
+
+	pending, ok := state.outboundQoS1Acks[packetID]
+
+	if ok {
+		delete(state.outboundQoS1Acks, packetID)
+	}
+
+	state.mu.Unlock()
+
+	if ok {
+		close(pending.acked)
+	}
+}
+
+func (state *clientState) cancelOutgoing(packetID uint16) {
+	state.mu.Lock()
+	delete(state.outboundQoS1Acks, packetID)
+	state.mu.Unlock()
+}
+
+func (state *clientState) isDuplicateIncomingQoS1(pkt *PublishPacket) bool {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	fp, ok := state.inboundQoS1Seen[pkt.PacketID]
+
+	return ok && fp == publishFingerprint(pkt.Topic, pkt.Payload)
+}
+
+func (state *clientState) markIncomingQoS1(pkt *PublishPacket) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	state.inboundQoS1Seen[pkt.PacketID] = publishFingerprint(pkt.Topic, pkt.Payload)
+}
+
+func waitForDuration(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			return true
+		}
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func publishFingerprint(topic string, payload []byte) uint64 {
+	hash := fnv.New64a()
+	if _, err := hash.Write([]byte(topic)); err != nil {
+		return 0
+	}
+
+	if _, err := hash.Write(payload); err != nil {
+		return 0
+	}
+
+	return hash.Sum64()
+}
+
 func (s *Server) mapTopic(ctx context.Context, mqttTopic, clientID string) (string, int, error) {
 	meta, err := s.broker.Metadata(ctx, []string{mqttTopic})
 	if err != nil {
 		return "", 0, err
 	}
+
 	var partitions []int
+
 	for _, m := range meta {
 		if m.Replica.Topic == mqttTopic {
 			partitions = append(partitions, m.Replica.Partition)
 		}
 	}
+
 	if len(partitions) == 0 {
 		return "", 0, fmt.Errorf("topic not found")
 	}
+
 	sort.Ints(partitions)
+
 	hash := fnv.New32a()
-	hash.Write([]byte(mqttTopic))
-	hash.Write([]byte(clientID))
+	if _, err := hash.Write([]byte(mqttTopic)); err != nil {
+		return "", 0, err
+	}
+
+	if _, err := hash.Write([]byte(clientID)); err != nil {
+		return "", 0, err
+	}
+
 	pid := int(hash.Sum32()) % len(partitions)
+
 	return mqttTopic, partitions[pid], nil
 }

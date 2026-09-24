@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"sync/atomic"
+	"sync"
 
 	"github.com/c4erries/wave-mq/internal/broker"
 	"github.com/c4erries/wave-mq/internal/observability"
@@ -17,47 +17,76 @@ import (
 type BrokerAPI interface {
 	CreateTopic(ctx context.Context, name string, cfg api.TopicConfig) error
 	Produce(ctx context.Context, topic string, partition int, records []api.Record) (api.Offset, error)
+	ProduceByKey(ctx context.Context, topic string, key []byte, records []api.Record) (int, api.Offset, error)
 	Fetch(ctx context.Context, topic string, partition int, offset api.Offset, maxBytes int32) ([]api.Record, error)
 	ListOffsets(ctx context.Context, topic string, partition int) (api.Offset, api.Offset, error)
-	CommitOffset(ctx context.Context, group string, topic string, partition int, offset api.Offset) error
-	FetchCommitted(ctx context.Context, group string, topic string, partition int) (api.Offset, error)
+	CommitOffset(ctx context.Context, group, topic string, partition int, offset api.Offset) error
+	FetchCommitted(ctx context.Context, group, topic string, partition int) (api.Offset, error)
 	Metadata(ctx context.Context, topics []string) ([]api.PartitionMetadata, error)
 }
 
 // Server hosts the custom binary protocol over TCP.
 type Server struct {
-	addr    string
-	broker  BrokerAPI
-	ln      net.Listener
-	started bool
-	corrID  int32
+	mu       sync.RWMutex
+	addr     string
+	broker   BrokerAPI
+	handlers map[api.APIKey]requestHandler
+	ln       net.Listener
+	started  bool
 }
 
+type requestHandler func(context.Context, []byte) ([]byte, error)
+
 // NewServer constructs a TCP server bound to addr.
-func NewServer(addr string, broker BrokerAPI) (*Server, error) {
-	if broker == nil {
+func NewServer(addr string, brokerAPI BrokerAPI) (*Server, error) {
+	if brokerAPI == nil {
 		return nil, fmt.Errorf("broker is required")
 	}
+
 	if addr == "" {
 		return nil, fmt.Errorf("addr is required")
 	}
-	return &Server{addr: addr, broker: broker}, nil
+
+	srv := &Server{addr: addr, broker: brokerAPI}
+	srv.handlers = srv.buildHandlers()
+
+	return srv, nil
 }
 
 // ListenAndServe starts accepting client connections until ctx is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
+	s.mu.Lock()
 	if s.started {
+		s.mu.Unlock()
 		return fmt.Errorf("server already started")
 	}
+
+	s.started = true
+	s.mu.Unlock()
+
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
+		s.mu.Lock()
+		s.started = false
+		s.mu.Unlock()
+
 		return err
 	}
+
+	s.mu.Lock()
 	s.ln = ln
-	s.started = true
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.ln = nil
+		s.started = false
+		s.mu.Unlock()
+	}()
 
 	go func() {
 		<-ctx.Done()
+
 		_ = ln.Close()
 	}()
 
@@ -69,55 +98,79 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 				return nil
 			default:
 			}
+
 			return err
 		}
+
 		go s.handleConnection(conn)
 	}
 }
 
 // Close stops accepting new connections.
 func (s *Server) Close() error {
-	if s.ln != nil {
-		return s.ln.Close()
+	s.mu.RLock()
+	ln := s.ln
+	s.mu.RUnlock()
+
+	if ln != nil {
+		return ln.Close()
 	}
+
 	return nil
 }
 
 // Addr returns the listener address after ListenAndServe has started.
 func (s *Server) Addr() net.Addr {
-	if s.ln == nil {
+	s.mu.RLock()
+	ln := s.ln
+	s.mu.RUnlock()
+
+	if ln == nil {
 		return nil
 	}
-	return s.ln.Addr()
-}
 
-// frame is a placeholder for length-prefixed protocol frames.
-type frame struct {
-	APIKey api.APIKey
-	// TODO: add version, correlation ID, flags and payload buffer.
+	addr := ln.Addr()
+
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return addr
+	}
+
+	copied := *tcp
+	if tcp.IP != nil {
+		copied.IP = append(net.IP(nil), tcp.IP...)
+	}
+
+	return &copied
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
+
 	for {
 		apiKey, corr, payload, err := decodeRequestFrame(conn)
 		if err != nil {
 			if err == io.EOF {
 				return
 			}
+
 			observability.RequestErrors.WithLabelValues("netproto", "decode_frame").Inc()
+
 			return
 		}
+
 		respPayload, err := s.dispatch(conn, apiKey, payload)
 		if err != nil {
 			observability.RequestErrors.WithLabelValues("netproto", "encode_response").Inc()
 			return
 		}
+
 		frame, err := encodeResponseFrame(apiKey, corr, respPayload)
 		if err != nil {
 			observability.RequestErrors.WithLabelValues("netproto", "encode_response").Inc()
 			return
 		}
+
 		if _, err := conn.Write(frame); err != nil {
 			return
 		}
@@ -125,114 +178,238 @@ func (s *Server) handleConnection(conn net.Conn) {
 }
 
 func (s *Server) dispatch(conn net.Conn, apiKey api.APIKey, payload []byte) ([]byte, error) {
+	_ = conn
+
 	ctx := context.Background()
-	switch apiKey {
-	case api.APIKeyCreateTopic:
-		req, err := decodeCreateTopicRequest(payload)
-		if err != nil {
-			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
-			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
-		}
-		err = s.broker.CreateTopic(ctx, req.Topic, api.TopicConfig{Partitions: req.Partitions, ReplicationFactor: req.ReplicationFactor})
-		resp := &CreateTopicResponse{}
-		if err != nil {
-			resp.Error = mapError(err)
-			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
-		}
-		return encodeCreateTopicResponse(resp)
-	case api.APIKeyProduce:
-		req, err := decodeProduceRequest(payload)
-		if err != nil {
-			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
-			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
-		}
-		base, err := s.broker.Produce(ctx, req.Topic, req.Partition, req.Records)
-		resp := &ProduceResponse{BaseOffset: base}
-		if err != nil {
-			resp.Error = mapError(err)
-			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
-		}
-		return encodeProduceResponse(resp)
-	case api.APIKeyFetch:
-		req, err := decodeFetchRequest(payload)
-		if err != nil {
-			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
-			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
-		}
-		recs, err := s.broker.Fetch(ctx, req.Topic, req.Partition, req.Offset, req.MaxBytes)
-		resp := &FetchResponse{Records: recs}
-		if err != nil {
-			resp.Error = mapError(err)
-			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
-		} else {
-			_, latest, offErr := s.broker.ListOffsets(ctx, req.Topic, req.Partition)
-			if offErr == nil {
-				resp.HighWatermark = latest
-			}
-		}
-		return encodeFetchResponse(resp)
-	case api.APIKeyMetadata:
-		req, err := decodeMetadataRequest(payload)
-		if err != nil {
-			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
-			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
-		}
-		md, err := s.broker.Metadata(ctx, req.Topics)
-		resp := &MetadataResponse{Partitions: md}
-		if err != nil {
-			resp.Error = mapError(err)
-			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
-		}
-		return encodeMetadataResponse(resp)
-	case api.APIKeyPing:
-		req, err := decodePingRequest(payload)
-		if err != nil {
-			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
-			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
-		}
-		_ = req
-		return encodePingResponse(&PingResponse{Error: api.ErrNone})
-	case api.APIKeyCommitOffset:
-		req, err := decodeCommitOffsetRequest(payload)
-		if err != nil {
-			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
-			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
-		}
-		resp := &CommitOffsetResponse{}
-		if err := s.broker.CommitOffset(ctx, req.Group, req.Topic, req.Partition, req.Offset); err != nil {
-			resp.Error = mapError(err)
-			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
-		}
-		return encodeCommitOffsetResponse(resp)
-	case api.APIKeyFetchCommitted:
-		req, err := decodeFetchCommittedRequest(payload)
-		if err != nil {
-			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
-			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
-		}
-		offset, err := s.broker.FetchCommitted(ctx, req.Group, req.Topic, req.Partition)
-		resp := &FetchCommittedResponse{Offset: offset}
-		if err != nil {
-			resp.Error = mapError(err)
-			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
-		}
-		return encodeFetchCommittedResponse(resp)
-	case api.APIKeyListOffsets:
-		req, err := decodeListOffsetsRequest(payload)
-		if err != nil {
-			observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
-			return s.errorResponseForKey(apiKey, api.ErrInvalidRequest)
-		}
-		earliest, latest, err := s.broker.ListOffsets(ctx, req.Topic, req.Partition)
-		resp := &ListOffsetsResponse{Earliest: earliest, Latest: latest}
-		if err != nil {
-			resp.Error = mapError(err)
-			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
-		}
-		return encodeListOffsetsResponse(resp)
-	default:
+
+	handler, ok := s.handlers[apiKey]
+	if !ok {
 		return nil, fmt.Errorf("unknown api key %d", apiKey)
 	}
+
+	return handler(ctx, payload)
+}
+
+func (s *Server) buildHandlers() map[api.APIKey]requestHandler {
+	return map[api.APIKey]requestHandler{
+		api.APIKeyCreateTopic:    s.handleCreateTopic,
+		api.APIKeyProduce:        s.handleProduce,
+		api.APIKeyProduceByKey:   s.handleProduceByKey,
+		api.APIKeyFetch:          s.handleFetch,
+		api.APIKeyMetadata:       s.handleMetadata,
+		api.APIKeyPing:           s.handlePing,
+		api.APIKeyCommitOffset:   s.handleCommitOffset,
+		api.APIKeyFetchCommitted: s.handleFetchCommitted,
+		api.APIKeyListOffsets:    s.handleListOffsets,
+	}
+}
+
+func (s *Server) handleCreateTopic(ctx context.Context, payload []byte) ([]byte, error) {
+	decoded, earlyResp, err := decodeRequest(api.APIKeyCreateTopic, payload, decodeCreateTopicRequest, s.errorResponseForKey)
+	if decoded == nil || err != nil {
+		return earlyResp, err
+	}
+
+	req := decoded.(*CreateTopicRequest)
+
+	resp := &CreateTopicResponse{}
+
+	err = s.broker.CreateTopic(ctx, req.Topic, api.TopicConfig{Partitions: req.Partitions, ReplicationFactor: req.ReplicationFactor})
+	if err != nil {
+		resp.Error = mapError(err)
+
+		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
+	}
+
+	return encodeCreateTopicResponse(resp)
+}
+
+func (s *Server) handleProduce(ctx context.Context, payload []byte) ([]byte, error) {
+	decoded, earlyResp, err := decodeRequest(api.APIKeyProduce, payload, decodeProduceRequest, s.errorResponseForKey)
+	if decoded == nil || err != nil {
+		return earlyResp, err
+	}
+
+	req := decoded.(*ProduceRequest)
+
+	base, err := s.broker.Produce(ctx, req.Topic, req.Partition, req.Records)
+
+	resp := &ProduceResponse{BaseOffset: base}
+	if err != nil {
+		resp.Error = mapError(err)
+
+		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
+	}
+
+	return encodeProduceResponse(resp)
+}
+
+func (s *Server) handleProduceByKey(ctx context.Context, payload []byte) ([]byte, error) {
+	decoded, earlyResp, err := decodeRequest(api.APIKeyProduceByKey, payload, decodeProduceByKeyRequest, s.errorResponseForKey)
+	if decoded == nil || err != nil {
+		return earlyResp, err
+	}
+
+	req := decoded.(*ProduceByKeyRequest)
+
+	partition, base, err := s.broker.ProduceByKey(ctx, req.Topic, req.Key, req.Records)
+
+	resp := &ProduceByKeyResponse{Partition: partition, BaseOffset: base}
+	if err != nil {
+		resp.Error = mapError(err)
+
+		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
+	}
+
+	return encodeProduceByKeyResponse(resp)
+}
+
+func (s *Server) handleFetch(ctx context.Context, payload []byte) ([]byte, error) {
+	decoded, earlyResp, err := decodeRequest(api.APIKeyFetch, payload, decodeFetchRequest, s.errorResponseForKey)
+	if decoded == nil || err != nil {
+		return earlyResp, err
+	}
+
+	req := decoded.(*FetchRequest)
+
+	recs, err := s.broker.Fetch(ctx, req.Topic, req.Partition, req.Offset, req.MaxBytes)
+
+	resp := &FetchResponse{Records: recs}
+	if err != nil {
+		resp.Error = mapError(err)
+
+		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
+	} else {
+		_, latest, offErr := s.broker.ListOffsets(ctx, req.Topic, req.Partition)
+		if offErr == nil {
+			resp.HighWatermark = latest
+		} else {
+			// Keep fetch successful even if latest-offset lookup failed, but avoid
+			// returning the zero-value HWM that can regress follower progress.
+			resp.HighWatermark = fallbackFetchHighWatermark(req.Offset, recs)
+
+			observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
+		}
+	}
+
+	return encodeFetchResponse(resp)
+}
+
+func fallbackFetchHighWatermark(requestOffset api.Offset, records []api.Record) api.Offset {
+	if n := len(records); n > 0 {
+		return records[n-1].Offset
+	}
+
+	if requestOffset <= 0 {
+		return -1
+	}
+
+	return requestOffset - 1
+}
+
+func (s *Server) handleMetadata(ctx context.Context, payload []byte) ([]byte, error) {
+	decoded, earlyResp, err := decodeRequest(api.APIKeyMetadata, payload, decodeMetadataRequest, s.errorResponseForKey)
+	if decoded == nil || err != nil {
+		return earlyResp, err
+	}
+
+	req := decoded.(*MetadataRequest)
+
+	md, err := s.broker.Metadata(ctx, req.Topics)
+
+	resp := &MetadataResponse{Partitions: md}
+	if err != nil {
+		resp.Error = mapError(err)
+
+		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
+	}
+
+	return encodeMetadataResponse(resp)
+}
+
+func (s *Server) handlePing(_ context.Context, payload []byte) ([]byte, error) {
+	decoded, earlyResp, err := decodeRequest(api.APIKeyPing, payload, decodePingRequest, s.errorResponseForKey)
+	if decoded == nil || err != nil {
+		return earlyResp, err
+	}
+
+	return encodePingResponse(&PingResponse{Error: api.ErrNone})
+}
+
+func (s *Server) handleCommitOffset(ctx context.Context, payload []byte) ([]byte, error) {
+	decoded, earlyResp, err := decodeRequest(api.APIKeyCommitOffset, payload, decodeCommitOffsetRequest, s.errorResponseForKey)
+	if decoded == nil || err != nil {
+		return earlyResp, err
+	}
+
+	req := decoded.(*CommitOffsetRequest)
+
+	resp := &CommitOffsetResponse{}
+	if err := s.broker.CommitOffset(ctx, req.Group, req.Topic, req.Partition, req.Offset); err != nil {
+		resp.Error = mapError(err)
+
+		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
+	}
+
+	return encodeCommitOffsetResponse(resp)
+}
+
+func (s *Server) handleFetchCommitted(ctx context.Context, payload []byte) ([]byte, error) {
+	decoded, earlyResp, err := decodeRequest(api.APIKeyFetchCommitted, payload, decodeFetchCommittedRequest, s.errorResponseForKey)
+	if decoded == nil || err != nil {
+		return earlyResp, err
+	}
+
+	req := decoded.(*FetchCommittedRequest)
+
+	offset, err := s.broker.FetchCommitted(ctx, req.Group, req.Topic, req.Partition)
+
+	resp := &FetchCommittedResponse{Offset: offset}
+	if err != nil {
+		resp.Error = mapError(err)
+
+		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
+	}
+
+	return encodeFetchCommittedResponse(resp)
+}
+
+func (s *Server) handleListOffsets(ctx context.Context, payload []byte) ([]byte, error) {
+	decoded, earlyResp, err := decodeRequest(api.APIKeyListOffsets, payload, decodeListOffsetsRequest, s.errorResponseForKey)
+	if decoded == nil || err != nil {
+		return earlyResp, err
+	}
+
+	req := decoded.(*ListOffsetsRequest)
+
+	earliest, latest, err := s.broker.ListOffsets(ctx, req.Topic, req.Partition)
+
+	resp := &ListOffsetsResponse{Earliest: earliest, Latest: latest}
+	if err != nil {
+		resp.Error = mapError(err)
+
+		observability.RequestErrors.WithLabelValues("netproto", "broker_call").Inc()
+	}
+
+	return encodeListOffsetsResponse(resp)
+}
+
+func decodeRequest[Req any](
+	apiKey api.APIKey,
+	payload []byte,
+	decodeFn func([]byte) (*Req, error),
+	errorRespFn func(api.APIKey, api.ErrorCode) ([]byte, error),
+) (any, []byte, error) {
+	req, err := decodeFn(payload)
+	if err != nil {
+		observability.RequestErrors.WithLabelValues("netproto", "decode_request").Inc()
+
+		resp, respErr := errorRespFn(apiKey, api.ErrInvalidRequest)
+
+		return nil, resp, respErr
+	}
+
+	return req, nil, nil
 }
 
 func (s *Server) errorResponseForKey(apiKey api.APIKey, code api.ErrorCode) ([]byte, error) {
@@ -241,6 +418,8 @@ func (s *Server) errorResponseForKey(apiKey api.APIKey, code api.ErrorCode) ([]b
 		return encodeCreateTopicResponse(&CreateTopicResponse{Error: code})
 	case api.APIKeyProduce:
 		return encodeProduceResponse(&ProduceResponse{BaseOffset: -1, Error: code})
+	case api.APIKeyProduceByKey:
+		return encodeProduceByKeyResponse(&ProduceByKeyResponse{Partition: -1, BaseOffset: -1, Error: code})
 	case api.APIKeyFetch:
 		return encodeFetchResponse(&FetchResponse{Records: nil, Error: code})
 	case api.APIKeyMetadata:
@@ -256,10 +435,6 @@ func (s *Server) errorResponseForKey(apiKey api.APIKey, code api.ErrorCode) ([]b
 	default:
 		return encodePingResponse(&PingResponse{Error: code})
 	}
-}
-
-func (s *Server) nextCorrID() int32 {
-	return atomic.AddInt32(&s.corrID, 1)
 }
 
 func mapError(err error) api.ErrorCode {
